@@ -68,6 +68,45 @@ a single result object (older releases) or the array of session messages
 (2.1.x), whose last `type: result` entry is the outcome. A result whose `subtype` is not
 `success` (e.g. `error_max_turns`), `is_error: true`, or a non-zero exit is FAILED; reported cost is kept.
 
+## Launch profile and plan usage
+
+Each launch is a full harness session, so its fixed startup cost is paid per
+builder round and per review. The `claude-code` preset launches **lean** sessions:
+`--strict-mcp-config` (no MCP servers) and `--disable-slash-commands` (no skills).
+Measured on Claude Code 2.1: about 37k input tokens before any work with the
+user's full setup, about 5k lean.
+
+Review launches get an **allowlist** of tools, `--tools Read,Grep,Glob`, as
+the final arguments. A new editing or shell tool in a later harness release
+stays excluded by default. The launch line is **locked**. For `claude-code`,
+`.daedalus.yml` may set only `model`, `review_model` and `args`:
+
+- `args` is itself an allowlist (`--verbose`, `--max-turns N`, `--fallback-model M`), and
+  values are validated. These args are appended to **builder** launches only and never
+  reach a review.
+- Model names are validated and passed as one `--model=<name>` argument.
+- Anything else (`argv`, `read_only_args`, `prompt_via`, MCP, plugin, settings or permission
+  flags) fails closed with a configuration error.
+
+For the other presets (`codex`, `aider`), the read-only profile can't be
+overridden either, and `model`/`review_model` are refused. For a **custom**
+`argv` adapter, read-only enforcement is whatever its `read_only_args` provide.
+Daedalus can't vouch for an unknown CLI's flags. The lifecycle still captures
+the candidate before and after every review and discards any review that
+changed the working tree.
+
+Models are chosen per role:
+
+```yaml
+adapter:
+  name: claude-code
+  model: opus          # builder launches (default: the CLI's default model)
+  review_model: sonnet # review launches (default: `model`)
+```
+
+With a claude.ai subscription login, launched sessions draw on the plan's usage
+limits. The reported `total_cost_usd` is an API-equivalent estimate, not a charge.
+
 ## Rules for adapter authors
 
 1. Never report `COMPLETED` for a session that didn't finish. When unsure, report `FAILED`.

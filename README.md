@@ -75,7 +75,9 @@ mandatory. A mode can add requirements but can never remove them.
 ```yaml
 enabled: true
 mode: gate
-adapter: claude-code        # used by `daedalus run` / `daedalus review`
+adapter:                    # used by `daedalus run` / `daedalus review`
+  name: claude-code          # lean sessions: no MCP servers or skills; reviewers are read-only
+  review_model: sonnet       # optional per-role models (`model:` for the builder)
 checks:
   tests: python -m pytest -q
   typecheck: {command: [mypy, src]}

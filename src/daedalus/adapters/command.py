@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import uuid
@@ -38,11 +39,30 @@ _BASE_CAPS = Capabilities(
     limitations=("sessions are not resumable after an orchestrator restart",),
 )
 
+# Reviewers get exactly these tools: an allowlist, so a new editing or shell tool
+# in a future harness release is excluded by default rather than by a denylist.
+CLAUDE_REVIEW_TOOLS = "Read,Grep,Glob"
+# A locked preset's launch line comes from the preset alone. Config may set only
+# these keys, and `args` may contain only these flags (an allowlist: anything that
+# could add tools, MCP servers, plugins, settings or permissions is refused).
+_LOCKED_CONFIG_KEYS = frozenset({"name", "model", "review_model", "args"})
+# flag -> validator for its single value (None: the flag takes no value). Only
+# fixed-arity flags belong here: a list-valued flag could swallow later arguments.
+_LOCKED_ARG_FLAGS: dict[str, Any] = {
+    "--verbose": None,
+    "--max-turns": re.compile(r"^[1-9][0-9]{0,3}$"),
+    "--fallback-model": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$"),
+}
+_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$")
+
 PRESETS: dict[str, dict[str, Any]] = {
     "claude-code": {
         "argv": ["claude", "-p", "--output-format", "json"],
-        "args": ["--permission-mode", "acceptEdits"],
-        "read_only_args": ["--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"],
+        # Lean sessions: no MCP servers, no skills or slash commands. The harness's
+        # own setup otherwise loads ~37k input tokens into every launch.
+        "args": ["--permission-mode", "acceptEdits", "--strict-mcp-config", "--disable-slash-commands"],
+        "read_only_args": ["--tools", CLAUDE_REVIEW_TOOLS],
+        "locked_read_only": True,
         "prompt_via": "stdin",
         "parse": "claude-json",
         "capabilities": replace(_BASE_CAPS, cost_reporting=True),
@@ -97,6 +117,14 @@ def claude_result(text: str) -> dict[str, Any] | None:
     return doc if isinstance(doc, dict) and doc.get("type") == "result" else None
 
 
+def _model(value: Any, adapter: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _MODEL_NAME.match(value):
+        raise CapabilityError(f"adapter {adapter!r}: invalid model name {value!r}")
+    return value
+
+
 class CommandAdapter(Adapter):
     def __init__(
         self,
@@ -108,6 +136,9 @@ class CommandAdapter(Adapter):
         prompt_via: str = "stdin",
         parse: str = "text",
         capabilities: Capabilities = _BASE_CAPS,
+        model: str | None = None,
+        review_model: str | None = None,
+        builder_args: list[str] | None = None,
     ):
         if prompt_via not in ("stdin", "arg", "message"):
             raise CapabilityError(f"prompt_via must be stdin, arg or message (got {prompt_via!r})")
@@ -118,12 +149,22 @@ class CommandAdapter(Adapter):
         self.prompt_via = prompt_via
         self.parse = parse
         self.capabilities = capabilities
+        self.model = model
+        self.review_model = review_model or model
+        self.builder_args = list(builder_args or [])
         self._procs: dict[str, subprocess.Popen[bytes]] = {}
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any]) -> CommandAdapter:
         name = cfg.get("name", "claude-code")
         preset = PRESETS.get(name, {})
+        if preset.get("locked_read_only"):
+            return cls._locked(name, preset, cfg)
+        if preset and "read_only_args" in cfg:
+            raise CapabilityError(f"adapter {name!r}: the preset's read-only profile cannot be overridden")
+        unsupported = [k for k in ("model", "review_model") if k in cfg]
+        if unsupported:
+            raise CapabilityError(f"adapter {name!r}: {unsupported} are supported only by the claude-code preset")
         argv = cfg.get("argv") or preset.get("argv")
         if not argv:
             raise CapabilityError(
@@ -139,11 +180,59 @@ class CommandAdapter(Adapter):
             capabilities=preset.get("capabilities", _BASE_CAPS),
         )
 
+    @classmethod
+    def _locked(cls, name: str, preset: dict[str, Any], cfg: dict[str, Any]) -> CommandAdapter:
+        """Presets whose launch line config cannot change (fail closed)."""
+        extra = sorted(set(cfg) - _LOCKED_CONFIG_KEYS)
+        if extra:
+            raise CapabilityError(
+                f"adapter {name!r} has a fixed launch profile; {extra} cannot be set "
+                f"(allowed: {sorted(_LOCKED_CONFIG_KEYS)})"
+            )
+        args = cfg.get("args") or []
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            raise CapabilityError(f"adapter {name!r}: `args` must be a list of strings")
+        i = 0
+        while i < len(args):
+            flag, eq, _ = args[i].partition("=")
+            if flag not in _LOCKED_ARG_FLAGS:
+                raise CapabilityError(
+                    f"adapter {name!r}: `{args[i]}` is not an allowed extra flag "
+                    f"(allowed: {sorted(_LOCKED_ARG_FLAGS)})"
+                )
+            check = _LOCKED_ARG_FLAGS[flag]
+            if check is not None:
+                if eq:
+                    value = args[i].partition("=")[2]
+                else:
+                    i += 1
+                    value = args[i] if i < len(args) else ""
+                if not check.match(value):
+                    raise CapabilityError(f"adapter {name!r}: invalid value {value!r} for `{flag}`")
+            elif eq:
+                raise CapabilityError(f"adapter {name!r}: `{flag}` takes no value")
+            i += 1
+        return cls(
+            name,
+            preset["argv"],
+            args=list(preset.get("args") or ()),
+            builder_args=args,
+            read_only_args=preset.get("read_only_args"),
+            prompt_via=preset.get("prompt_via", "stdin"),
+            parse=preset.get("parse", "text"),
+            capabilities=preset.get("capabilities", _BASE_CAPS),
+            model=_model(cfg.get("model"), name),
+            review_model=_model(cfg.get("review_model"), name),
+        )
+
     def available(self) -> bool:
         return shutil.which(self.argv[0]) is not None
 
     def _command(self, req: AgentRequest) -> tuple[list[str], bytes | None]:
-        cmd = self.argv + self.args + (self.read_only_args if req.read_only else [])
+        # Read-only arguments come last so nothing configurable can follow (and override) them.
+        model = self.review_model if req.read_only else self.model
+        cmd = self.argv + self.args + ([f"--model={model}"] if model else [])
+        cmd += self.read_only_args if req.read_only else self.builder_args
         if self.prompt_via == "stdin":
             return cmd, req.prompt.encode("utf-8")
         if self.prompt_via == "message":
