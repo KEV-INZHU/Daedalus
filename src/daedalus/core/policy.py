@@ -104,6 +104,9 @@ class Policy:
     actions: dict[str, ActionDefinition] = field(default_factory=dict)
     approval_ttl_seconds: float = 86400.0
     allowed_degradations: frozenset[str] = frozenset()
+    # Whether a Plato ruling that overrules a disputed finding resolves it. Off by
+    # default: the ruling is advisory and a human resolves the finding.
+    arbitration_resolves_findings: bool = False
     raw: dict[str, Any] = field(repr=False, compare=False, default_factory=dict)
 
     # ------------------------------------------------------------------ hashing
@@ -151,6 +154,13 @@ def _floors(items: Any, where: str) -> tuple[Floor, ...]:
             raise PolicyError(f"{where}[{i}] needs 'patterns' and 'tier'")
         out.append(Floor(str(f.get("name", f"{where}-{i}")), tuple(f["patterns"]), str(f["tier"])))
     return tuple(out)
+
+
+def _strict_bool(raw: dict[str, Any], key: str) -> bool:
+    value = raw.get(key, False)
+    if not isinstance(value, bool):
+        raise PolicyError(f"{key} must be true or false (got {value!r})")
+    return value
 
 
 def policy_from_dict(raw: dict[str, Any]) -> Policy:
@@ -258,6 +268,7 @@ def policy_from_dict(raw: dict[str, Any]) -> Policy:
         actions=actions,
         approval_ttl_seconds=float(raw.get("approval_ttl_seconds", 86400)),
         allowed_degradations=frozenset(raw.get("allowed_degradations", ())),
+        arbitration_resolves_findings=_strict_bool(raw, "arbitration_resolves_findings"),
         raw=raw,
     )
 

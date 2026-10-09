@@ -73,6 +73,28 @@ threads; every audit-log write stays on the orchestrator thread.
 through `Ariadne.integrate`, which checks ownership, base hashes, contract
 version and conflicts with already-integrated work.
 
+## Findings, disputes and arbitration
+
+A review finding is open until the perspective that raised it resolves it in a
+later review, a human with `attest` authority resolves it, or arbitration
+resolves it (below). Findings at a `blocking_severities` level block acceptance
+while open.
+
+Anyone can **dispute** an open finding with a reason (`finding.disputed`).
+`daedalus arbitrate F#` (or the lifecycle, when a Builder reports disputes)
+launches a read-only Plato session. It sees the contract, the diff, the
+evidence, the dispute and every perspective's findings: this is where reviewers'
+independent first-pass conclusions meet. Plato rules `uphold` or `overrule`
+with a rationale (`arbitration.recorded`). Only an `agent:plato:*` principal
+that didn't author the candidate can record a ruling. A malformed ruling, or an
+arbitration that changed the working tree, is recorded as `arbitration.failed`
+and resolves nothing.
+
+An `overrule` resolves the finding only when the pinned policy sets
+`arbitration_resolves_findings: true`. By default the ruling is advisory: the
+finding stays open, its reason is routed to a human, and it names the ruling and
+`daedalus resolve F#`. Arbitration never touches checks, approvals or risk floors.
+
 ## Disposition precedence (spec §5.5)
 
 1. A recorded ACCEPTED is preserved. Later edits are reported but need a new run.

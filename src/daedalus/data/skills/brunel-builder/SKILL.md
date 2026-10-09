@@ -35,6 +35,14 @@ End your reply with exactly one fenced JSON block:
 {"status": "done", "summary": "what changed and why, in two or three sentences"}
 ```
 
+If you believe a review finding from an earlier round is mistaken, you may dispute it instead of
+complying. Plato arbitrates; a dispute is not a way to skip work, and an upheld finding still has to be
+addressed:
+
+```json
+{"status": "done", "summary": "...", "disputes": [{"finding": "F2", "reason": "evidence it is wrong"}]}
+```
+
 If you cannot proceed without a human decision (contradictory criteria, missing access, a check
 that cannot pass for reasons outside scope), use:
 

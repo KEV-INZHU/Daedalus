@@ -123,6 +123,72 @@ def launch_review(
     return rid
 
 
+def arbitrate(
+    ari: Ariadne, run_id: str, finding_id: str, adapter: Adapter, notify: Notify = _quiet
+) -> str | None:
+    """Launch Plato on a disputed finding. Returns `uphold`/`overrule`, or None when the
+    session failed or returned nothing valid (recorded as a failed arbitration)."""
+    state = ari._running(run_id)
+    require(
+        adapter.capabilities,
+        {"launch_agent": True, "structured_results": True, "identity": "launched"},
+        state.policy.allowed_degradations,
+    )
+    f = state.findings.get(finding_id)
+    if f is None or f.resolved_by is not None or not f.disputes:
+        raise ContractError(f"{finding_id} is not an open, disputed finding")
+    cand = ari.record_candidate(run_id, actor=SYSTEM, authored=False, label=f"arbitrate {finding_id}")
+    if f.ruling and f.ruling.get("candidate_id") == cand.candidate_id:
+        raise ContractError(
+            f"{finding_id} was already ruled `{f.ruling.get('decision')}` on this candidate; change the code "
+            "or have a human resolve it"
+        )
+    decision = ari.evaluate(run_id)
+
+    def brief(x: Any) -> dict[str, str]:
+        return {
+            "id": x.finding_id, "severity": x.severity.value, "perspective": x.perspective, "title": x.title,
+            "evidence": x.evidence, "required_change": x.required_change,
+        }
+
+    prompt = prompts.arbitration_prompt(
+        state.contract,
+        brief(f),
+        f.disputes,
+        [brief(x) for x in state.findings.values() if x.finding_id != finding_id and x.resolved_by is None],
+        {k: (v[0].value, v[1]) for k, v in decision.check_states.items()},
+        diff_text(ari.root, cand),
+    )
+    notify(f"Plato is arbitrating {finding_id}")
+    res = adapter.run_agent(
+        AgentRequest(run_id, f"arbitrate-{finding_id}", "plato", prompt, ari.root, REVIEW_TIMEOUT_S, read_only=True)
+    )
+    if res.cost:
+        ari.charge(run_id, cost=res.cost, note=f"arbitrate {finding_id}")
+
+    def failed(why: str) -> None:
+        ari.record_failed_arbitration(run_id, finding_id, why)
+        notify(f"arbitration of {finding_id} failed: {why}")
+
+    if res.status != "COMPLETED":
+        failed(res.error or res.status)
+        return None
+    if ari.capture(ari.state(run_id)).candidate_id != cand.candidate_id:
+        failed("the working tree changed during a read-only arbitration")
+        return None
+    arbiter = f"agent:plato:{(res.session_id or 'session')[:8]}"
+    try:
+        resolved = ari.record_arbitration(
+            run_id, finding_id, arbiter=arbiter, ruling=res.structured or {}, candidate_id=cand.candidate_id
+        )
+    except (ContractError, DaedalusError) as exc:
+        failed(f"invalid ruling: {exc}")
+        return None
+    ruling = ari.state(run_id).findings[finding_id].ruling or {}
+    notify(f"Plato ruled `{ruling.get('decision')}` on {finding_id}" + (" (resolved by policy)" if resolved else ""))
+    return ruling.get("decision")
+
+
 def launch_required_reviews(
     ari: Ariadne, run_id: str, adapter: Adapter, notify: Notify = _quiet
 ) -> list[str]:
@@ -392,6 +458,37 @@ def fan_out_round(
     return {"integrated": sorted(integrated), "failures": failures}
 
 
+def _arbitrate_disputes(
+    ari: Ariadne, run_id: str, built: dict[str, Any], adapter: Adapter, notify: Notify
+) -> list[str]:
+    """Record and arbitrate the disputes a Builder reported. Malformed entries are
+    ignored, findings already ruled on for this candidate are skipped, and a refusal
+    is noted rather than aborting the run."""
+    notes: list[str] = []
+    disputes = built.get("disputes")
+    if not isinstance(disputes, list):
+        return notes
+    for d in disputes:
+        if not isinstance(d, dict):
+            continue
+        fid, why = d.get("finding"), d.get("reason")
+        if not isinstance(fid, str) or not isinstance(why, str) or not why.strip():
+            continue
+        f = ari.state(run_id).findings.get(fid)
+        if f is None or f.resolved_by is not None:
+            continue
+        current = ari.capture(ari.state(run_id)).candidate_id
+        if f.ruling and f.ruling.get("candidate_id") == current:
+            notes.append(f"{fid}: already ruled `{f.ruling.get('decision')}` on this candidate; dispute ignored")
+            continue
+        try:
+            ari.dispute(run_id, fid, actor=built["_principal"], reason=why)
+            arbitrate(ari, run_id, fid, adapter, notify)
+        except DaedalusError as exc:
+            notes.append(f"arbitration of {fid} skipped: {exc}")
+    return notes
+
+
 def drive(
     ari: Ariadne, run_id: str, *, adapter: Adapter, max_rounds: int = 3, notify: Notify = _quiet
 ) -> RunReport:
@@ -420,6 +517,8 @@ def drive(
             ari.raise_blocker(run_id, why, actor=built["_principal"])
             notes.append(f"builder blocked: {why}")
             break
+        if built["_state"] is WorkerState.COMPLETED and "_principal" in built:
+            notes += _arbitrate_disputes(ari, run_id, built, adapter, notify)
         if built["_state"] is not WorkerState.COMPLETED:
             feedback = [f"the previous build attempt ended {built['_state'].value}; try again"]
             continue

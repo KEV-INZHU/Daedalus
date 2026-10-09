@@ -20,7 +20,6 @@ from daedalus.core import run as ev
 from daedalus.core.run import replay
 from daedalus.core.state_machine import Disposition
 
-
 # Events that record a human *decision*. Derived events a command emits as a
 # consequence (finalizing the candidate, recording the disposition) are not
 # separate interventions.
@@ -58,6 +57,8 @@ class RunMetrics:
     stop_blocks: int = 0
     human_interventions: int = 0  # human decisions (HUMAN_DECISIONS), not every human-attributed event
     recoveries: int = 0
+    disputes: int = 0
+    arbitrations: int = 0
 
     @property
     def finished(self) -> bool:
@@ -107,6 +108,8 @@ def run_metrics(events: Iterable[Event]) -> RunMetrics:
         stop_blocks=state.stop_blocks,
         human_interventions=humans,
         recoveries=recoveries,
+        disputes=sum(len(f.disputes) for f in state.findings.values()),
+        arbitrations=sum(1 for e in events if e.type == ev.ARBITRATION_RECORDED),
     )
 
 
@@ -125,6 +128,8 @@ class Aggregate:
     rework_per_accepted: float | None  # extra verified candidates per accepted change
     manual_interventions: int
     recoveries: int
+    disputes: int = 0
+    arbitrations: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -157,6 +162,8 @@ def aggregate(metrics: Iterable[RunMetrics]) -> Aggregate:
         ),
         manual_interventions=sum(m.human_interventions for m in ms),
         recoveries=sum(m.recoveries for m in ms),
+        disputes=sum(m.disputes for m in ms),
+        arbitrations=sum(m.arbitrations for m in ms),
     )
 
 

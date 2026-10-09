@@ -436,6 +436,32 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         ari.close()
 
 
+def cmd_dispute(args: argparse.Namespace) -> int:
+    ari = _ari(args)
+    try:
+        ari.dispute(_run_id(ari, args), args.finding, actor=starter_actor(), reason=args.reason)
+        _print(f"{args.finding} disputed; run `daedalus arbitrate {args.finding}` to have Plato rule on it")
+        return 0
+    finally:
+        ari.close()
+
+
+def cmd_arbitrate(args: argparse.Namespace) -> int:
+    from daedalus.orchestration.lifecycle import arbitrate
+
+    ari = _ari(args, adapter=True)
+    try:
+        decision = arbitrate(ari, _run_id(ari, args), args.finding, ari.adapter, lambda m: _print(f"· {m}"))
+        f = ari.state(_run_id(ari, args, any_run=True)).findings[args.finding]
+        if decision:
+            _print(f"{args.finding}: {decision} — {(f.ruling or {}).get('rationale', '')}")
+            if f.resolved_by:
+                _print(f"{args.finding} resolved by arbitration (policy `arbitration_resolves_findings`)")
+        return 0 if decision else 1
+    finally:
+        ari.close()
+
+
 def cmd_blocker(args: argparse.Namespace) -> int:
     ari = _ari(args)
     try:
@@ -584,7 +610,10 @@ def cmd_metrics(args: argparse.Namespace) -> int:
             f"median latency (accepted) {num(latency, 'm')} · cost, all runs {agg.cost_total:.2f} · "
             f"cost per accepted (finished runs) {num(agg.cost_per_accepted)}"
         )
-        _print(f"manual interventions {agg.manual_interventions} · recoveries {agg.recoveries}")
+        _print(
+            f"manual interventions {agg.manual_interventions} · recoveries {agg.recoveries} · "
+            f"disputes {agg.disputes} · arbitrations {agg.arbitrations}"
+        )
         if any(m.findings for m in runs):
             _print("findings: B=BLOCKER M=MAJOR m=MINOR A=ADVISORY")
         return 0 if not errors else 1
@@ -699,6 +728,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("resolve", cmd_resolve, "resolve a finding, blocker or violation (human only)", run=True, human=True)
     sp.add_argument("item")
     sp.add_argument("--note")
+    sp = add("dispute", cmd_dispute, "contest an open review finding with a reason", run=True)
+    sp.add_argument("finding")
+    sp.add_argument("--reason", required=True)
+    sp = add("arbitrate", cmd_arbitrate, "have Plato rule on a disputed finding (launched via the adapter)", run=True)
+    sp.add_argument("finding")
+    sp.add_argument("--adapter", help="override the adapter from .daedalus.yml")
     sp = add("blocker", cmd_blocker, "raise a blocker on the open run", run=True)
     sp.add_argument("description")
     sp = add("reconcile", cmd_reconcile, "recover after a crash, or record a restricted action's outcome", run=True)

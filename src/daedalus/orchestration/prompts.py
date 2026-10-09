@@ -142,6 +142,58 @@ def worker_prompt(c: TaskContract, package: dict[str, Any]) -> str:
     )
 
 
+ARBITRATION_OUTPUT = """## Your task
+
+A finding has been disputed. Decide whether it stands. **Uphold** it if the candidate really must change
+to satisfy the contract, an invariant, a real risk or the project's conventions. **Overrule** it if the
+finding is mistaken, out of scope, or a preference that does not justify its severity. Judge the actual
+diff and evidence below, not who argued more confidently. You cannot waive checks, approvals or risk
+floors, and you do not decide acceptance. Do not edit any files.
+
+End your reply with exactly one fenced JSON block:
+
+```json
+{"decision": "uphold", "rationale": "why, citing evidence", "reversal_condition": "what would change your mind"}
+```
+"""
+
+
+def arbitration_prompt(
+    c: TaskContract,
+    finding: dict[str, Any],
+    disputes: list[dict[str, Any]],
+    all_findings: list[dict[str, Any]],
+    checks: dict[str, Any],
+    diff: str,
+) -> str:
+    parts = [skill_body("plato"), "", ARBITRATION_OUTPUT, "", contract_block(c), "", "## Disputed finding", ""]
+    parts += [
+        f"- {finding['id']} [{finding['severity']}] from {finding['perspective']}: {finding['title']}",
+        f"  Evidence: {finding['evidence']}",
+        f"  Required change: {finding['required_change']}",
+        "",
+        "## The dispute",
+        "",
+        *[f"- {d['by']}: {d['reason']}" for d in disputes],
+        "",
+        "## Every other open finding, from every perspective",
+        "",
+        *(
+            [
+                f"- {f['id']} [{f['severity']}] {f['perspective']}: {f['title']}. Evidence: {f['evidence'][:400]}"
+                for f in all_findings
+            ]
+            or ["- none"]
+        ),
+        "",
+        "## Verification evidence",
+        "",
+    ]
+    parts += [f"- {cid}: {st} — {detail}" for cid, (st, detail) in checks.items()] or ["- none"]
+    parts += ["", "## Candidate diff", "", "```diff", diff or "(no changes)", "```"]
+    return "\n".join(parts)
+
+
 def review_prompt(
     perspective: str,
     c: TaskContract,

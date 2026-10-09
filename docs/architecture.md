@@ -63,7 +63,9 @@ Roles live in the prompts and skills. Their authority lives in the core.
 - **Brunel** (Builder) produces candidates. Recorded as an author, so it can't review its own candidate.
 - **Council** reviewers (Socrates, Mozi, Aristotle, James) produce findings. Only the
   perspective that raised a finding, or a human with `attest` authority, can resolve it.
-- **Plato** arbitrates material design disagreements. It's advisory and can't override rules.
+- **Plato** arbitrates disputed findings and material design disagreements. Its ruling resolves a
+  finding only if policy opts in (`arbitration_resolves_findings`), and never overrides checks,
+  approvals or risk floors.
 - **Ariadne** enforces the rules and derives the disposition.
 - **Humans** hold authorities (`merge`, `deploy`, `attest`, `contract_change`, ...).
   Principals beginning `agent:` never hold authority, whatever the policy file says.

@@ -455,6 +455,63 @@ class Ariadne:
             )
         self._append(run_id, ev.FINDING_RESOLVED, actor, {"finding_id": finding_id, "note": note})
 
+    def dispute(self, run_id: str, finding_id: str, *, actor: str, reason: str) -> None:
+        """Contest an open finding. Anyone may dispute; only arbitration or the
+        finding's own rules can resolve it."""
+        state = self._running(run_id)
+        _require_principal(actor)
+        f = state.findings.get(finding_id)
+        if f is None or f.resolved_by is not None:
+            raise ContractError(f"{finding_id} is not an open finding")
+        if not reason.strip():
+            raise ContractError("a dispute needs a reason")
+        self._append(run_id, ev.FINDING_DISPUTED, actor, {"finding_id": finding_id, "reason": reason.strip()})
+
+    def record_arbitration(
+        self, run_id: str, finding_id: str, *, arbiter: str, ruling: dict[str, Any], candidate_id: str
+    ) -> bool:
+        """Record Plato's ruling on a disputed finding. Returns whether it resolved the
+        finding, which happens only for an overrule under `arbitration_resolves_findings`."""
+        state = self._running(run_id)
+        if not arbiter.startswith("agent:plato:"):
+            raise AuthorizationError("only a Daedalus-launched Plato session arbitrates")
+        if arbiter in state.candidate_authors:
+            raise AuthorizationError(f"{arbiter} authored this candidate and cannot arbitrate it")
+        f = state.findings.get(finding_id)
+        if f is None or f.resolved_by is not None:
+            raise ContractError(f"{finding_id} is not an open finding")
+        if not f.disputes:
+            raise ContractError(f"{finding_id} has not been disputed")
+        if f.ruling and f.ruling.get("candidate_id") == candidate_id:
+            # A ruling is final for the candidate it judged: no re-rolling until the code changes.
+            raise ContractError(f"{finding_id} was already ruled on for candidate {candidate_id[:12]}")
+        decision = str(ruling.get("decision", "")).strip().lower()
+        rationale = str(ruling.get("rationale", "")).strip()
+        if decision not in ("uphold", "overrule"):
+            raise ContractError("a ruling's decision must be `uphold` or `overrule`")
+        if not rationale:
+            raise ContractError("a ruling needs a rationale")
+        resolves = decision == "overrule" and state.policy.arbitration_resolves_findings
+        self._append(
+            run_id,
+            ev.ARBITRATION_RECORDED,
+            arbiter,
+            {
+                "finding_id": finding_id,
+                "ruling": {
+                    "decision": decision,
+                    "rationale": rationale,
+                    "reversal_condition": str(ruling.get("reversal_condition", "")),
+                },
+                "candidate_id": candidate_id,
+                "resolves": resolves,
+            },
+        )
+        return resolves
+
+    def record_failed_arbitration(self, run_id: str, finding_id: str, error: str) -> None:
+        self._append(run_id, ev.ARBITRATION_FAILED, SYSTEM, {"finding_id": finding_id, "error": error})
+
     def raise_blocker(self, run_id: str, description: str, *, actor: str) -> str:
         state = self._running(run_id)
         if not description.strip():

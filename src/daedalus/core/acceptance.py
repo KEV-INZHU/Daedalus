@@ -291,11 +291,25 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
 
     for f in state.open_findings:
         if f.severity.value in policy.blocking_severities:
+            ruling = f.ruling if f.ruling and f.ruling.get("candidate_id") == cid else None
+            if ruling and ruling.get("decision") == "overrule":
+                # Plato sided with the dispute, but policy keeps resolution with humans.
+                reasons.append(
+                    Reason(
+                        f"finding:{f.finding_id}",
+                        f"{f.severity.value} from {f.perspective} ({f.finding_id}): {f.title}. Plato's ruling: "
+                        f"overrule ({ruling.get('rationale', '')}). Policy leaves resolution to a human: "
+                        f"`daedalus resolve {f.finding_id}`, or address the finding.",
+                        HUMAN,
+                    )
+                )
+                continue
+            upheld = " Plato upheld it on arbitration." if ruling and ruling.get("decision") == "uphold" else ""
             reasons.append(
                 Reason(
                     f"finding:{f.finding_id}",
                     f"{f.severity.value} from {f.perspective} ({f.finding_id}): {f.title}. "
-                    f"Required change: {f.required_change or 'see finding'}",
+                    f"Required change: {f.required_change or 'see finding'}.{upheld}",
                     AGENT,
                 )
             )
