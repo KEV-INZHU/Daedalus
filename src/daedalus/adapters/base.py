@@ -17,6 +17,10 @@ from typing import Any
 
 from daedalus.core.errors import CapabilityError
 
+# Set in every agent session Daedalus launches. Human-only CLI commands refuse,
+# and harness hooks stand down, when it is present.
+AGENT_MARKER = "DAEDALUS_AGENT"
+
 CANCELLATION_LEVELS = ("none", "cooperative", "hard")
 ISOLATION_LEVELS = ("none", "worktree", "sandbox")
 

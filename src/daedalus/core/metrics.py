@@ -17,7 +17,6 @@ from typing import Any
 
 from daedalus.audit.store import Event, EventStore
 from daedalus.core import run as ev
-from daedalus.core.errors import AuditIntegrityError
 from daedalus.core.run import replay
 from daedalus.core.state_machine import Disposition
 
@@ -55,6 +54,7 @@ class RunMetrics:
     reviews: int
     failed_reviews: int
     findings: dict[str, int] = field(default_factory=dict)
+    blocking_findings: int = 0  # findings at a severity the run's pinned policy treats as blocking
     stop_blocks: int = 0
     human_interventions: int = 0  # human decisions (HUMAN_DECISIONS), not every human-attributed event
     recoveries: int = 0
@@ -74,7 +74,7 @@ class RunMetrics:
             self.accepted
             and self.candidates_verified <= 1
             and self.check_failures == 0
-            and self.findings.get("BLOCKER", 0) == 0
+            and self.blocking_findings == 0
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,6 +101,9 @@ def run_metrics(events: Iterable[Event]) -> RunMetrics:
         reviews=len(state.reviews),
         failed_reviews=len(state.failed_reviews),
         findings=dict(Counter(f.severity.value for f in state.findings.values())),
+        blocking_findings=sum(
+            1 for f in state.findings.values() if f.severity.value in state.policy.blocking_severities
+        ),
         stop_blocks=state.stop_blocks,
         human_interventions=humans,
         recoveries=recoveries,
@@ -165,6 +168,6 @@ def collect(store: EventStore) -> tuple[list[RunMetrics], dict[str, str]]:
     for rid in store.run_ids():
         try:
             runs.append(run_metrics(store.events(rid)))
-        except AuditIntegrityError as exc:
-            errors[rid] = str(exc)
+        except Exception as exc:  # noqa: BLE001 — read-only: any unreadable run is reported, never fatal
+            errors[rid] = f"{type(exc).__name__}: {exc}"
     return runs, errors

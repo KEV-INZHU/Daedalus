@@ -26,6 +26,7 @@ from typing import Any
 import yaml
 
 from daedalus import __version__
+from daedalus.adapters.base import AGENT_MARKER
 from daedalus.core.acceptance import Decision
 from daedalus.core.config import (
     CONFIG_FILE,
@@ -50,7 +51,7 @@ def _interactive() -> bool:
 
 
 def in_agent_session() -> bool:
-    return bool(os.environ.get("CLAUDECODE") or os.environ.get("DAEDALUS_AGENT"))
+    return bool(os.environ.get("CLAUDECODE") or os.environ.get(AGENT_MARKER))
 
 
 def human_name() -> str:
@@ -608,7 +609,7 @@ def cmd_policy(args: argparse.Namespace) -> int:
 def cmd_hook(args: argparse.Namespace) -> int:
     from daedalus.harness.claude_code import run_hook
 
-    out = run_hook(args.name, sys.stdin.read())
+    out = run_hook(args.name, sys.stdin.buffer.read().decode("utf-8", "replace"))  # harnesses send UTF-8 JSON
     if out:
         _print(out)
     return 0
@@ -723,7 +724,17 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def utf8_output() -> None:
+    """Status lines use non-ASCII separators; terminals such as Git Bash expect UTF-8
+    while Python defaults to the ANSI code page for pipes on Windows."""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    utf8_output()
     args = build_parser().parse_args(argv)
     try:
         return int(args.fn(args) or 0)
