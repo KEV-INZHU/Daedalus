@@ -1,0 +1,136 @@
+# Daedalus default policy.
+#
+# This file is trusted repository configuration. A repository overrides it
+# through `.daedalus.yml` (see `daedalus init`): `checks:` replaces the check
+# list, `policy:` overrides any top-level key below, and `policy_file:` points
+# at a complete replacement. Every run pins the effective policy's hash;
+# editing it mid-run makes acceptance impossible for that run. Edits to it
+# raise the change tier to critical.
+
+policy_version: "1"
+
+# Ordered lowest -> highest. effective_tier = max(declared, path, change, behavioral)
+tiers: [low, medium, high, critical]
+
+tier_requirements:
+  low:
+    reviews: []
+    approvals: []
+  medium:
+    reviews: [aristotle]
+    approvals: []
+  high:
+    reviews: [socrates, aristotle, james]
+    approvals: [merge]
+    independent_review: true
+  critical:
+    reviews: [socrates, mozi, aristotle, james]
+    approvals: [merge]
+    independent_review: true
+
+# Repository-specific sensitive directories.
+path_floors:
+  - name: auth
+    patterns: ["**/auth/**", "**/authn/**", "**/authz/**", "**/session/**"]
+    tier: high
+  - name: secrets
+    patterns: ["**/secrets/**", "**/*.pem", "**/*.key", "**/.env", "**/.env.*"]
+    tier: critical
+  - name: payments
+    patterns: ["**/payment/**", "**/payments/**", "**/billing/**", "**/ledger/**"]
+    tier: high
+  - name: deployment
+    patterns: ["**/deploy/**", "**/deployment/**", "**/k8s/**", "**/terraform/**", "**/helm/**"]
+    tier: high
+
+# Change classes that escalate regardless of location.
+change_floors:
+  - name: dependency
+    patterns: ["**/requirements*.txt", "**/poetry.lock", "**/Pipfile.lock", "**/uv.lock",
+               "**/package-lock.json", "**/yarn.lock", "**/pnpm-lock.yaml", "**/Cargo.lock",
+               "**/go.sum", "**/Gemfile.lock", "**/pyproject.toml", "**/package.json"]
+    tier: medium
+  - name: migration
+    patterns: ["**/migrations/**", "**/migrate/**", "**/alembic/**", "**/*.sql"]
+    tier: high
+  - name: permissions
+    patterns: ["**/CODEOWNERS", "**/*acl*", "**/*permission*", "**/*rbac*", "**/roles/**"]
+    tier: high
+  - name: ci
+    patterns: [".github/workflows/**", ".gitlab-ci.yml", ".circleci/**", "Jenkinsfile", "azure-pipelines.yml"]
+    tier: high
+  - name: build_test_infra
+    patterns: ["**/conftest.py", "**/pytest.ini", "**/tox.ini", "**/setup.cfg", "**/noxfile.py",
+               "**/Makefile", "**/Dockerfile", "**/jest.config.*", "**/vitest.config.*"]
+    tier: high
+  - name: verification_policy
+    patterns: [".daedalus.yml", "daedalus-policy.yaml", "policies/**", ".daedalus/**"]
+    tier: critical
+
+# Project-specific critical workflows and data assets. Empty by default;
+# repositories add their own (crypto, PII, scheduling, recovery...).
+behavioral_floors:
+  - name: cryptography
+    patterns: ["**/crypto/**", "**/*crypt*"]
+    tier: high
+  - name: pii
+    patterns: ["**/pii/**", "**/gdpr/**"]
+    tier: high
+
+# Trusted check definitions. Contracts may ADD required checks from this list;
+# they can never remove a mandatory one.
+checks:
+  tests:
+    command: ["python", "-m", "pytest", "-q"]
+    timeout_s: 1800
+    max_attempts: 2
+    mandatory: true
+    env_inputs: []
+
+# Verifier identities whose evidence may count as PASS.
+trusted_verifiers: ["daedalus-proof-gate@local"]
+
+# Who may do what. Agents (principals starting with "agent:") can never hold
+# authority, regardless of what is written here.
+authorities:
+  merge: ["human:*"]
+  deploy: ["human:*"]
+  destructive: ["human:*"]
+  contract_change: ["human:*"]
+  hard_constraint_waiver: ["human:owner"]
+  risk_exception: ["human:*"]
+  attest: ["human:*"]
+  unresolvable: ["human:*", "system:ariadne"]
+
+restricted_actions: [merge, deploy, destructive]
+
+# Optional commands Daedalus runs for a restricted action after revalidating
+# its approval (`daedalus act <action>`). Without a command, Daedalus records
+# the authorized intent and a human performs the action.
+actions: {}
+#  merge:
+#    command: ["git", "push", "origin", "HEAD:main"]
+#    requires_acceptance: true
+
+# Approvals expire after this many seconds unless granted with --expires.
+approval_ttl_seconds: 86400
+
+# Finding severities that block acceptance until resolved.
+blocking_severities: [BLOCKER]
+
+# Adapter capability shortfalls the policy explicitly tolerates (see
+# docs/adapter-contract.md). Empty means every shortfall fails closed.
+allowed_degradations: []
+
+# What an unauthorized scope/policy/contract change does to a run.
+violation_disposition: REJECTED
+
+default_budget:
+  max_attempts: 20
+  max_wall_seconds: 86400
+  max_cost: 50.0
+  max_workers: 1
+
+candidate:
+  exclude: [".daedalus/**", ".claude/**", ".git/**", "**/__pycache__/**", "**/.pytest_cache/**",
+            "**/.mypy_cache/**", "**/.ruff_cache/**"]
