@@ -40,6 +40,9 @@ EVIDENCE_INVALIDATED = "evidence.invalidated"
 REVIEW_RECORDED = "review.recorded"
 REVIEW_FAILED = "review.failed"
 FINDING_RESOLVED = "finding.resolved"
+FINDING_DISPUTED = "finding.disputed"
+ARBITRATION_RECORDED = "arbitration.recorded"
+ARBITRATION_FAILED = "arbitration.failed"
 BLOCKER_RAISED = "blocker.raised"
 BLOCKER_RESOLVED = "blocker.resolved"
 CRITERION_ATTESTED = "criterion.attested"
@@ -78,6 +81,8 @@ class Finding:
     verification: str
     resolved_by: str | None = None
     resolution: str | None = None
+    disputes: list[dict[str, Any]] = field(default_factory=list)
+    ruling: dict[str, Any] | None = None  # latest Plato ruling: decision, rationale, ...
 
 
 @dataclass
@@ -134,6 +139,7 @@ class RunState:
     checks_in_flight: dict[str, dict[str, Any]] = field(default_factory=dict)
     reviews: list[Review] = field(default_factory=list)
     failed_reviews: list[dict[str, Any]] = field(default_factory=list)
+    failed_arbitrations: list[dict[str, Any]] = field(default_factory=list)
     findings: dict[str, Finding] = field(default_factory=dict)
     blockers: dict[str, dict[str, Any]] = field(default_factory=dict)
     attestations: list[dict[str, Any]] = field(default_factory=list)
@@ -262,6 +268,15 @@ def _apply(s: RunState, ev: Event) -> None:
                 s.findings[fid].resolution = f"resolved by {review.perspective} review {review.review_id}"
     elif t == REVIEW_FAILED:
         s.failed_reviews.append({**p, "at": ev.ts})
+    elif t == FINDING_DISPUTED:
+        s.findings[p["finding_id"]].disputes.append({"by": ev.actor, "reason": p["reason"], "at": ev.ts})
+    elif t == ARBITRATION_RECORDED:
+        f = s.findings[p["finding_id"]]
+        f.ruling = {**p["ruling"], "by": ev.actor, "candidate_id": p.get("candidate_id")}
+        if p.get("resolves") and f.resolved_by is None:
+            f.resolved_by, f.resolution = ev.actor, f"overruled by arbitration: {p['ruling'].get('rationale', '')}"
+    elif t == ARBITRATION_FAILED:
+        s.failed_arbitrations.append({**p, "at": ev.ts})
     elif t == FINDING_RESOLVED:
         f = s.findings[p["finding_id"]]
         f.resolved_by, f.resolution = ev.actor, p.get("note", "")

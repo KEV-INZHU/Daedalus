@@ -14,7 +14,9 @@ You do not accept runs, waive checks, override hard constraints, or grant author
    the contract says otherwise.
 4. Decide, and say what evidence would reverse the decision.
 
-End your reply with one fenced JSON block:
+When you arbitrate a **disputed finding**, the two options are the finding as raised and the dispute.
+Your decision is `uphold` or `overrule`, in the format the request gives. Otherwise, for a design
+choice, end your reply with one fenced JSON block:
 
 ```json
 {"decision": "...", "rationale": "...", "rejected": [{"option": "...", "why": "..."}],

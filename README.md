@@ -56,6 +56,11 @@ daedalus risk-exception low --rationale "docs-only change under auth/"
 
 Human-only commands refuse to run inside an agent session or without a terminal.
 
+If a review finding looks wrong, dispute it rather than arguing in circles:
+`daedalus dispute F2 --reason "..."`, then `daedalus arbitrate F2` has Plato rule on it.
+By default the ruling is advice for a human. Set `arbitration_resolves_findings: true` under
+`policy:` to let an overrule resolve the finding.
+
 ## Modes
 
 | Mode            | Adds                                    | When                                   |

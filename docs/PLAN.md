@@ -79,11 +79,11 @@ Status: 76 tests passing (`python -m pytest`).
 
 ## Phase 2 — Council and bounded fan-out (not started; gated on Phase 1 measurements)
 
-- [ ] Full Council for review/council modes; Plato arbitration on material disagreement
+- [x] Full Council for council mode (four launched perspectives); Plato arbitration of disputed findings (run 09eb250a50f2)
 - [x] Isolated worktrees per worker (run f318fc00189d)
 - [x] Bounded fan-out: planned DAG, concurrency up to the policy cap (run 8ea56a7320bc)
 - [x] Integration conflict detection under concurrency (ownership, base hashes, prior integrations)
-- [ ] Independent first-pass reviews before peer exposure
+- [x] Independent first-pass reviews before peer exposure (launched reviewers see only their own findings; Plato sees all)
 
 ## Phase 3 — Measurement (not started)
 
@@ -111,10 +111,11 @@ independent reviewer through the `claude-code` adapter).
 | 3e6772ef6067 | Lean launches: no MCP/skills, read-only allowlist, per-role models | 3 candidates | ACCEPTED ($0.75) | Startup 37k → 5k input tokens per launch. First BLOCKERs: the "locked" profile was a denylist with holes; rebuilt as an allowlist |
 | 27c612afc6c3 | Lock every built-in preset; `--adapter` override; review follow-ups | 2 candidates | ACCEPTED ($0.53) | Reviewer caught a MAJOR: codex's `--full-auto` rode along on review launches. Presets now split builder-only flags |
 | f318fc00189d | Phase 2: isolated worktrees for non-in-place workers | 4 candidates | ACCEPTED ($1.65) | Reviewer caught 2 MAJORs: committed worker changes dropped from proposals; a shared /tmp hooks path I introduced. F15/F16 fixed in 8ea5 |
-| 8ea56a7320bc | Phase 2: bounded fan-out (plan → parallel worktrees → ordered integration) | — | in progress | Default cap stays 1 |
+| 8ea56a7320bc | Phase 2: bounded fan-out (plan → parallel worktrees → ordered integration) | 4 candidates | ACCEPTED ($1.65) | Default cap stays 1. Reviewer caught 2 MAJORs (unsanitized package ids as paths; aborted rounds leaking sessions) and a flaky test as a BLOCKER |
+| 09eb250a50f2 | Phase 2: disputes and Plato arbitration | — | in progress | Overrules advisory unless policy opts in |
 
-Follow-ups: run f318 F17 (filter drivers during proposal), F18 (tests use the real temp dir). Lint: extra blank line in core/metrics.py. Run 64c6 F6 (utf8_output only from the console entry point). Run 27c6: F7 (`--adapter claude-code` when
+Follow-ups: run f318 F17 (filter drivers during proposal), F18 (tests use the real temp dir). Run 64c6 F6 (utf8_output only from the console entry point). Run 27c6: F7 (`--adapter claude-code` when
 config omits `name`), F8 (aider's `--yes-always` sits in the shared argv), F9 (dedupe preset-lock tests).
 
-Queue: council with
-independent first pass and Plato arbitration.
+Queue: Phase 3 escaped-defect tracking; run 8ea5 advisories F13 (public cancel_worker), F14 (cancel
+sessions that outlive the abort grace period).
