@@ -145,6 +145,19 @@ class EventStore:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def has_event(self, run_id: str, types: tuple[str, ...]) -> bool:
+        """Whether the run has an event of any of these types. Safe from any thread or
+        process: it reads through its own short-lived, read-only connection."""
+        db = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            marks = ",".join("?" * len(types))
+            row = db.execute(
+                f"SELECT 1 FROM events WHERE run_id = ? AND type IN ({marks}) LIMIT 1", (run_id, *types)
+            ).fetchone()
+            return row is not None
+        finally:
+            db.close()
+
     def resolve_run_id(self, prefix: str) -> str:
         matches = [r for r in self.run_ids() if r.startswith(prefix)]
         if len(matches) != 1:

@@ -19,7 +19,7 @@ EXACT_REVIEW_ARGV = {
     "claude-code": [
         "claude", "-p", "--output-format", "json",
         "--strict-mcp-config", "--disable-slash-commands",
-        "--tools", "Read,Grep,Glob",
+        "--restricted", "--tools", "Read,Grep,Glob",
     ],
     "codex": ["codex", "exec", "--sandbox", "read-only", "PROMPT"],
     "aider": ["aider", "--yes-always", "--no-auto-commits", "--dry-run", "--message", "PROMPT"],

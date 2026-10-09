@@ -21,6 +21,8 @@ This document says where the line falls.
 | Crashes never presume success              | Intents are written before effects; recovery turns them into ERROR / FAILED / unknown |
 | Restricted actions aren't blindly retried  | An unknown outcome blocks every action until a human reconciles |
 | Tampering with the log is detected         | Hash chain over all events; `daedalus audit` verifies it        |
+| Reviewers can't write, or see what the diff doesn't show | `claude-code` reviews launch with `--restricted --tools Read,Grep,Glob`: no write or shell tools, no settings files, file access confined to the repository, no `.claude/CLAUDE.md` or auto-memory (verified live in run 10) |
+| Launched sessions don't outlive supervision | Cancellation is polled while a session runs; timeouts and orchestrator errors kill it; on Windows a kill-on-close job object ends the session's whole process tree, including when the orchestrator itself is killed |
 
 ## Human identity on the local CLI
 
@@ -58,3 +60,15 @@ same user can:
 - Risk floors are path-based. No classifier catches every risky semantic
   change, so add `behavioral_floors` for your critical areas.
 - One orchestrator per repository. Locks on other hosts are presumed alive.
+- The Builder is not sandboxed. A `claude-code` Builder launch loads the user's
+  settings, so their permission allow-rules decide which shell commands it may run
+  (in run 10 it ran `pytest` through PowerShell). Its session can also write the project's
+  auto-memory and `.claude/`, which later Builder rounds load. Reviews are protected from this;
+  builders are not.
+- Off Windows, a session whose orchestrator is killed outright (not cancelled, timed
+  out or interrupted) keeps running until it finishes, and a killed session's children
+  are not reaped. Whatever such a session leaves behind must still pass verification and any
+  required review on the final candidate.
+- A criterion bound to a check is only as strong as that check. In `gate` mode,
+  a Builder that changes nothing is accepted if the existing checks already pass;
+  `review` mode puts a reviewer in front of that diff.

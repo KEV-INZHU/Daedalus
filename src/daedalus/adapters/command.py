@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import uuid
 from dataclasses import replace
 from typing import Any
@@ -65,7 +66,12 @@ PRESETS: dict[str, dict[str, Any]] = {
         # own setup otherwise loads ~37k input tokens into every launch.
         "args": ["--strict-mcp-config", "--disable-slash-commands"],
         "builder_args": ["--permission-mode", "acceptEdits"],
-        "read_only_args": ["--tools", CLAUDE_REVIEW_TOOLS],
+        # --restricted: no user, project or local settings files (so no settings-granted
+        # permissions or hooks) and file tools confined to the working directory. Without
+        # it a reviewer reads anywhere the user's settings allow and loads `.claude/CLAUDE.md`
+        # (excluded from the candidate) and the project's auto-memory, both of which a
+        # Builder session can write; with it neither loads (observed on claude 2.1.296).
+        "read_only_args": ["--restricted", "--tools", CLAUDE_REVIEW_TOOLS],
         "locked_read_only": True,
         "prompt_via": "stdin",
         "parse": "claude-json",
@@ -93,6 +99,95 @@ PRESETS: dict[str, dict[str, Any]] = {
 
 
 HARNESS_SESSION_VARS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT")
+STOP_POLL_S = 1.0  # how often a running session's `should_stop` is consulted
+
+
+class _SessionTree:
+    """A launched session and every process it starts.
+
+    On Windows the session runs in a kill-on-close job object: killing it ends the
+    whole tree (the agent's shells and test runs too), and if the orchestrator dies
+    the OS closes the job handle and ends the tree, so no session outlives the
+    process that supervises it. Processes the session starts in the instant before it
+    joins the job escape it. Elsewhere only the session process itself is killed.
+    """
+
+    def __init__(self, proc: subprocess.Popen[bytes]):
+        self.proc = proc
+        self._job = _kill_on_close_job(proc) if os.name == "nt" else None
+
+    def kill(self) -> None:
+        if self._job is not None:
+            _kernel32().TerminateJobObject(self._job, 1)
+        try:
+            self.proc.kill()
+        except OSError:
+            pass  # already gone
+
+    def close(self) -> None:
+        """Release the job; anything the session left running ends with it."""
+        if self._job is not None:
+            _kernel32().CloseHandle(self._job)
+            self._job = None
+
+
+def _kernel32() -> Any:
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    k32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+    k32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    return k32
+
+
+def _kill_on_close_job(proc: subprocess.Popen[bytes]) -> Any:
+    """A job object holding `proc` that kills its processes when the last handle closes.
+    None when the job cannot be set up (the session then runs, as before, without it)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Basic(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class Extended(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", Basic),
+            ("IoInfo", ctypes.c_uint64 * 6),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    k32 = _kernel32()
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    info = Extended()
+    info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    extended_limit_information = 9
+    if not (
+        k32.SetInformationJobObject(job, extended_limit_information, ctypes.byref(info), ctypes.sizeof(info))
+        and k32.AssignProcessToJobObject(job, int(proc._handle))  # type: ignore[attr-defined]
+    ):
+        k32.CloseHandle(job)
+        return None
+    return job
 
 
 def agent_env() -> dict[str, str]:
@@ -171,7 +266,7 @@ class CommandAdapter(Adapter):
         self.model = model
         self.review_model = review_model or model
         self.builder_args = list(builder_args or [])
-        self._procs: dict[str, subprocess.Popen[bytes]] = {}
+        self._procs: dict[str, _SessionTree] = {}
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any]) -> CommandAdapter:
@@ -294,17 +389,23 @@ class CommandAdapter(Adapter):
             )
         except OSError as exc:
             return AgentResult("FAILED", session_id=session, error=f"could not start agent: {exc}")
-        self._procs[session] = proc
+        tree = _SessionTree(proc)
+        self._procs[session] = tree
         try:
-            out, err = proc.communicate(stdin, timeout=request.timeout_s)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            return AgentResult(
-                "TIMED_OUT", session_id=session, error=f"agent exceeded {request.timeout_s:g}s"
-            )
+            out, err, stopped = _wait(proc, stdin, request)
+            if stopped is not None:
+                tree.kill()
+                try:
+                    proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass  # a grandchild still holds the pipes; the session process itself is dead
+                return AgentResult(stopped[0], session_id=session, error=stopped[1])
+        except BaseException:
+            tree.kill()  # an orchestrator error or Ctrl-C never leaves the session running
+            raise
         finally:
             self._procs.pop(session, None)
+            tree.close()
         if proc.returncode < 0:
             return AgentResult("CANCELLED", session_id=session, error="agent process was terminated")
         text = out.decode("utf-8", "replace")
@@ -343,8 +444,37 @@ class CommandAdapter(Adapter):
         )
 
     def cancel(self, session_id: str) -> bool:
-        proc = self._procs.get(session_id)
-        if proc is None:
+        tree = self._procs.get(session_id)
+        if tree is None:
             return False
-        proc.kill()
+        tree.kill()
         return True
+
+
+def _wait(
+    proc: subprocess.Popen[bytes], stdin: bytes | None, request: AgentRequest
+) -> tuple[bytes, bytes, tuple[str, str] | None]:
+    """Wait for the session, consulting `request.should_stop` every STOP_POLL_S.
+
+    Returns (stdout, stderr, None) when it exits by itself, or ("", "", (status, why))
+    when it must be stopped: TIMED_OUT past its deadline, CANCELLED once the run no
+    longer wants it. A `should_stop` that raises counts as "keep going"; the deadline
+    still bounds the session.
+    """
+    deadline = time.monotonic() + request.timeout_s
+    send = stdin
+    while True:
+        left = max(0.0, deadline - time.monotonic())
+        try:
+            out, err = proc.communicate(send, timeout=min(left, STOP_POLL_S) if request.should_stop else left)
+            return out, err, None
+        except subprocess.TimeoutExpired:
+            send = None  # input is written once; a retry only keeps collecting output
+        if time.monotonic() >= deadline:
+            return b"", b"", ("TIMED_OUT", f"agent exceeded {request.timeout_s:g}s")
+        try:
+            stop = bool(request.should_stop and request.should_stop())
+        except Exception:  # noqa: BLE001
+            stop = False
+        if stop:
+            return b"", b"", ("CANCELLED", "the run was cancelled or finished while the session ran")

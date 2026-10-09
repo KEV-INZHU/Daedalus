@@ -65,10 +65,10 @@ Council and fan-out only after measured readiness.
 - [x] Claude Code shim: Stop hook gates "done", SessionStart injects run context, `daedalus install claude-code`
 - [x] Human-authority commands require an interactive terminal (defence in depth)
 - [x] End-to-end test with a scripted Builder and reviewer on a synthetic repo
-- [ ] Live baseline: run real tasks through the `claude-code` adapter and record acceptance, rework, cost, latency
+- [x] Live baseline: a real launched Builder and reviewer through `daedalus run` (Run 10, below)
 - [ ] Exercise the experimental `codex` / `aider` presets against the real CLIs
 
-Status: 76 tests passing (`python -m pytest`).
+Status: 275 passed, 1 skipped (`python -m pytest`).
 
 ## Docs and schemas
 
@@ -96,6 +96,49 @@ Status: 76 tests passing (`python -m pytest`).
 Server, multi-user control plane, plugin marketplace, distributed scheduler,
 public remote API.
 
+## Run 10 — fully launched baseline (2026-10-09)
+
+The first `daedalus run` with a real launched Builder (`claude -p`, claude-opus-5-5, Claude Code
+2.1.296, Windows) on a disposable fixture: add `chunk(items, size)` plus tests, review mode. Every claim
+below was checked against artifacts (audit log, the OS process table, session transcripts, git state),
+not agent reports.
+
+| Run | Code | Rounds | Disposition | Cost (API-equiv.) | Wall | Notes |
+|-----|------|--------|-------------|-------------------|------|-------|
+| d9ded3cce6f4 | before fixes | 1 | ACCEPTED | $0.29 | 45s | 2 ADVISORY findings (non-blocking by default) |
+| 888be4e0a406 | after fixes | 2 | ACCEPTED | $0.33 | 79s | Drill policy: every severity blocks. R1 raised F1, Brunel fixed it, a new reviewer session resolved it on the new candidate |
+
+Startup input per launch: Builder ~18.4k tokens, reviewer ~7k. Verification ~1s per run. No worktrees
+(baseline is in place), no leaked processes after the fixes.
+
+Defects found live, fixed with regression tests (`tests/integration/test_session_control.py`,
+`tests/unit/test_launch_profile.py`):
+
+- MAJOR: the review profile depended on the user's Claude Code settings. A reviewer read
+  `C:/Windows/win.ini` and loaded `.claude/CLAUDE.md` (outside the candidate) and the project's
+  auto-memory, both writable by the Builder session. Reviews now launch with `--restricted`.
+- MAJOR: launched sessions outlived supervision. After `daedalus cancel` the Builder kept editing
+  for ~18s, and after the orchestrator was killed for ~22s. A timed-out session whose child held
+  the output pipe hung the orchestrator. The adapter now polls cancellation, kills on timeout and
+  interrupt, and on Windows runs each session in a kill-on-close job object.
+- MINOR: a cancelled run started another round; the left-open note pointed at [human] items when
+  only [agent] items remained.
+
+Failure paths exercised through the real harness: Builder launch failure (unknown model; `claude`
+not on PATH) → BLOCKED; orchestrator killed mid-build → session dies, recovery marks FAILED, BLOCKED;
+cancel mid-build → session stops, CANCELLED; reviewer launch failure → BLOCKED with tests PASS;
+failing mandatory check → BLOCKED; edit after a PASS → STALE, BLOCKED. Integration conflicts, stale
+proposals and cleanup failure/recovery are covered by deterministic tests only (fan-out was not run live).
+
+Follow-ups: POSIX process-tree containment (untested off Windows); the Builder profile still inherits the
+user's settings and auto-memory; costs of killed sessions are not charged; in `gate` mode a no-op
+Builder passes when existing checks already pass. From run 964488994554's review: F1 (skip review and
+arbitration launches once a run is cancelled mid-round), F2 (report a stop check that keeps failing),
+F3 (end-to-end cancel test through CommandAdapter), F4 (report when the job object cannot be set up),
+F5 (deliberate kills report CANCELLED by flag, not by return-code sign), F8 (a session that exits while a
+background child holds its output pipe waits until the deadline and is reported TIMED_OUT; pre-existing), F9 (reap the session after an
+interrupt kill), F10 (cancel test through the real adapter's status), F11 (check TerminateJobObject's result).
+
 ## Dogfooding log — Daedalus building Daedalus
 
 Remaining work runs under the gate in this repository (`.daedalus.yml`, review mode,
@@ -112,10 +155,11 @@ independent reviewer through the `claude-code` adapter).
 | 27c612afc6c3 | Lock every built-in preset; `--adapter` override; review follow-ups | 2 candidates | ACCEPTED ($0.53) | Reviewer caught a MAJOR: codex's `--full-auto` rode along on review launches. Presets now split builder-only flags |
 | f318fc00189d | Phase 2: isolated worktrees for non-in-place workers | 4 candidates | ACCEPTED ($1.65) | Reviewer caught 2 MAJORs: committed worker changes dropped from proposals; a shared /tmp hooks path I introduced. F15/F16 fixed in 8ea5 |
 | 8ea56a7320bc | Phase 2: bounded fan-out (plan → parallel worktrees → ordered integration) | 4 candidates | ACCEPTED ($1.65) | Default cap stays 1. Reviewer caught 2 MAJORs (unsanitized package ids as paths; aborted rounds leaking sessions) and a flaky test as a BLOCKER |
-| 09eb250a50f2 | Phase 2: disputes and Plato arbitration | — | in progress | Overrules advisory unless policy opts in |
+| 09eb250a50f2 | Phase 2: disputes and Plato arbitration | 2 candidates | ACCEPTED | Overrules advisory unless policy opts in |
 
 Follow-ups: run f318 F17 (filter drivers during proposal), F18 (tests use the real temp dir). Run 64c6 F6 (utf8_output only from the console entry point). Run 27c6: F7 (`--adapter claude-code` when
 config omits `name`), F8 (aider's `--yes-always` sits in the shared argv), F9 (dedupe preset-lock tests).
 
-Queue: Phase 3 escaped-defect tracking; run 8ea5 advisories F13 (public cancel_worker), F14 (cancel
-sessions that outlive the abort grace period).
+Queue: Phase 3 escaped-defect tracking; run 8ea5 advisory F13 (public cancel_worker). F14 (sessions that
+outlive the abort grace period) is narrowed by Run 10, not closed: such a session now stops once the run is
+cancelled or finished, or (Windows) when the orchestrator exits, but not merely because the round aborted.

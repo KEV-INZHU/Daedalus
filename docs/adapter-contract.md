@@ -19,7 +19,9 @@ class Adapter(ABC):
 
 `AgentRequest` carries the run and task ids, the role (`brunel`, `socrates`,
 ...), a rendered prompt (skill + contract + context), the working directory, a
-timeout and a `read_only` flag. `AgentResult` returns a status
+timeout, a `read_only` flag and an optional `should_stop` check. The lifecycle
+sets `should_stop` to "this run has been cancelled or has a final disposition";
+an adapter that owns the session polls it and stops the session when it turns true. `AgentResult` returns a status
 (`COMPLETED | FAILED | TIMED_OUT | CANCELLED`), the raw output, an optional
 structured result, cost, and a session id.
 
@@ -74,11 +76,24 @@ Each launch is a full harness session, so its fixed startup cost is paid per
 builder round and per review. The `claude-code` preset launches **lean** sessions:
 `--strict-mcp-config` (no MCP servers) and `--disable-slash-commands` (no skills).
 Measured on Claude Code 2.1: about 37k input tokens before any work with the
-user's full setup, about 5k lean.
+user's full setup, about 5k lean. Run 10 measured the first request of each live
+launch (prompt included, Claude Code 2.1.296): about 18.4k for a Builder, which
+keeps the full built-in tool set, and about 7k for a restricted reviewer with a
+small diff.
 
-Review launches get an **allowlist** of tools, `--tools Read,Grep,Glob`, as
-the final arguments. A new editing or shell tool in a later harness release
-stays excluded by default. The launch line is **locked**. For `claude-code`,
+Review launches end with `--restricted --tools Read,Grep,Glob`. The tool
+**allowlist** keeps a new editing or shell tool in a later harness release
+excluded by default. `--restricted` makes the profile independent of the
+machine's Claude Code configuration: user, project and local settings files
+are ignored (no settings-granted permissions or hooks), and file tools are
+confined to the working directory. Run 10 found both gaps live, without it. A
+reviewer read `C:/Windows/win.ini` under the user's `defaultMode: auto`, and
+loaded a `.claude/CLAUDE.md` and the project's auto-memory. `.claude/**` is
+excluded from the candidate and auto-memory lives outside the repository, so
+both are channels a Builder session can write that never appear in the diff
+under review. With `--restricted` (verified on Claude Code 2.1.296) neither
+loads. An older CLI that lacks the flag fails the review launch, which fails
+closed. The launch line is **locked**. For `claude-code`,
 `.daedalus.yml` may set only `model`, `review_model` and `args`:
 
 - `args` is itself an allowlist (`--verbose`, `--max-turns N`, `--fallback-model M`), and
@@ -115,6 +130,27 @@ adapter:
 
 With a claude.ai subscription login, launched sessions draw on the plan's usage
 limits. The reported `total_cost_usd` is an API-equivalent estimate, not a charge.
+A session stopped by a timeout or cancellation reports no cost, so its usage is
+not charged to the run's budget.
+
+## Session lifetime
+
+A launched session never outlives the orchestrator that supervises it:
+
+- **Cancellation.** While a session runs, the command adapter polls `should_stop`
+  (every second, through its own read-only connection to the audit store). A
+  `daedalus cancel` from another terminal stops the session and records it CANCELLED.
+  Before run 10, the Builder kept editing the tree for about 20 seconds after a cancel.
+- **Timeouts and interrupts.** A timeout, Ctrl-C or any orchestrator error kills the session
+  before the error propagates.
+- **Process trees (Windows).** Each session runs in a kill-on-close job object. Killing the
+  session also ends the shells and test runs it started, and if the orchestrator process
+  dies, the OS ends the whole tree. Before run 10, a killed orchestrator left the Builder
+  editing the tree for about 22 seconds, and a timed-out session whose child held the
+  output pipe hung the orchestrator. Processes that start in the instant before the
+  session joins the job escape it.
+- **Elsewhere** only the session process itself is killed. Its children, and a session
+  whose orchestrator was killed outright, are not contained (untested off Windows).
 
 ## Rules for adapter authors
 
