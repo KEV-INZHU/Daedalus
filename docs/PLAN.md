@@ -86,7 +86,8 @@ Status: 76 tests passing (`python -m pytest`).
 
 ## Phase 3 — Measurement (not started)
 
-- [ ] Metrics: escaped defects, first-pass acceptance, rework, cost/latency per accepted change
+- [x] `daedalus metrics`: acceptance, first-pass, rework, cost and latency per accepted change, manual interventions
+- [ ] Escaped-defect and regression tracking (needs a way to link later fixes back to accepted runs)
 - [ ] Parallelism savings vs integration overhead
 
 ## Deliberately out of scope until usage justifies it
@@ -102,7 +103,11 @@ independent reviewer through the `claude-code` adapter).
 
 | Run | Objective | Rounds | Disposition | Notes |
 |-----|-----------|--------|-------------|-------|
-| 919e19288a2d | claude-code adapter: array-form JSON output, clean launch env | — | in progress | Found by the first live launch: Claude Code 2.1.x prints an array of messages |
+| 919e19288a2d | claude-code adapter: array-form JSON output, clean launch env | 3 candidates | ACCEPTED (17 min, $1.50) | Found by the first live launch. Reviewer caught a MAJOR (error subtypes reported COMPLETED) + 5 minor/advisory; F7 advisory left open |
+| c51720a89616 | `daedalus metrics` from the audit log | — | in progress | |
 
-Queue: `daedalus metrics` → worktree isolation → bounded fan-out (cap stays 1) → council with
+Follow-ups: F7 (include stderr tail when a success result exits non-zero).
+
+Queue: **Stop/SessionStart hooks must ignore Daedalus-launched sessions** (metrics showed 8 stop blocks
+inside each launched reviewer) → worktree isolation → bounded fan-out (cap stays 1) → council with
 independent first pass and Plato arbitration → Windows console encoding of status output.

@@ -44,7 +44,8 @@ daedalus run "fix the flaky retry in the uploader" --mode review
 | Status   | `daedalus status`                         | Full state machine, evidence, risk floors, authorization |
 
 Everything else stays out of the way until it matters: `daedalus log` and
-`daedalus audit` for the hash-chained audit trail, plus a few human-only decisions:
+`daedalus audit` for the hash-chained audit trail, `daedalus metrics` for
+acceptance rate, rework, cost and latency across runs, plus a few human-only decisions:
 
 ```bash
 daedalus approve merge          # scoped to this candidate + contract version, expiring, single-use
