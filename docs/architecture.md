@@ -25,7 +25,7 @@ engineering lifecycle.
 |------------------|-------------------------------|----------------------------------------------------------|
 | Core             | `daedalus.core`               | Pure rules: contracts, state machine, risk, evidence, authorization, the acceptance predicate |
 | Audit            | `daedalus.audit`              | Append-only, hash-chained event store                    |
-| Orchestration    | `daedalus.orchestration`      | Ariadne (validates and appends every change), scheduler, lifecycle loop, role prompts |
+| Orchestration    | `daedalus.orchestration`      | Ariadne (validates and appends every change), scheduler, lifecycle loop and bounded fan-out, role prompts |
 | Verification     | `daedalus.verification`       | Proof Gate: runs trusted checks, binds results to candidates |
 | Repository       | `daedalus.repository`         | Candidate manifests and diffs; isolated worker worktrees |
 | Adapters         | `daedalus.adapters`           | Harness translation with declared capabilities           |

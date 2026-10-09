@@ -1,25 +1,35 @@
-"""The single-worker lifecycle (spec §11, §17): build -> verify -> review -> finish.
+"""The lifecycle (spec §11, §14, §17): build -> verify -> review -> finish.
 
-This is the Phase 1 baseline. One Builder edits the working tree in place,
-the Proof Gate verifies the candidate, Daedalus launches any reviews the risk
-tier or mode requires, and Ariadne derives the disposition. Only reasons
-tagged agent-fixable are fed back to the Builder; anything needing a human
-(approvals, attestations, policy problems) ends the loop with the run left
-open and BLOCKED, so the human can act and `daedalus finish` later.
+Baseline (max_workers == 1, the policy default): one Builder edits the working
+tree in place, the Proof Gate verifies the candidate, Daedalus launches any
+reviews the risk tier or mode requires, and Ariadne derives the disposition.
+Only reasons tagged agent-fixable are fed back to the Builder; anything needing
+a human (approvals, attestations, policy problems) ends the loop with the run
+left open and BLOCKED, so the human can act and `daedalus finish` later.
 
-Fan-out is not here on purpose: max_workers stays 1 until the baseline is
-measured to be reliable (spec §14, §20.11).
+Bounded fan-out (max_workers > 1, opted into by policy): the first round asks
+Brunel for a dependency graph of work packages. Ariadne validates it; packages
+run concurrently in isolated worktrees up to the cap and integrate in
+dependency order; then the same verify/review loop follows, with in-place
+Builder rounds fixing whatever remains. An invalid, missing or single-package
+plan falls back to the baseline. Only agent sessions run on worker threads:
+every Ariadne call (and so every audit-log write) stays on the orchestrator
+thread.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from daedalus.adapters.base import Adapter, AgentRequest, require
+from daedalus.adapters.base import Adapter, AgentRequest, AgentResult, require
 from daedalus.core.acceptance import Decision
-from daedalus.core.errors import ContractError, DaedalusError
+from daedalus.core.errors import ContractError, DaedalusError, IntegrationError
 from daedalus.core.state_machine import Disposition, WorkerState
 from daedalus.orchestration import prompts
 from daedalus.orchestration.ariadne import SYSTEM, Ariadne
@@ -28,6 +38,7 @@ from daedalus.repository.candidate import diff_text
 Notify = Callable[[str], None]
 
 REVIEW_TIMEOUT_S = 1800.0
+DRAIN_GRACE_S = 30.0  # how long an aborting fan-out round waits for each in-flight session
 BUILD_TIMEOUT_S = 3600.0
 
 
@@ -200,6 +211,187 @@ def run_task(
     return drive(ari, run_id, adapter=adapter, max_rounds=max_rounds, notify=notify)
 
 
+PACKAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _plan_packages(body: Any, round_no: int) -> list[dict[str, Any]] | None:
+    """Brunel's plan as Ariadne work packages, ids namespaced by round.
+
+    None for anything malformed. Ids become directory names, so they must match
+    PACKAGE_ID (no separators, no `..`); lists must really be lists of strings.
+    """
+    if not isinstance(body, dict) or not isinstance(body.get("packages"), list) or not body["packages"]:
+        return None
+
+    def str_list(v: Any) -> list[str] | None:
+        return v if isinstance(v, list) and all(isinstance(x, str) for x in v) else None
+
+    out = []
+    for p in body["packages"]:
+        if not isinstance(p, dict):
+            return None
+        pid, owned, deps = p.get("id"), str_list(p.get("owned_paths")), str_list(p.get("depends_on", []))
+        if not isinstance(pid, str) or not PACKAGE_ID.match(pid) or ".." in pid or not owned or deps is None:
+            return None
+        if not all(d and PACKAGE_ID.match(d) for d in deps):
+            return None
+        out.append(
+            {
+                "task_id": f"r{round_no}-{pid}",
+                "description": str(p.get("description", "")),
+                "owned_paths": owned,
+                "depends_on": [f"r{round_no}-{d}" for d in deps],
+                "deadline_s": BUILD_TIMEOUT_S,
+            }
+        )
+    return out
+
+
+def fan_out_round(
+    ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, notify: Notify = _quiet
+) -> dict[str, Any] | None:
+    """Plan, validate, run and integrate parallel packages.
+
+    Returns None when there is nothing to parallelize (an unusable, rejected or
+    single-package plan, or a planner that edited files): the caller then runs one
+    in-place Builder. Otherwise returns the integrated packages and the failures to
+    feed back. Every package ends in a recorded state, whatever goes wrong.
+    """
+    state = ari._running(run_id)
+    cap = state.contract.budget.max_workers
+    notify(f"round {round_no}: Brunel is planning up to {cap} parallel packages")
+    before = ari.capture(state).candidate_id
+    plan_req = AgentRequest(
+        run_id, f"plan-{round_no}", "brunel", prompts.plan_prompt(state.contract, cap), ari.root,
+        REVIEW_TIMEOUT_S, read_only=True,
+    )
+    try:
+        res = adapter.run_agent(plan_req)
+    except Exception as exc:  # noqa: BLE001 — planning is optional; a crashed planner means "no plan"
+        notify(f"planner failed ({exc}); a single Builder works in place")
+        return None
+    if res.cost:
+        ari.charge(run_id, cost=res.cost, note="plan")
+    if ari.capture(ari.state(run_id)).candidate_id != before:
+        notify("the planner changed the working tree; ignoring its plan")
+        return None
+    packages = _plan_packages(res.structured, round_no) if res.status == "COMPLETED" else None
+    if packages is None or len(packages) == 1:
+        notify("nothing to parallelize; a single Builder works in place")
+        return None
+    try:
+        task_ids = ari.plan(run_id, packages, actor=SYSTEM)
+    except IntegrationError as exc:
+        notify(f"plan rejected ({exc}); a single Builder works in place")
+        return None
+
+    deps = {p["task_id"]: set(p["depends_on"]) for p in packages}
+    pending, failed, integrated, failures = list(task_ids), set(), set(), []
+    running: dict[Future[AgentResult], str] = {}
+
+    def fail(tid: str, why: str) -> None:
+        failed.add(tid)
+        failures.append(f"{tid}: {why}")
+
+    def finish(tid: str, out: AgentResult, *, integrate: bool = True) -> None:
+        ok = ("COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED")
+        body = out.structured or {}
+        status = out.status if out.status in ok else "FAILED"
+        blocked = status == "COMPLETED" and body.get("status") == "blocked"
+        rec = ari.worker_finished(
+            run_id,
+            tid,
+            status="FAILED" if blocked else status,
+            proposal={"summary": body.get("summary", ""), "output_tail": out.output[-2000:]},
+            cost=out.cost,
+            note=f"worker reported blocked: {body.get('blocker', '')}" if blocked else out.error or "",
+            session_id=out.session_id,
+        )
+        if rec.state is not WorkerState.COMPLETED:
+            fail(tid, f"{rec.state.value.lower()} ({rec.note})")
+            return
+        if not integrate:
+            fail(tid, "completed, but the round was aborted before integration")
+            return
+        try:
+            ari.integrate(run_id, tid)
+            integrated.add(tid)
+            notify(f"integrated {tid}")
+        except IntegrationError as exc:
+            fail(tid, str(exc))
+
+    pool = ThreadPoolExecutor(max_workers=cap, thread_name_prefix="daedalus-worker")
+    aborted = False
+    try:
+        while pending or running:
+            progressed = True
+            while progressed:  # cancel to a fixpoint: a cancellation can doom further dependents
+                progressed = False
+                for tid in list(pending):
+                    if deps[tid] & failed:
+                        pending.remove(tid)
+                        ari._worker_transition(run_id, tid, WorkerState.CANCELLED, "a prerequisite failed")
+                        fail(tid, "not started because a prerequisite failed")
+                        progressed = True
+            for tid in list(pending):
+                if len(running) >= cap or not deps[tid] <= integrated:
+                    continue
+                pending.remove(tid)
+                try:
+                    w = ari.dispatch(run_id, tid, principal=f"agent:worker:{tid}")
+                except DaedalusError as exc:  # this package cannot start; the others go on
+                    ari._worker_transition(run_id, tid, WorkerState.CANCELLED, f"dispatch failed: {exc}")
+                    fail(tid, f"dispatch failed: {exc}")
+                    continue
+                if not w.workspace:  # never let a parallel worker loose in the authoritative tree
+                    finish(tid, AgentResult("FAILED", error="no isolated workspace"), integrate=False)
+                    continue
+                req = AgentRequest(
+                    run_id, tid, "brunel", prompts.worker_prompt(state.contract, w.package),
+                    Path(w.workspace), BUILD_TIMEOUT_S,
+                )
+                running[pool.submit(adapter.run_agent, req)] = tid
+                notify(f"dispatched {tid} ({len(running)}/{cap} running)")
+            if not running:
+                break  # nothing in flight and nothing dispatchable
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            # Plan order, not completion-set order: simultaneous finishes integrate (and
+            # land in the audit log) the same way on every run.
+            for fut in sorted(done, key=lambda f: task_ids.index(running[f])):
+                tid = running.pop(fut)
+                try:
+                    out = fut.result()
+                except Exception as exc:  # noqa: BLE001 — an adapter crash fails that package only
+                    out = AgentResult("FAILED", error=f"adapter error: {exc}")
+                finish(tid, out)
+    except BaseException:
+        aborted = True
+        raise
+    finally:
+        # Whatever happened, no package is left active or pending. In-flight sessions
+        # are drained into recorded outcomes (if the round is aborting: a bounded wait per
+        # session and never integration; a session that outlives the wait keeps running
+        # until its own timeout but is recorded CANCELLED), and what never started is
+        # cancelled.
+        for fut, tid in list(running.items()):
+            try:
+                out = fut.result(timeout=DRAIN_GRACE_S if aborted else None)
+            except FutureTimeout:
+                out = AgentResult("CANCELLED", error="round aborted; session did not stop in time")
+            except Exception as exc:  # noqa: BLE001
+                out = AgentResult("FAILED", error=f"adapter error: {exc}")
+            try:
+                finish(tid, out, integrate=not aborted)
+            except Exception:  # noqa: BLE001 — keep draining; the original error propagates
+                pass
+        for tid in pending:
+            if ari.state(run_id).workers[tid].state is WorkerState.PENDING:
+                ari._worker_transition(run_id, tid, WorkerState.CANCELLED, "fan-out round ended")
+                fail(tid, "never started")
+        pool.shutdown(wait=not aborted, cancel_futures=aborted)
+    return {"integrated": sorted(integrated), "failures": failures}
+
+
 def drive(
     ari: Ariadne, run_id: str, *, adapter: Adapter, max_rounds: int = 3, notify: Notify = _quiet
 ) -> RunReport:
@@ -209,7 +401,17 @@ def drive(
     for round_no in range(1, max_rounds + 1):
         rounds = round_no
         try:
-            built = build_round(ari, run_id, adapter, round_no, feedback, notify)
+            fan = None
+            if round_no == 1 and ari.state(run_id).contract.budget.max_workers > 1:
+                fan = fan_out_round(ari, run_id, adapter, round_no, notify)
+            if fan is not None and fan["failures"]:
+                feedback = ["parallel packages did not all land; finish the work in place:", *fan["failures"]]
+                continue
+            built = (
+                {"_state": WorkerState.COMPLETED}
+                if fan is not None
+                else build_round(ari, run_id, adapter, round_no, feedback, notify)
+            )
         except DaedalusError as exc:  # budget, concurrency, or capability refusal
             notes.append(str(exc))
             break

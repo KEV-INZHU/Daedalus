@@ -67,12 +67,11 @@ def worktree_root() -> Path:
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
     # Hooks disabled: creating a workspace must not run the repository's post-checkout
-    # hook. The hooks path is a never-created entry inside the verified, per-user
-    # workspace root, so no other user can plant hooks there. fsmonitor is off so
-    # no configured daemon runs while a proposal is computed.
-    no_hooks = str(worktree_root() / ".no-hooks")
+    # hook. The hooks path is the null device, which no process can turn into a
+    # directory of hooks. fsmonitor is off so no configured daemon runs while a
+    # proposal is computed.
     r = subprocess.run(
-        ["git", "-c", f"core.hooksPath={no_hooks}", "-c", "core.fsmonitor=false", "-C", str(cwd), *args],
+        ["git", "-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false", "-C", str(cwd), *args],
         capture_output=True,
         check=False,
     )
@@ -96,7 +95,11 @@ def _run_dir(root: Path, run_id: str) -> Path:
 
 
 def workspace_path(root: Path, run_id: str, task_id: str) -> Path:
-    return _run_dir(root, run_id) / task_id
+    run_dir = _run_dir(root, run_id)
+    path = run_dir / task_id
+    if path.resolve().parent != run_dir.resolve():
+        raise IntegrationError(f"task id {task_id!r} does not name a single directory")
+    return path
 
 
 def create(
