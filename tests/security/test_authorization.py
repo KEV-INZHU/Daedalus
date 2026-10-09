@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import BUILDER, HUMAN, fix
+from daedalus.adapters.base import AGENT_MARKER
 from daedalus.core.errors import AuthorizationError, PolicyError
 from daedalus.core.policy import policy_from_dict
 from daedalus.core.state_machine import Disposition
@@ -115,7 +116,7 @@ def test_human_cli_commands_refuse_without_tty(monkeypatch):
     from daedalus import cli
 
     monkeypatch.delenv("CLAUDECODE", raising=False)
-    monkeypatch.delenv("DAEDALUS_AGENT", raising=False)
+    monkeypatch.delenv(AGENT_MARKER, raising=False)
     monkeypatch.setattr(cli, "_interactive", lambda: False)
     with pytest.raises(AuthorizationError):
         cli.human_actor("approve merge", assume_yes=True)

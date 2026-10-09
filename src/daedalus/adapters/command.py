@@ -55,12 +55,16 @@ _LOCKED_ARG_FLAGS: dict[str, Any] = {
 }
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$")
 
+# Preset launch lines: `argv` + `args` for every launch, then `builder_args` for a
+# builder launch or `read_only_args` for a review launch. Nothing that enables
+# writing belongs in `argv` or `args`.
 PRESETS: dict[str, dict[str, Any]] = {
     "claude-code": {
         "argv": ["claude", "-p", "--output-format", "json"],
         # Lean sessions: no MCP servers, no skills or slash commands. The harness's
         # own setup otherwise loads ~37k input tokens into every launch.
-        "args": ["--permission-mode", "acceptEdits", "--strict-mcp-config", "--disable-slash-commands"],
+        "args": ["--strict-mcp-config", "--disable-slash-commands"],
+        "builder_args": ["--permission-mode", "acceptEdits"],
         "read_only_args": ["--tools", CLAUDE_REVIEW_TOOLS],
         "locked_read_only": True,
         "prompt_via": "stdin",
@@ -69,7 +73,8 @@ PRESETS: dict[str, dict[str, Any]] = {
     },
     "codex": {
         "argv": ["codex", "exec"],
-        "args": ["--full-auto"],
+        "args": [],
+        "builder_args": ["--full-auto"],  # write-enabling: never part of a review launch
         "read_only_args": ["--sandbox", "read-only"],
         "prompt_via": "arg",
         "parse": "text",
@@ -78,6 +83,7 @@ PRESETS: dict[str, dict[str, Any]] = {
     "aider": {
         "argv": ["aider", "--yes-always", "--no-auto-commits"],
         "args": [],
+        "builder_args": [],
         "read_only_args": ["--dry-run"],
         "prompt_via": "message",
         "parse": "text",
@@ -115,6 +121,19 @@ def claude_result(text: str) -> dict[str, Any] | None:
         results = [m for m in doc if isinstance(m, dict) and m.get("type") == "result"]
         return results[-1] if results else None
     return doc if isinstance(doc, dict) and doc.get("type") == "result" else None
+
+
+_PRESET_CONFIG_KEYS = frozenset({"name", "args"})
+
+
+def _str_list(cfg: dict[str, Any], key: str, adapter: str) -> list[str]:
+    """A list of strings, or [] when the key is absent. Anything else, falsy or not, is refused."""
+    if key not in cfg:
+        return []
+    value = cfg[key]
+    if not isinstance(value, list) or not all(isinstance(a, str) for a in value):
+        raise CapabilityError(f"adapter {adapter!r}: `{key}` must be a list of strings")
+    return value
 
 
 def _model(value: Any, adapter: str) -> str | None:
@@ -160,12 +179,20 @@ class CommandAdapter(Adapter):
         preset = PRESETS.get(name, {})
         if preset.get("locked_read_only"):
             return cls._locked(name, preset, cfg)
-        if preset and "read_only_args" in cfg:
-            raise CapabilityError(f"adapter {name!r}: the preset's read-only profile cannot be overridden")
+        if preset:
+            # Built-in presets keep their launch line; config args reach builder launches only.
+            extra = sorted(set(cfg) - _PRESET_CONFIG_KEYS)
+            if extra:
+                raise CapabilityError(
+                    f"adapter {name!r} is a built-in preset; {extra} cannot be set "
+                    f"(allowed: {sorted(_PRESET_CONFIG_KEYS)}; use your own adapter name with `argv` "
+                    "for a different command line)"
+                )
+            return cls._from_preset(name, preset, _str_list(cfg, "args", name))
         unsupported = [k for k in ("model", "review_model") if k in cfg]
         if unsupported:
             raise CapabilityError(f"adapter {name!r}: {unsupported} are supported only by the claude-code preset")
-        argv = cfg.get("argv") or preset.get("argv")
+        argv = _str_list(cfg, "argv", name)
         if not argv:
             raise CapabilityError(
                 f"unknown adapter {name!r}: use one of {sorted(PRESETS)} or give `argv` in .daedalus.yml"
@@ -173,11 +200,10 @@ class CommandAdapter(Adapter):
         return cls(
             name,
             argv,
-            args=cfg.get("args", preset.get("args")),
-            read_only_args=cfg.get("read_only_args", preset.get("read_only_args")),
-            prompt_via=cfg.get("prompt_via", preset.get("prompt_via", "stdin")),
-            parse=cfg.get("parse", preset.get("parse", "text")),
-            capabilities=preset.get("capabilities", _BASE_CAPS),
+            args=_str_list(cfg, "args", name),
+            read_only_args=_str_list(cfg, "read_only_args", name),
+            prompt_via=cfg.get("prompt_via", "stdin"),
+            parse=cfg.get("parse", "text"),
         )
 
     @classmethod
@@ -189,9 +215,7 @@ class CommandAdapter(Adapter):
                 f"adapter {name!r} has a fixed launch profile; {extra} cannot be set "
                 f"(allowed: {sorted(_LOCKED_CONFIG_KEYS)})"
             )
-        args = cfg.get("args") or []
-        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-            raise CapabilityError(f"adapter {name!r}: `args` must be a list of strings")
+        args = _str_list(cfg, "args", name)
         i = 0
         while i < len(args):
             flag, eq, _ = args[i].partition("=")
@@ -212,17 +236,30 @@ class CommandAdapter(Adapter):
             elif eq:
                 raise CapabilityError(f"adapter {name!r}: `{flag}` takes no value")
             i += 1
+        return cls._from_preset(
+            name, preset, args, _model(cfg.get("model"), name), _model(cfg.get("review_model"), name)
+        )
+
+    @classmethod
+    def _from_preset(
+        cls,
+        name: str,
+        preset: dict[str, Any],
+        config_args: list[str],
+        model: str | None = None,
+        review_model: str | None = None,
+    ) -> CommandAdapter:
         return cls(
             name,
             preset["argv"],
-            args=list(preset.get("args") or ()),
-            builder_args=args,
-            read_only_args=preset.get("read_only_args"),
-            prompt_via=preset.get("prompt_via", "stdin"),
-            parse=preset.get("parse", "text"),
-            capabilities=preset.get("capabilities", _BASE_CAPS),
-            model=_model(cfg.get("model"), name),
-            review_model=_model(cfg.get("review_model"), name),
+            args=list(preset["args"]),
+            builder_args=list(preset["builder_args"]) + config_args,
+            read_only_args=preset["read_only_args"],
+            prompt_via=preset["prompt_via"],
+            parse=preset["parse"],
+            capabilities=preset["capabilities"],
+            model=model,
+            review_model=review_model,
         )
 
     def available(self) -> bool:

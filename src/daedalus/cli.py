@@ -96,8 +96,8 @@ def _ari(args: argparse.Namespace, *, adapter: bool = False):
         from daedalus.core.config import load_config
 
         cfg = dict(load_config(root).adapter)
-        if getattr(args, "adapter", None):
-            cfg["name"] = args.adapter
+        if getattr(args, "adapter", None) and args.adapter != cfg.get("name"):
+            cfg = {"name": args.adapter}  # the repository's adapter keys belong to its own adapter
         ad = make_adapter(cfg)
     return Ariadne(root, adapter=ad)
 
@@ -609,7 +609,7 @@ def cmd_policy(args: argparse.Namespace) -> int:
 def cmd_hook(args: argparse.Namespace) -> int:
     from daedalus.harness.claude_code import run_hook
 
-    out = run_hook(args.name, sys.stdin.buffer.read().decode("utf-8", "replace"))  # harnesses send UTF-8 JSON
+    out = run_hook(args.name, sys.stdin.buffer.read().decode("utf-8-sig", "replace"))  # harnesses send UTF-8 JSON
     if out:
         _print(out)
     return 0
