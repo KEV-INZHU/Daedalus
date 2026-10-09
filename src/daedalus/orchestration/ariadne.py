@@ -23,7 +23,7 @@ from daedalus.audit.store import EventStore
 from daedalus.core import run as ev
 from daedalus.core.acceptance import Decision, Observation, evaluate, observed_violations
 from daedalus.core.authorization import ApprovalRecord, authorization_status
-from daedalus.core.config import STATE_DIR, RepoConfig, find_root, load_config
+from daedalus.core.config import STATE_DIR, RepoConfig, find_root, load_config, uncommitted_policy_files
 from daedalus.core.contracts import (
     MODES,
     PERSPECTIVES,
@@ -38,6 +38,7 @@ from daedalus.core.errors import (
     DaedalusError,
     IllegalTransition,
     IntegrationError,
+    PolicyError,
 )
 from daedalus.core.evidence import EvidenceRecord, environment_fingerprint
 from daedalus.core.paths import normalize
@@ -234,6 +235,12 @@ class Ariadne:
         open_run = self.active_run_id()
         if open_run:
             raise DaedalusError(f"run {open_run} is still open; finish, cancel or abandon it first")
+        dirty = uncommitted_policy_files(self.root)
+        if dirty:
+            raise PolicyError(
+                f"uncommitted policy configuration {dirty}: commit it before starting a run "
+                "(a run may only be certified by committed, reviewable policy)"
+            )
         cfg = self.config()
         policy = cfg.policy
         mode = mode or cfg.mode

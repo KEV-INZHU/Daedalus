@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Daedalus evidence record",
+  "type": "object",
+  "required": [
+    "evidence_id",
+    "run_id",
+    "check_id",
+    "attempt",
+    "candidate_id",
+    "contract_version",
+    "policy_version",
+    "policy_hash",
+    "definition_hash",
+    "command",
+    "result",
+    "verifier_id",
+    "verifier_trusted",
+    "env_fingerprint",
+    "started_at",
+    "ended_at",
+    "mandatory"
+  ],
+  "properties": {
+    "evidence_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "check_id": {
+      "type": "string"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "candidate_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "contract_version": {
+      "type": "integer"
+    },
+    "policy_version": {
+      "type": "string"
+    },
+    "policy_hash": {
+      "type": "string"
+    },
+    "definition_hash": {
+      "type": "string"
+    },
+    "command": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "result": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "ERROR"
+      ]
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "verifier_id": {
+      "type": "string"
+    },
+    "verifier_trusted": {
+      "type": "boolean"
+    },
+    "env_fingerprint": {
+      "type": "string"
+    },
+    "environment": {
+      "type": "object"
+    },
+    "stdout_sha256": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stderr_sha256": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "started_at": {
+      "type": "number"
+    },
+    "ended_at": {
+      "type": "number"
+    },
+    "timeout_s": {
+      "type": "number"
+    },
+    "mandatory": {
+      "type": "boolean"
+    }
+  }
+}

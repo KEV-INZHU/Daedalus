@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Daedalus approval record",
+  "type": "object",
+  "required": [
+    "approval_id",
+    "run_id",
+    "action",
+    "decision",
+    "approver",
+    "candidate_id",
+    "contract_version",
+    "granted_at",
+    "expires_at",
+    "single_use",
+    "interactive"
+  ],
+  "properties": {
+    "approval_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string"
+    },
+    "decision": {
+      "enum": [
+        "APPROVED",
+        "DENIED"
+      ]
+    },
+    "approver": {
+      "type": "string",
+      "pattern": "^(human|system):.+",
+      "description": "agent: principals can never approve"
+    },
+    "candidate_id": {
+      "type": "string"
+    },
+    "contract_version": {
+      "type": "integer"
+    },
+    "granted_at": {
+      "type": "number"
+    },
+    "expires_at": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "single_use": {
+      "type": "boolean"
+    },
+    "interactive": {
+      "type": "boolean"
+    },
+    "rationale": {
+      "type": "string"
+    },
+    "constraints": {
+      "type": "object"
+    }
+  }
+}
