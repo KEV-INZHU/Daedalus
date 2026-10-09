@@ -35,7 +35,9 @@ same user can:
 - forge a TTY (e.g. with `script`) and claim any `human:` identity,
 - edit or delete `.daedalus/` (detected for edits by the hash chain, but not for wholesale replacement),
 - remove the hooks from `.claude/settings.json`,
-- turn the gate off by writing `.daedalus/enabled`.
+- turn the gate off by writing `.daedalus/enabled`,
+- start the harness with `DAEDALUS_AGENT` set, which makes the hooks stand down. They do this on purpose
+  inside sessions Daedalus launched itself, whose lifecycle Ariadne already governs.
 
 ## Recommendations by threat level
 

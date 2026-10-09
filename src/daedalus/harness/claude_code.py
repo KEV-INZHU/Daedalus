@@ -13,6 +13,10 @@ Two hooks and one skill:
 - **daedalus-gate skill** — instructions for participating. Instructions only:
   the hooks and the core enforce whether or not the agent follows them.
 
+Hooks do nothing inside sessions Daedalus launched itself (`DAEDALUS_AGENT`
+is set by the command adapter): the lifecycle already governs those sessions,
+and a nested gate would bounce a read-only reviewer against its parent's run.
+
 Hooks fail open on internal errors (the user is never locked out of their
 harness) but never fail open into acceptance: an error only ever lets the
 agent stop with the run still open and unaccepted.
@@ -21,6 +25,7 @@ agent stop with the run still open and unaccepted.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -41,6 +46,11 @@ def _hook_command(sub: str) -> str:
     return f'"{Path(sys.executable).as_posix()}" -m daedalus hook {sub}'
 
 
+def launched_by_daedalus() -> bool:
+    # Set by adapters/command.py:agent_env; also read by cli.in_agent_session. Keep the three in sync.
+    return bool(os.environ.get("DAEDALUS_AGENT"))
+
+
 # --------------------------------------------------------------------- render
 def render_reasons(decision: Decision, who: str | None = None) -> list[str]:
     return [
@@ -59,6 +69,8 @@ def summary_line(decision: Decision) -> str:
 
 # ----------------------------------------------------------------------- stop
 def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[str, Any]:
+    if launched_by_daedalus():
+        return {}
     root = find_root(payload.get("cwd") or ".")
     if not gate_enabled(root):
         return {}
@@ -116,6 +128,8 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
 
 # --------------------------------------------------------------- session start
 def session_start_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[str, Any]:
+    if launched_by_daedalus():
+        return {}
     root = find_root(payload.get("cwd") or ".")
     if not gate_enabled(root):
         return {}
