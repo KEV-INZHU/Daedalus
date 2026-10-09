@@ -93,3 +93,16 @@ Status: 76 tests passing (`python -m pytest`).
 
 Server, multi-user control plane, plugin marketplace, distributed scheduler,
 public remote API.
+
+## Dogfooding log — Daedalus building Daedalus
+
+Remaining work runs under the gate in this repository (`.daedalus.yml`, review mode,
+hybrid execution: the Builder works inline in the harness session; Daedalus launches the
+independent reviewer through the `claude-code` adapter).
+
+| Run | Objective | Rounds | Disposition | Notes |
+|-----|-----------|--------|-------------|-------|
+| 919e19288a2d | claude-code adapter: array-form JSON output, clean launch env | — | in progress | Found by the first live launch: Claude Code 2.1.x prints an array of messages |
+
+Queue: `daedalus metrics` → worktree isolation → bounded fan-out (cap stays 1) → council with
+independent first pass and Plato arbitration → Windows console encoding of status output.

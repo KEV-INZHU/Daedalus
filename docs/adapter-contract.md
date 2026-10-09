@@ -56,6 +56,18 @@ adapter:
   read_only_args: [--no-write]
 ```
 
+## Launch environment
+
+Every command adapter preset (`claude-code`, `codex`, `aider`, custom `argv`) starts each agent as a
+**fresh session**. Harness session
+markers (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`) are
+removed and `DAEDALUS_AGENT=1` is set, so a launched agent can't pass for its
+parent session, and Daedalus's human-only commands refuse inside it. The
+`claude-code` preset accepts both shapes of `claude -p --output-format json`:
+a single result object (older releases) or the array of session messages
+(2.1.x), whose last `type: result` entry is the outcome. A result whose `subtype` is not
+`success` (e.g. `error_max_turns`), `is_error: true`, or a non-zero exit is FAILED; reported cost is kept.
+
 ## Rules for adapter authors
 
 1. Never report `COMPLETED` for a session that didn't finish. When unsure, report `FAILED`.
