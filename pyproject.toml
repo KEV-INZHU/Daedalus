@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "daedalus"
+version = "0.1.0"
+description = "Harness-agnostic engineering control plane: deterministic lifecycle, revision-bound evidence, derived acceptance."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Kevin Zhu" }]
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "jsonschema>=4"]
+
+[project.scripts]
+daedalus = "daedalus.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+daedalus = ["data/*.yaml", "data/skills/*/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.pyright]
+extraPaths = ["src"]
+
+[tool.ruff]
+line-length = 110
+src = ["src", "tests"]
