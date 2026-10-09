@@ -1,0 +1,14 @@
+# Daedalus builds Daedalus: every change to this repository runs under the gate.
+enabled: true
+
+# review = trusted checks + one independent, Daedalus-launched reviewer (Aristotle).
+# Risk floors in the default policy can require more reviews and approvals.
+mode: review
+
+# Agent harness used by `daedalus run` and `daedalus review`.
+adapter: claude-code
+
+checks:
+  tests:
+    command: [python, -m, pytest, -q, -p, "no:cacheprovider"]
+    timeout_s: 1800
