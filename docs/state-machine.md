@@ -43,6 +43,13 @@ PENDING ─► DISPATCHED ─► RUNNING ─► COMPLETED ─► (SUPERSEDED | R
    └─► CANCELLED | SUPERSEDED
 ```
 
+A package that isn't `in_place` is dispatched into an **isolated git worktree**
+outside the repository. The worktree is seeded byte for byte with the current
+candidate's changes and the package's owned files. The dispatch event records
+its path and seed hashes. When the session ends (any transition out of
+`DISPATCHED`/`RUNNING`), the proposal is derived from the worktree, not from
+the agent's report, and the worktree is removed (`worker.workspace_removed`).
+
 `COMPLETED` means "produced a proposal". The proposal is integrated only
 through `Ariadne.integrate`, which checks ownership, base hashes, contract
 version and conflicts with already-integrated work.

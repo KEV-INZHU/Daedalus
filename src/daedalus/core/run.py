@@ -55,6 +55,7 @@ PLAN_VALIDATED = "plan.validated"
 WORKER_CREATED = "worker.created"
 WORKER_TRANSITION = "worker.transition"
 WORKER_INTEGRATED = "worker.integrated"
+WORKSPACE_REMOVED = "worker.workspace_removed"
 COST_CHARGED = "budget.charged"
 CANCEL_REQUESTED = "cancel.requested"
 UNRESOLVABLE = "run.unresolvable"
@@ -106,6 +107,9 @@ class WorkerRecord:
     proposal: dict[str, Any] | None = None
     integrated: bool = False
     note: str = ""
+    workspace: str | None = None  # isolated worktree path, while one exists
+    workspace_seed: dict[str, str | None] | None = None  # rel path -> sha256 as seeded
+    workspace_cleanup_failures: int = 0
 
 
 @dataclass
@@ -314,6 +318,14 @@ def _apply(s: RunState, ev: Event) -> None:
             w.session_id = p["session_id"]
         if "proposal" in p:
             w.proposal = p["proposal"]
+        if p.get("workspace"):
+            w.workspace = p["workspace"]
+            w.workspace_seed = p.get("workspace_seed") or {}
+    elif t == WORKSPACE_REMOVED:
+        if p.get("removed", True):
+            s.workers[p["task_id"]].workspace = None
+        else:
+            s.workers[p["task_id"]].workspace_cleanup_failures += 1
     elif t == WORKER_INTEGRATED:
         s.workers[p["task_id"]].integrated = True
     elif t == COST_CHARGED:
