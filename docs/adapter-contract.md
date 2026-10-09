@@ -88,8 +88,17 @@ stays excluded by default. The launch line is **locked**. For `claude-code`,
 - Anything else (`argv`, `read_only_args`, `prompt_via`, MCP, plugin, settings or permission
   flags) fails closed with a configuration error.
 
-For the other presets (`codex`, `aider`), the read-only profile can't be
-overridden either, and `model`/`review_model` are refused. For a **custom**
+Every built-in preset splits its launch line in three parts: shared flags for
+every launch, **builder-only** flags (write-enabling ones such as claude's
+`--permission-mode acceptEdits` and codex's `--full-auto`), and read-only flags
+for reviews. A review launch is exactly the preset's command, its shared flags,
+the validated `--model=` (claude-code only) and its read-only flags, then the
+prompt. For the other built-in presets (`codex`, `aider`), config may set only
+`name` and `args`. Those args can be any list of strings, since these presets
+are experimental and their flags aren't allowlisted, and they're appended to
+builder launches only. `daedalus run/review --adapter X` builds a *different*
+adapter X from its own defaults. Naming the configured adapter keeps the
+repository's settings. For a **custom**
 `argv` adapter, read-only enforcement is whatever its `read_only_args` provide.
 Daedalus can't vouch for an unknown CLI's flags. The lifecycle still captures
 the candidate before and after every review and discards any review that

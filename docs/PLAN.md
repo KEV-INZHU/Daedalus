@@ -107,10 +107,11 @@ independent reviewer through the `claude-code` adapter).
 | c51720a89616 | `daedalus metrics` from the audit log | 2 candidates | ACCEPTED ($1.63) | Reviewer: 3 minor + 3 advisory fixed, F7-F8 advisory left open. Metrics exposed 8 stop blocks per launched reviewer |
 | 20912f92221d | Hooks ignore Daedalus-launched sessions | 2 candidates | ACCEPTED ($0.69) | Stop blocks 8 → 0. Reviewer caught a MAJOR (hook tests fail inside a launched agent); fixed without a conftest.py, which would have raised the tier to high |
 | 64c62f68403b | Phase 1 follow-up backlog (UTF-8 output, stderr tail, metrics, marker constant) | 2 candidates | ACCEPTED ($0.82) | Reviewer: 1 minor (metrics could still abort) + 3 advisory fixed; F5-F7 advisory left open |
-| 3e6772ef6067 | Lean launches: no MCP/skills, read-only allowlist, per-role models | — | in progress | Startup 37k → 5k input tokens per launch |
+| 3e6772ef6067 | Lean launches: no MCP/skills, read-only allowlist, per-role models | 3 candidates | ACCEPTED ($0.75) | Startup 37k → 5k input tokens per launch. First BLOCKERs: the "locked" profile was a denylist with holes; rebuilt as an allowlist |
+| 27c612afc6c3 | Lock every built-in preset; `--adapter` override; review follow-ups | 2 candidates | ACCEPTED ($0.53) | Reviewer caught a MAJOR: codex's `--full-auto` rode along on review launches. Presets now split builder-only flags |
 
-Follow-ups: tests/security/test_authorization.py still spells `DAEDALUS_AGENT` literally (outside run 64c6's scope).
-Run 64c6 advisories: F5 (case-insensitive article), F6 (utf8_output only from the console entry point), F7 (utf-8-sig for hook stdin).
+Follow-ups: run 64c6 F6 (utf8_output only from the console entry point). Run 27c6: F7 (`--adapter claude-code` when
+config omits `name`), F8 (aider's `--yes-always` sits in the shared argv), F9 (dedupe preset-lock tests).
 
 Queue: worktree isolation → bounded fan-out (cap stays 1) → council with
 independent first pass and Plato arbitration.

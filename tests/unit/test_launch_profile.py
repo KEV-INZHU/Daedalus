@@ -105,3 +105,46 @@ def test_codex_review_keeps_its_read_only_sandbox():
     cmd = adapter._command(AgentRequest("r", "t", "aristotle", "p", Path("."), read_only=True))[0]
     assert cmd[cmd.index("--sandbox") + 1] == "read-only"
     assert not any(a.startswith("--model") for a in cmd)
+
+
+@pytest.mark.parametrize("name", ["codex", "aider"])
+@pytest.mark.parametrize("key", ["argv", "prompt_via", "parse", "read_only_args"])
+def test_built_in_presets_lock_their_launch_line(name, key):
+    with pytest.raises(CapabilityError):
+        CommandAdapter.from_config({"name": name, key: ["x"] if key in ("argv", "read_only_args") else "x"})
+
+
+@pytest.mark.parametrize("name", ["claude-code", "codex", "aider", "custom"])
+@pytest.mark.parametrize("bad", ["", {}, False, None, "--verbose", [1]])
+def test_non_list_args_are_refused(name, bad):
+    cfg = {"name": name, "args": bad}
+    if name == "custom":
+        cfg["argv"] = ["my-agent"]
+    with pytest.raises(CapabilityError):
+        CommandAdapter.from_config(cfg)
+
+
+def test_cli_adapter_override_uses_that_adapters_defaults(tmp_path, monkeypatch):
+    import argparse
+
+    from conftest import make_repo
+    from daedalus import cli
+
+    root = make_repo(tmp_path / "r", {"adapter": {"name": "claude-code", "review_model": "sonnet"}})
+    ari = cli._ari(argparse.Namespace(dir=str(root), adapter="codex"), adapter=True)
+    try:
+        assert ari.adapter.name == "codex"
+    finally:
+        ari.close()
+
+
+def test_article_is_case_insensitive(tmp_path, clock):
+    from conftest import HUMAN, make_repo
+    from daedalus.orchestration.ariadne import Ariadne
+
+    root = make_repo(tmp_path / "r", {"policy": {"tier_requirements": {"low": {"reviews": ["Aristotle"]}}}})
+    a = Ariadne(root, clock=clock)
+    rid = a.start({"objective": "o"}, actor=HUMAN)
+    msg = next(r.message for r in a.evaluate(rid).reasons if r.code == "review:Aristotle")
+    assert "requires an Aristotle review" in msg
+    a.close()
