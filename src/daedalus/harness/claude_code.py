@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from daedalus.adapters.base import AGENT_MARKER
 from daedalus.core.acceptance import Decision
 from daedalus.core.config import find_root, gate_enabled, load_config
 from daedalus.core.errors import DaedalusError
@@ -47,8 +48,7 @@ def _hook_command(sub: str) -> str:
 
 
 def launched_by_daedalus() -> bool:
-    # Set by adapters/command.py:agent_env; also read by cli.in_agent_session. Keep the three in sync.
-    return bool(os.environ.get("DAEDALUS_AGENT"))
+    return bool(os.environ.get(AGENT_MARKER))
 
 
 # --------------------------------------------------------------------- render

@@ -7,7 +7,7 @@ import json
 import pytest
 
 from conftest import HUMAN, fix
-from daedalus.adapters.base import AgentResult, ScriptedStep
+from daedalus.adapters.base import AGENT_MARKER, AgentResult, ScriptedStep
 from daedalus.adapters.inline import InlineAdapter
 from daedalus.adapters.simulated import SimulatedAdapter
 from daedalus.core.config import set_gate
@@ -17,14 +17,14 @@ from daedalus.harness import claude_code
 from daedalus.orchestration.lifecycle import run_task
 
 DONE = {"status": "done", "summary": "fixed"}
+CLEAN = {"summary": "looks right", "findings": []}
 
 
 @pytest.fixture(autouse=True)
 def not_a_launched_session(monkeypatch):
     """These tests describe a harness session. When the suite itself runs inside a
     Daedalus-launched agent, DAEDALUS_AGENT is inherited and the hooks would stand down."""
-    monkeypatch.delenv("DAEDALUS_AGENT", raising=False)
-CLEAN = {"summary": "looks right", "findings": []}
+    monkeypatch.delenv(AGENT_MARKER, raising=False)
 
 
 def test_builder_fixes_and_run_is_accepted(ari, repo):
@@ -189,7 +189,7 @@ def test_cli_status_and_verify(repo, capsys, monkeypatch):
 def test_hooks_ignore_daedalus_launched_sessions(ari, repo, monkeypatch):
     rid = ari.start({"objective": "make app ok"}, actor="agent:harness")
     before = len(ari.store.events(rid))
-    monkeypatch.setenv("DAEDALUS_AGENT", "1")
+    monkeypatch.setenv(AGENT_MARKER, "1")
     assert claude_code.stop_hook(payload(repo), ari=ari) == {}
     assert claude_code.session_start_hook(payload(repo), ari=ari) == {}
     assert claude_code.run_hook("stop", json.dumps(payload(repo))) == ""

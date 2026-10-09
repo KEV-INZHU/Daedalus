@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from daedalus.adapters.base import AgentRequest
+from daedalus.adapters.base import AGENT_MARKER, AgentRequest
 from daedalus.adapters.command import HARNESS_SESSION_VARS, CommandAdapter, claude_result
 
 FAKE = """
@@ -28,6 +28,7 @@ elif mode == "max_turns":
 else:
     print(json.dumps([{"type": "system", "subtype": "init"}, {"type": "assistant"}, result]))
 if mode == "exit1":
+    sys.stderr.write("boom on stderr")
     sys.exit(1)
 """
 
@@ -57,7 +58,7 @@ def test_launched_session_does_not_inherit_harness_identity(fake_cli, tmp_path, 
     for name in HARNESS_SESSION_VARS:
         monkeypatch.setenv(name, "parent-session")
     res = run(fake_cli, "array", tmp_path)
-    assert res.structured == {**{n: None for n in HARNESS_SESSION_VARS}, "DAEDALUS_AGENT": "1"}
+    assert res.structured == {**{n: None for n in HARNESS_SESSION_VARS}, AGENT_MARKER: "1"}
 
 
 @pytest.mark.parametrize("mode", ["error", "garbage", "max_turns", "exit1"])
@@ -68,6 +69,7 @@ def test_error_outputs_are_failed(fake_cli, tmp_path, mode):
         assert "error_max_turns" in (res.error or "")
     if mode == "exit1":
         assert res.cost == pytest.approx(0.25)  # spend is kept even when the session failed
+        assert "boom on stderr" in (res.error or "")
 
 
 def test_claude_result_picks_last_result_message():

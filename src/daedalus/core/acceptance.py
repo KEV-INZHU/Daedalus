@@ -306,7 +306,8 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
     for p in reviews_needed:
         if not review_satisfied(state, p, cid, independent):
             why = f"tier {tier}" if p in policy.requirement(tier).reviews else f"{state.mode} mode"
-            kind = "an independent, Daedalus-launched" if independent else "a"
+            article = "an" if p[:1] in ("a", "e", "i", "o", "u") else "a"
+            kind = "an independent, Daedalus-launched" if independent else article
             reasons.append(
                 Reason(
                     f"review:{p}",

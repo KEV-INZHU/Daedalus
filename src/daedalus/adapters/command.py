@@ -17,7 +17,14 @@ import uuid
 from dataclasses import replace
 from typing import Any
 
-from daedalus.adapters.base import Adapter, AgentRequest, AgentResult, Capabilities, extract_json
+from daedalus.adapters.base import (
+    AGENT_MARKER,
+    Adapter,
+    AgentRequest,
+    AgentResult,
+    Capabilities,
+    extract_json,
+)
 from daedalus.core.errors import CapabilityError
 
 _BASE_CAPS = Capabilities(
@@ -70,7 +77,7 @@ def agent_env() -> dict[str, str]:
     commands refuse inside it.
     """
     env = {k: v for k, v in os.environ.items() if k not in HARNESS_SESSION_VARS}
-    env["DAEDALUS_AGENT"] = "1"
+    env[AGENT_MARKER] = "1"
     return env
 
 
@@ -200,7 +207,8 @@ class CommandAdapter(Adapter):
                     output=text,
                     cost=cost,
                     session_id=session,
-                    error=f"agent reported an error (subtype {subtype}, exit {code})",
+                    error=f"agent reported an error (subtype {subtype}, exit {code})"
+                    + (f": {err[-500:]}" if code != 0 and err.strip() else ""),
                 )
         elif code != 0:
             return AgentResult("FAILED", output=text, session_id=session, error=f"exit {code}: {err[-500:]}")
