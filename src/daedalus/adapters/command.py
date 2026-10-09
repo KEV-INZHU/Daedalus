@@ -10,6 +10,7 @@ is not exercised by Daedalus's tests, and they declare that limitation.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import uuid
@@ -56,6 +57,37 @@ PRESETS: dict[str, dict[str, Any]] = {
         "capabilities": replace(_BASE_CAPS, limitations=_BASE_CAPS.limitations + ("experimental preset",)),
     },
 }
+
+
+HARNESS_SESSION_VARS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT")
+
+
+def agent_env() -> dict[str, str]:
+    """Environment for a launched agent: a fresh harness session, marked as an agent.
+
+    Launched agents must not inherit the parent harness session's markers (the
+    child is its own session), and DAEDALUS_AGENT makes Daedalus's human-only
+    commands refuse inside it.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in HARNESS_SESSION_VARS}
+    env["DAEDALUS_AGENT"] = "1"
+    return env
+
+
+def claude_result(text: str) -> dict[str, Any] | None:
+    """The final result message from `claude -p --output-format json`.
+
+    Older releases print one result object; newer ones print the array of
+    session messages, whose last `type: result` entry is the outcome.
+    """
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None
+    if isinstance(doc, list):
+        results = [m for m in doc if isinstance(m, dict) and m.get("type") == "result"]
+        return results[-1] if results else None
+    return doc if isinstance(doc, dict) and doc.get("type") == "result" else None
 
 
 class CommandAdapter(Adapter):
@@ -122,6 +154,7 @@ class CommandAdapter(Adapter):
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(request.cwd),
+                env=agent_env(),
                 stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -147,9 +180,8 @@ class CommandAdapter(Adapter):
     def _parse(self, text: str, err: str, code: int, session: str) -> AgentResult:
         cost = 0.0
         if self.parse == "claude-json":
-            try:
-                doc = json.loads(text)
-            except ValueError:
+            doc = claude_result(text)
+            if doc is None:
                 return AgentResult(
                     "FAILED",
                     output=text,
@@ -157,14 +189,18 @@ class CommandAdapter(Adapter):
                     error=f"unparseable claude output (exit {code}): {err[-500:]}",
                 )
             text = str(doc.get("result", ""))
-            cost = float(doc.get("total_cost_usd") or 0.0)
-            if doc.get("is_error") or code != 0:
+            try:
+                cost = float(doc.get("total_cost_usd") or 0.0)
+            except (TypeError, ValueError):
+                cost = 0.0  # an unreadable cost must not turn a session report into a crash
+            subtype = str(doc.get("subtype", "success"))
+            if doc.get("is_error") or subtype != "success" or code != 0:
                 return AgentResult(
                     "FAILED",
                     output=text,
                     cost=cost,
                     session_id=session,
-                    error=f"agent reported an error (exit {code})",
+                    error=f"agent reported an error (subtype {subtype}, exit {code})",
                 )
         elif code != 0:
             return AgentResult("FAILED", output=text, session_id=session, error=f"exit {code}: {err[-500:]}")
