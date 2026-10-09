@@ -55,9 +55,11 @@ from daedalus.core.state_machine import (
 )
 from daedalus.orchestration.lock import OrchestratorLock
 from daedalus.orchestration.scheduler import WorkPackage, dispatch_blockers, live_packages, validate_plan
+from daedalus.repository import worktree
 from daedalus.repository.candidate import CandidateManifest, capture, file_sha256, git_head
 
 DEFAULT_VERIFIER = "daedalus-proof-gate@local"
+CLEANUP_ATTEMPTS = 3  # workspace removals tried before leaving it to a human
 SYSTEM = "system:ariadne"
 
 
@@ -759,9 +761,35 @@ class Ariadne:
             SYSTEM,
             {"task_id": task_id, "to": target.value, "reason": reason, **extra},
         )
+        if target not in WORKER_ACTIVE:
+            # The session is over and its outcome is in the log: the workspace has no further use.
+            self._release_workspace(run_id, task_id)
+
+    def _release_workspace(self, run_id: str, task_id: str) -> None:
+        """Best effort: the worker's outcome is already logged, so a cleanup failure
+        is recorded (and retried by recovery) rather than raised."""
+        w = self.state(run_id).workers[task_id]
+        if not w.workspace:
+            return
+        try:
+            removed, error = worktree.remove(self.root, Path(w.workspace)), None
+        except Exception as exc:  # noqa: BLE001 — never let cleanup undo a logged transition
+            removed, error = False, f"{type(exc).__name__}: {exc}"
+        if not removed and error is None:
+            error = "workspace directory still present after removal"
+        self._append(
+            run_id,
+            ev.WORKSPACE_REMOVED,
+            SYSTEM,
+            {"task_id": task_id, "path": w.workspace, "removed": removed, "error": error},
+        )
 
     def dispatch(self, run_id: str, task_id: str, *, principal: str | None = None) -> WorkerRecord:
-        """Persist dispatch intent before the adapter is called (spec §13)."""
+        """Persist dispatch intent before the adapter is called (spec §13).
+
+        A package that is not in-place gets an isolated worktree, seeded with the
+        current candidate; its path and seed hashes go into the dispatch event.
+        """
         with self.lock:
             state = self.state(run_id)
             blockers = dispatch_blockers(state, task_id)
@@ -770,14 +798,37 @@ class Ariadne:
             principal = principal or f"agent:worker:{task_id}"
             if not is_agent(principal):
                 raise AuthorizationError("workers run as agent principals")
-            self._worker_transition(
-                run_id,
-                task_id,
-                WorkerState.DISPATCHED,
-                "dispatched",
-                principal=principal,
-                base_candidate_id=self.capture(state).candidate_id,
-            )
+            cand = self.capture(state)
+            pkg = WorkPackage.from_dict(state.workers[task_id].package)
+            isolation: dict[str, Any] = {}
+            if not pkg.in_place:
+                ws = worktree.create(
+                    self.root,
+                    run_id,
+                    task_id,
+                    state.contract.base_revision,
+                    cand.changed_paths,
+                    pkg.owned_paths,
+                    state.policy.candidate_exclude,
+                )
+                isolation = {"workspace": str(ws.path), "workspace_seed": ws.seed}
+            try:
+                self._worker_transition(
+                    run_id,
+                    task_id,
+                    WorkerState.DISPATCHED,
+                    "dispatched",
+                    principal=principal,
+                    base_candidate_id=cand.candidate_id,
+                    **isolation,
+                )
+            except BaseException:
+                if isolation:  # never leave a workspace the log does not know about
+                    try:
+                        worktree.remove(self.root, Path(isolation["workspace"]))
+                    except Exception:  # noqa: BLE001 — keep the original error; recovery sweeps leftovers
+                        pass
+                raise
             return self.state(run_id).workers[task_id]
 
     def worker_started(self, run_id: str, task_id: str, session_id: str) -> None:
@@ -832,6 +883,19 @@ class Ariadne:
                 WorkerState.CANCELLED,
             ):
                 raise ContractError(f"invalid worker result status {status}")
+            if target is WorkerState.COMPLETED and w.workspace:
+                # The proposal is what changed in the workspace, never what the agent reports.
+                reported = {k: v for k, v in (proposal or {}).items() if k not in ("files", "base_hashes")}
+                try:
+                    derived = worktree.proposal(
+                        Path(w.workspace),
+                        w.workspace_seed or {},
+                        state.contract.base_revision or "HEAD",
+                        state.policy.candidate_exclude,
+                    )
+                    proposal = {**reported, **derived}
+                except Exception as exc:  # noqa: BLE001 — any failure to read the workspace fails the worker
+                    target, note, proposal = WorkerState.FAILED, f"no usable proposal: {exc}", reported
             self._worker_transition(
                 run_id, task_id, target, note or status.lower(), proposal=proposal, **extra
             )
@@ -895,7 +959,7 @@ class Ariadne:
                     target.unlink(missing_ok=True)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(content, encoding="utf-8")
+                    target.write_bytes(content.encode("utf-8"))  # bytes: no newline translation
             cand = self.record_candidate(
                 run_id,
                 actor=w.principal or f"agent:worker:{task_id}",
@@ -920,6 +984,7 @@ class Ariadne:
             state.checks_in_flight
             or state.active_workers
             or any(a["status"] == "intent" for a in state.actions.values())
+            or any(self._cleanup_due(w) for w in state.workers.values())
         )
         return bool(pending) and not self.lock.holder_alive()
 
@@ -985,6 +1050,7 @@ class Ariadne:
                 if a["status"] == "intent":
                     self._append(run_id, ev.ACTION_UNKNOWN, SYSTEM, {"action_id": aid})
                     notes.append(f"action {a['action']} ({aid}): outcome unknown; needs human reconciliation")
+            notes += self._clean_workspaces(run_id)
             if notes:
                 self._append(
                     run_id,
@@ -993,6 +1059,35 @@ class Ariadne:
                     {"notes": notes, "took_over_stale_lock": self.lock.took_over_stale},
                 )
             self._maybe_finish_cancel(run_id)
+        return notes
+
+    @staticmethod
+    def _cleanup_due(w: WorkerRecord) -> bool:
+        """An ended worker's workspace survived and removal has not been tried too often."""
+        return bool(w.workspace) and w.state not in WORKER_ACTIVE and w.workspace_cleanup_failures < CLEANUP_ATTEMPTS
+
+    def _clean_workspaces(self, run_id: str) -> list[str]:
+        """Retry removal for ended workers whose workspace survived, and sweep
+        workspaces no worker records (a crash between creation and dispatch)."""
+        notes: list[str] = []
+        state = self.state(run_id)
+        for w in state.workers.values():
+            if self._cleanup_due(w):
+                self._release_workspace(run_id, w.task_id)
+                after = self.state(run_id).workers[w.task_id]
+                if after.workspace is None:
+                    notes.append(f"worker {w.task_id}: leftover workspace removed")
+                elif after.workspace_cleanup_failures >= CLEANUP_ATTEMPTS:
+                    notes.append(
+                        f"worker {w.task_id}: workspace {after.workspace} could not be removed after "
+                        f"{CLEANUP_ATTEMPTS} attempts; delete it by hand (Daedalus will not retry)"
+                    )
+        keep = {w.workspace for w in self.state(run_id).workers.values() if w.workspace}
+        try:
+            swept = worktree.sweep(self.root, run_id, keep)
+        except Exception as exc:  # noqa: BLE001 — cleanup never blocks recovery
+            swept, notes = [], [*notes, f"workspace sweep failed: {exc}"]
+        notes += [f"removed unrecorded workspace {p}" for p in swept]
         return notes
 
     # ================================================================ audit

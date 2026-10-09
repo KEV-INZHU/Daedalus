@@ -27,7 +27,7 @@ engineering lifecycle.
 | Audit            | `daedalus.audit`              | Append-only, hash-chained event store                    |
 | Orchestration    | `daedalus.orchestration`      | Ariadne (validates and appends every change), scheduler, lifecycle loop, role prompts |
 | Verification     | `daedalus.verification`       | Proof Gate: runs trusted checks, binds results to candidates |
-| Repository       | `daedalus.repository`         | Candidate manifests and diffs                            |
+| Repository       | `daedalus.repository`         | Candidate manifests and diffs; isolated worker worktrees |
 | Adapters         | `daedalus.adapters`           | Harness translation with declared capabilities           |
 | Harness shims    | `daedalus.harness`            | Claude Code hooks and skill installation                 |
 | Skills           | `daedalus/data/skills`        | Instruction packages; never enforcement                  |

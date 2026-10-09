@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from conftest import HUMAN
 from daedalus.core.errors import DaedalusError, IntegrationError
 from daedalus.core.state_machine import Disposition, WorkerState
-from daedalus.repository.candidate import file_sha256
 
 SYS = "system:test"
 
@@ -74,31 +75,39 @@ def test_late_result_from_terminal_worker_is_rejected(ari):
         ari.worker_finished(rid, "t", status="COMPLETED", proposal={})
 
 
-def _proposal(repo, files):
-    base = {}
-    for rel in files:
-        p = repo / rel
-        base[rel] = file_sha256(p) if p.is_file() else None
-    return {"files": files, "base_hashes": base}
+def _edit_workspace(ari, rid, task_id, files):
+    """Act as the worker: edit the isolated workspace, not the repository."""
+    ws = Path(ari.state(rid).workers[task_id].workspace)
+    for rel, content in files.items():
+        target = ws / rel
+        if content is None:
+            target.unlink()
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content.encode())
+    return ws
 
 
 def test_integration_respects_ownership(ari, repo):
     rid = ari.start({"objective": "o"}, actor=HUMAN)
     ari.plan(rid, [{"task_id": "t", "owned_paths": ["src/a/**"]}], actor=SYS)
     ari.dispatch(rid, "t")
-    ari.worker_finished(rid, "t", status="COMPLETED", proposal=_proposal(repo, {"src/lib.py": "x = 2\n"}))
+    _edit_workspace(ari, rid, "t", {"src/a/new.py": "ok = 1\n", "src/lib.py": "x = 2\n"})
+    ari.worker_finished(rid, "t", status="COMPLETED")
+    assert set(ari.state(rid).workers["t"].proposal["files"]) == {"src/a/new.py", "src/lib.py"}
     with pytest.raises(IntegrationError, match="outside its ownership"):
         ari.integrate(rid, "t")
     assert ari.state(rid).workers["t"].state is WorkerState.REJECTED_STALE
+    assert (repo / "src" / "lib.py").read_text(encoding="utf-8") == "x = 1\n"
 
 
 def test_integration_rejects_stale_base(ari, repo):
     rid = ari.start({"objective": "o"}, actor=HUMAN)
     ari.plan(rid, [{"task_id": "t", "owned_paths": ["src/**"]}], actor=SYS)
     ari.dispatch(rid, "t")
-    prop = _proposal(repo, {"src/lib.py": "x = 2\n"})
+    _edit_workspace(ari, rid, "t", {"src/lib.py": "x = 2\n"})
     (repo / "src" / "lib.py").write_text("x = 'moved on'\n", encoding="utf-8")
-    ari.worker_finished(rid, "t", status="COMPLETED", proposal=prop)
+    ari.worker_finished(rid, "t", status="COMPLETED")
     with pytest.raises(IntegrationError, match="changed since"):
         ari.integrate(rid, "t")
 
@@ -108,7 +117,8 @@ def test_integration_creates_new_candidate(ari, repo):
     before = ari.state(rid).current_candidate_id
     ari.plan(rid, [{"task_id": "t", "owned_paths": ["src/**"]}], actor=SYS)
     ari.dispatch(rid, "t")
-    ari.worker_finished(rid, "t", status="COMPLETED", proposal=_proposal(repo, {"src/new.py": "y = 1\n"}))
+    _edit_workspace(ari, rid, "t", {"src/new.py": "y = 1\n"})
+    ari.worker_finished(rid, "t", status="COMPLETED")
     cand = ari.integrate(rid, "t")
     assert cand.candidate_id != before
     assert (repo / "src" / "new.py").exists()
@@ -133,3 +143,4 @@ def test_concurrency_limit_is_enforced(ari):
     ari.dispatch(rid, "a")
     with pytest.raises(DaedalusError, match="concurrency limit"):
         ari.dispatch(rid, "b")
+    ari.worker_finished(rid, "a", status="FAILED")  # releases a's workspace
