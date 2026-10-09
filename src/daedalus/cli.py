@@ -40,6 +40,7 @@ from daedalus.core.errors import AuthorizationError, DaedalusError
 from daedalus.core.policy import default_policy_text
 from daedalus.core.state_machine import Disposition
 
+SEV_ABBR = {"BLOCKER": "B", "MAJOR": "M", "MINOR": "m", "ADVISORY": "A"}
 EXIT = {Disposition.ACCEPTED: 0, Disposition.BLOCKED: 1, Disposition.REJECTED: 3, Disposition.CANCELLED: 4}
 
 
@@ -534,6 +535,62 @@ def cmd_runs(args: argparse.Namespace) -> int:
         ari.close()
 
 
+def cmd_metrics(args: argparse.Namespace) -> int:
+    from daedalus.core.metrics import aggregate, collect
+
+    ari = _ari(args)
+    try:
+        runs, errors = collect(ari.store)
+        agg = aggregate(runs)
+        if args.json:
+            out = {"runs": [m.to_dict() for m in runs], "errors": errors, "aggregate": agg.to_dict()}
+            _print(json.dumps(out, indent=2))
+            return 0 if not errors else 1
+
+        def pct(x: float | None) -> str:
+            return "n/a" if x is None else f"{x:.0%}"
+
+        def num(x: float | None, unit: str = "") -> str:
+            return "n/a" if x is None else f"{x:.2f}{unit}"
+
+        _print(
+            f"{'run':<13} {'mode':<7} {'disposition':<11} {'1st':>3} {'wall':>7} {'cost':>6} {'att':>3} "
+            f"{'cands':>5} {'fails':>5} {'rev':>3} {'frev':>4} {'stops':>5} {'recov':>5} {'human':>5} "
+            f"{'findings':<14} objective"
+        )
+        for m in runs:
+            wall = "open" if m.wall_seconds is None else f"{m.wall_seconds / 60:.1f}m"
+            found = " ".join(f"{SEV_ABBR[k]}{m.findings[k]}" for k in SEV_ABBR if m.findings.get(k)) or "-"
+            _print(
+                f"{m.run_id:<13} {m.mode:<7} {m.disposition:<11} {'yes' if m.first_pass else '-':>3} {wall:>7} "
+                f"{m.cost:>6.2f} {m.attempts:>3} {m.candidates_verified:>5} {m.check_failures:>5} {m.reviews:>3} "
+                f"{m.failed_reviews:>4} {m.stop_blocks:>5} {m.recoveries:>5} {m.human_interventions:>5} "
+                f"{found:<14} {m.objective[:40]}"
+            )
+        for rid, err in errors.items():
+            _print(f"{rid:<13} ERROR       {err}")
+        _print()
+        _print(
+            f"runs {agg.runs} (open {agg.open}) · accepted {agg.accepted} · rejected {agg.rejected} · "
+            f"cancelled {agg.cancelled}" + (f" · unreadable {len(errors)}" if errors else "")
+        )
+        _print(
+            f"acceptance rate {pct(agg.acceptance_rate)} · first-pass {pct(agg.first_pass_rate)} · "
+            f"rework/accepted {num(agg.rework_per_accepted)}"
+        )
+        latency = None if agg.median_latency_accepted_s is None else agg.median_latency_accepted_s / 60
+        _print(
+            f"median latency (accepted) {num(latency, 'm')} · cost, all runs {agg.cost_total:.2f} · "
+            f"cost per accepted (finished runs) {num(agg.cost_per_accepted)}"
+        )
+        _print(f"manual interventions {agg.manual_interventions} · recoveries {agg.recoveries}")
+        if any(m.findings for m in runs):
+            _print("findings: B=BLOCKER M=MAJOR m=MINOR A=ADVISORY")
+        return 0 if not errors else 1
+    finally:
+        ari.close()
+
+
 def cmd_policy(args: argparse.Namespace) -> int:
     if args.default:
         _print(default_policy_text())
@@ -654,6 +711,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--json", action="store_true")
         sp.add_argument("--verify", action="store_true", help="verify the hash chain first")
     add("runs", cmd_runs, "list runs")
+    sp = add("metrics", cmd_metrics, "measure runs from the audit log (acceptance, rework, cost, latency)")
+    sp.add_argument("--json", action="store_true")
     sp = add("policy", cmd_policy, "print the effective policy")
     sp.add_argument("--default", action="store_true", help="print the built-in default policy")
     sp = add("hook", cmd_hook, "harness hook entry point (reads the hook payload on stdin)")
