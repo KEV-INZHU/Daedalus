@@ -99,6 +99,49 @@ def builder_prompt(c: TaskContract, feedback: list[str], round_no: int) -> str:
     return "\n".join(parts)
 
 
+PLAN_OUTPUT = """## Your task: plan, do not implement
+
+Up to {cap} workers can build in parallel, each in an isolated copy of the repository. Split the work
+into packages **only where they are genuinely independent**: disjoint files, stable interfaces between
+them. If the work is small or tightly coupled, return a single package. Do not edit any files.
+
+Rules Daedalus enforces mechanically (an invalid plan is rejected and one Builder does everything):
+- `owned_paths` are path globs; no two packages may own overlapping paths, and every change a worker
+  makes must fall inside its own package's paths.
+- `depends_on` lists packages whose results a package needs; they are integrated first.
+
+End your reply with exactly one fenced JSON block:
+
+```json
+{{"packages": [
+  {{"id": "api", "description": "what this package does", "owned_paths": ["src/api/**"], "depends_on": []}}
+]}}
+```
+"""
+
+
+def plan_prompt(c: TaskContract, cap: int) -> str:
+    return "\n".join([skill_body("brunel"), "", PLAN_OUTPUT.format(cap=cap), "", contract_block(c)])
+
+
+def worker_prompt(c: TaskContract, package: dict[str, Any]) -> str:
+    owned = ", ".join(package.get("owned_paths", ()))
+    return "\n".join(
+        [
+            skill_body("brunel"),
+            "",
+            contract_block(c),
+            "",
+            f"## Your package: {package.get('task_id')}",
+            "",
+            str(package.get("description") or ""),
+            "",
+            f"You may change **only** these paths: {owned}. Other packages, built in parallel, own the rest;",
+            "a change outside your paths gets your whole package rejected.",
+        ]
+    )
+
+
 def review_prompt(
     perspective: str,
     c: TaskContract,

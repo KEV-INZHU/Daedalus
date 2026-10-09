@@ -64,6 +64,11 @@ Human-only commands refuse to run inside an agent session or without a terminal.
 | `review`        | + one focused reviewer (Aristotle)      | When you want a second look            |
 | `council`       | + Socrates, Mozi, Aristotle, James      | High-stakes work                       |
 
+Parallel workers are off by default. To let Brunel split a task into
+independent packages that build concurrently in isolated git worktrees, raise
+the cap in policy, for example `policy: {default_budget: {max_workers: 2, ...}}`,
+and set `budget: {max_workers: 2}` in the run's contract file (`daedalus run --contract ...`).
+
 Risk floors apply in every mode. Touching `**/auth/**`, migrations, CI or
 lockfiles raises the tier, and the tier sets the reviews and approvals that are
 mandatory. A mode can add requirements but can never remove them.

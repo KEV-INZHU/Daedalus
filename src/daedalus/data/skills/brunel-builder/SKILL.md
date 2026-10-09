@@ -21,6 +21,12 @@ you finish and a deterministic predicate decides.
 - Do not commit, push, merge or deploy. Leave changes in the working tree.
 - If you received feedback from a previous round, address every item it lists.
 
+## When you are asked to plan
+
+If the run allows parallel workers, you may first be asked only for a plan. Split the work into packages
+only where they are genuinely independent (disjoint files, stable interfaces). One package is a fine
+answer. Each worker builds in an isolated copy of the repository and may change only its own paths.
+
 ## When you finish
 
 End your reply with exactly one fenced JSON block:

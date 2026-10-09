@@ -81,8 +81,8 @@ Status: 76 tests passing (`python -m pytest`).
 
 - [ ] Full Council for review/council modes; Plato arbitration on material disagreement
 - [x] Isolated worktrees per worker (run f318fc00189d)
-- [ ] Concurrency 2
-- [ ] Integration conflict detection under concurrency
+- [x] Bounded fan-out: planned DAG, concurrency up to the policy cap (run 8ea56a7320bc)
+- [x] Integration conflict detection under concurrency (ownership, base hashes, prior integrations)
 - [ ] Independent first-pass reviews before peer exposure
 
 ## Phase 3 — Measurement (not started)
@@ -110,11 +110,11 @@ independent reviewer through the `claude-code` adapter).
 | 64c62f68403b | Phase 1 follow-up backlog (UTF-8 output, stderr tail, metrics, marker constant) | 2 candidates | ACCEPTED ($0.82) | Reviewer: 1 minor (metrics could still abort) + 3 advisory fixed; F5-F7 advisory left open |
 | 3e6772ef6067 | Lean launches: no MCP/skills, read-only allowlist, per-role models | 3 candidates | ACCEPTED ($0.75) | Startup 37k → 5k input tokens per launch. First BLOCKERs: the "locked" profile was a denylist with holes; rebuilt as an allowlist |
 | 27c612afc6c3 | Lock every built-in preset; `--adapter` override; review follow-ups | 2 candidates | ACCEPTED ($0.53) | Reviewer caught a MAJOR: codex's `--full-auto` rode along on review launches. Presets now split builder-only flags |
-| f318fc00189d | Phase 2: isolated worktrees for non-in-place workers | — | in progress | Proposals derived from the worktree, not the agent's report |
+| f318fc00189d | Phase 2: isolated worktrees for non-in-place workers | 4 candidates | ACCEPTED ($1.65) | Reviewer caught 2 MAJORs: committed worker changes dropped from proposals; a shared /tmp hooks path I introduced. F15/F16 fixed in 8ea5 |
+| 8ea56a7320bc | Phase 2: bounded fan-out (plan → parallel worktrees → ordered integration) | — | in progress | Default cap stays 1 |
 
-Follow-ups: run f318 F8 (lifecycle must pass the worker's workspace as the session cwd; hooks inside a
-workspace). Lint: extra blank line in core/metrics.py. Run 64c6 F6 (utf8_output only from the console entry point). Run 27c6: F7 (`--adapter claude-code` when
+Follow-ups: run f318 F17 (filter drivers during proposal), F18 (tests use the real temp dir). Lint: extra blank line in core/metrics.py. Run 64c6 F6 (utf8_output only from the console entry point). Run 27c6: F7 (`--adapter claude-code` when
 config omits `name`), F8 (aider's `--yes-always` sits in the shared argv), F9 (dedupe preset-lock tests).
 
-Queue: bounded fan-out (cap stays 1) → council with
+Queue: council with
 independent first pass and Plato arbitration.

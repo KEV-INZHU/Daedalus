@@ -292,7 +292,7 @@ def test_workspace_creation_runs_no_repository_hooks(ari, repo):
     ari.worker_finished(rid, "t", status="FAILED")
 
 
-def test_hooks_path_lives_in_the_private_workspace_root(monkeypatch):
+def test_hooks_path_is_the_null_device(monkeypatch):
     import subprocess
 
     seen = []
@@ -304,8 +304,9 @@ def test_hooks_path_lives_in_the_private_workspace_root(monkeypatch):
 
     monkeypatch.setattr(worktree.subprocess, "run", spy)
     worktree._git(Path("."), "--version", check=False)
-    hooks = next(c for c in seen[-1] if c.startswith("core.hooksPath="))
-    assert Path(hooks.split("=", 1)[1]).parent == worktree.worktree_root()
+    import os
+
+    assert f"core.hooksPath={os.devnull}" in seen[-1]  # nothing can ever populate the null device
     assert "core.fsmonitor=false" in seen[-1]
 
 
@@ -340,3 +341,17 @@ def test_rollback_failure_keeps_the_original_error(ari, repo, monkeypatch):
     with pytest.raises(RuntimeError, match="store unavailable"):
         ari.dispatch(rid, "t")
     real_remove(repo, worktree.workspace_path(repo, rid, "t"))
+
+
+def test_release_refuses_a_recorded_path_that_is_not_the_tasks_location(ari, repo, tmp_path):
+    rid = ari.start({"objective": "o"}, actor=HUMAN)
+    ws, _ = dispatch(ari, rid)
+    decoy = worktree.worktree_root() / "decoy"
+    decoy.mkdir()
+    ari._append(rid, ev.WORKER_TRANSITION, SYS, {"task_id": "t", "to": "RUNNING", "reason": "r", "workspace": str(decoy)})
+    w = ari.worker_finished(rid, "t", status="FAILED")
+    removal = [e for e in ari.store.events(rid) if e.type == ev.WORKSPACE_REMOVED][-1].payload
+    assert removal["removed"] is False and "not this task's location" in removal["error"]
+    assert decoy.exists() and w.state is WorkerState.FAILED
+    decoy.rmdir()
+    worktree.remove(repo, ws)

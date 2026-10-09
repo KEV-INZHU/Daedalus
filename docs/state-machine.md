@@ -50,6 +50,25 @@ its path and seed hashes. When the session ends (any transition out of
 `DISPATCHED`/`RUNNING`), the proposal is derived from the worktree, not from
 the agent's report, and the worktree is removed (`worker.workspace_removed`).
 
+A non-in-place package needs a git repository with a base commit, and dispatch
+fails otherwise. Gitignored paths, the policy's `candidate.exclude` paths and
+symlinks aren't part of isolation. A worktree shares the repository's `.git`, so
+the gate guards a cooperative-but-fallible worker, not a hostile one (see
+docs/security-model.md).
+
+### Bounded fan-out
+
+When a run's `budget.max_workers` is above 1 (the policy cap, `default_budget.max_workers`,
+defaults to **1**), the lifecycle's first round asks Brunel for a dependency graph of
+packages. Ariadne validates it with the same checks as any plan (disjoint ownership,
+known dependencies, no cycles). Packages then run concurrently, never more than the cap,
+each in its own worktree as the agent's working directory. Each one integrates as it
+finishes, and dependents start only after their prerequisites have integrated. A failed
+package's dependents are cancelled without being started, and the failures are fed to
+an in-place Builder in the next round. An unusable, rejected or single-package plan
+falls back to the single in-place Builder. Agent sessions are the only work on worker
+threads; every audit-log write stays on the orchestrator thread.
+
 `COMPLETED` means "produced a proposal". The proposal is integrated only
 through `Ariadne.integrate`, which checks ownership, base hashes, contract
 version and conflicts with already-integrated work.

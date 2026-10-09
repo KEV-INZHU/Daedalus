@@ -772,6 +772,9 @@ class Ariadne:
         if not w.workspace:
             return
         try:
+            if Path(w.workspace).resolve() != worktree.workspace_path(self.root, run_id, task_id).resolve():
+                # Only ever delete the exact location this task's workspace is created at.
+                raise IntegrationError(f"recorded workspace {w.workspace} is not this task's location; not deleting")
             removed, error = worktree.remove(self.root, Path(w.workspace)), None
         except Exception as exc:  # noqa: BLE001 — never let cleanup undo a logged transition
             removed, error = False, f"{type(exc).__name__}: {exc}"
