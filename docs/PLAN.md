@@ -104,10 +104,12 @@ independent reviewer through the `claude-code` adapter).
 | Run | Objective | Rounds | Disposition | Notes |
 |-----|-----------|--------|-------------|-------|
 | 919e19288a2d | claude-code adapter: array-form JSON output, clean launch env | 3 candidates | ACCEPTED (17 min, $1.50) | Found by the first live launch. Reviewer caught a MAJOR (error subtypes reported COMPLETED) + 5 minor/advisory; F7 advisory left open |
-| c51720a89616 | `daedalus metrics` from the audit log | — | in progress | |
+| c51720a89616 | `daedalus metrics` from the audit log | 2 candidates | ACCEPTED ($1.63) | Reviewer: 3 minor + 3 advisory fixed, F7-F8 advisory left open. Metrics exposed 8 stop blocks per launched reviewer |
+| 20912f92221d | Hooks ignore Daedalus-launched sessions | — | in progress | Expect stop blocks = 0 from here on |
 
-Follow-ups: F7 (include stderr tail when a success result exits non-zero).
+Follow-ups: run 919e: F7 (stderr tail when a success result exits non-zero). Run c517: F7 (first-pass should use
+the policy's blocking severities), F8 (collect() should isolate any replay failure).
+Run 2091: F3 (define the DAEDALUS_AGENT marker once; needs cli.py and adapters in scope).
 
-Queue: **Stop/SessionStart hooks must ignore Daedalus-launched sessions** (metrics showed 8 stop blocks
-inside each launched reviewer) → worktree isolation → bounded fan-out (cap stays 1) → council with
+Queue: worktree isolation → bounded fan-out (cap stays 1) → council with
 independent first pass and Plato arbitration → Windows console encoding of status output.

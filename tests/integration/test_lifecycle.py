@@ -17,6 +17,13 @@ from daedalus.harness import claude_code
 from daedalus.orchestration.lifecycle import run_task
 
 DONE = {"status": "done", "summary": "fixed"}
+
+
+@pytest.fixture(autouse=True)
+def not_a_launched_session(monkeypatch):
+    """These tests describe a harness session. When the suite itself runs inside a
+    Daedalus-launched agent, DAEDALUS_AGENT is inherited and the hooks would stand down."""
+    monkeypatch.delenv("DAEDALUS_AGENT", raising=False)
 CLEAN = {"summary": "looks right", "findings": []}
 
 
@@ -177,3 +184,14 @@ def test_cli_status_and_verify(repo, capsys, monkeypatch):
     assert cli.main(["-C", str(repo), "attest", "C1", "pass", "--evidence", "x", "-y"]) == 2
     assert cli.main(["-C", str(repo), "audit"]) == 0
     assert "audit chain intact" in capsys.readouterr().out
+
+
+def test_hooks_ignore_daedalus_launched_sessions(ari, repo, monkeypatch):
+    rid = ari.start({"objective": "make app ok"}, actor="agent:harness")
+    before = len(ari.store.events(rid))
+    monkeypatch.setenv("DAEDALUS_AGENT", "1")
+    assert claude_code.stop_hook(payload(repo), ari=ari) == {}
+    assert claude_code.session_start_hook(payload(repo), ari=ari) == {}
+    assert claude_code.run_hook("stop", json.dumps(payload(repo))) == ""
+    assert claude_code.run_hook("session-start", json.dumps(payload(repo))) == ""
+    assert len(ari.store.events(rid)) == before  # no verify, no stop block, no disposition
