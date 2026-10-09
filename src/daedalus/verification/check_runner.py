@@ -18,7 +18,7 @@ from pathlib import Path
 from daedalus.core.policy import CheckDefinition
 
 _SECRET = re.compile(
-    r"(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY|_KEY$|^AWS_|^GH_|^GITHUB_TOKEN)", re.I
+    r"(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY|_KEY$|^AWS_|^GH_|^GITHUB_TOKEN)", re.IGNORECASE
 )
 
 

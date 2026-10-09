@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Daedalus worker / agent result",
+  "type": "object",
+  "description": "What an adapter returns for one agent session. Builder and reviewer structured blocks are shown under `structured`.",
+  "required": [
+    "status"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "COMPLETED",
+        "FAILED",
+        "TIMED_OUT",
+        "CANCELLED"
+      ]
+    },
+    "output": {
+      "type": "string"
+    },
+    "cost": {
+      "type": "number",
+      "minimum": 0
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "structured": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "title": "builder result",
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "done",
+                "blocked"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            },
+            "blocker": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "title": "review result",
+          "type": "object",
+          "required": [
+            "findings"
+          ],
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "resolves": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "findings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "title",
+                  "evidence",
+                  "severity"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "evidence": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "severity": {
+                    "enum": [
+                      "BLOCKER",
+                      "MAJOR",
+                      "MINOR",
+                      "ADVISORY"
+                    ]
+                  },
+                  "required_change": {
+                    "type": "string"
+                  },
+                  "verification": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

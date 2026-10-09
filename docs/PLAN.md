@@ -29,28 +29,28 @@ Council and fan-out only after measured readiness.
 - [x] Single-orchestrator lock with stale-holder takeover — `orchestration/lock.py`
 - [x] Ariadne: the single authority that validates and appends every state change — `orchestration/ariadne.py`
 - [x] Check subprocess runner (scrubbed env, timeouts → ERROR) — `verification/check_runner.py`
-- [ ] Proof Gate: run required checks, retries, bind evidence to candidate — `verification/proof_gate.py`
-- [ ] Crash recovery drills (checks, workers, restricted actions) covered by tests
+- [x] Proof Gate: run required checks, retries, bind evidence to candidate — `verification/proof_gate.py`
+- [x] Crash recovery drills (checks, workers, restricted actions) covered by tests
 
 ## Phase 0 — Required control-plane tests (§16)
 
-- [ ] Mandatory check fails → never accepted
-- [ ] Candidate changes after a passing check → evidence STALE
-- [ ] Worker returns after cancellation → cannot integrate
-- [ ] Sensitive path modified → risk floor enforced
-- [ ] Contract criterion changes → version advances, evidence invalidated
-- [ ] Workers overlap interfaces/ownership → conflict detected before verification
-- [ ] Budget expires with blocker unresolved → never accepted
-- [ ] Authorization expires before action → action denied
-- [ ] Verifier untrusted → required check fails closed
-- [ ] Candidate identity changes mid-run → prior evidence cannot certify new candidate
-- [ ] Untracked file added → candidate identity changes
-- [ ] Contract drifts without authorization → rejected/blocked, never accepted
-- [ ] Orchestrator crashes during execution → recovery reconciles, no presumed success
-- [ ] Restricted op may have executed before crash → reconciliation before retry
-- [ ] Illegal state transition → rejected
-- [ ] Required check absent from results → acceptance impossible
-- [ ] Audit log tampering → detected by hash chain
+- [x] Mandatory check fails → never accepted
+- [x] Candidate changes after a passing check → evidence STALE
+- [x] Worker returns after cancellation → cannot integrate
+- [x] Sensitive path modified → risk floor enforced
+- [x] Contract criterion changes → version advances, evidence invalidated
+- [x] Workers overlap interfaces/ownership → conflict detected before verification
+- [x] Budget expires with blocker unresolved → never accepted
+- [x] Authorization expires before action → action denied
+- [x] Verifier untrusted → required check fails closed
+- [x] Candidate identity changes mid-run → prior evidence cannot certify new candidate
+- [x] Untracked file added → candidate identity changes
+- [x] Contract drifts without authorization → rejected/blocked, never accepted
+- [x] Orchestrator crashes during execution → recovery reconciles, no presumed success
+- [x] Restricted op may have executed before crash → reconciliation before retry
+- [x] Illegal state transition → rejected
+- [x] Required check absent from results → acceptance impossible
+- [x] Audit log tampering → detected by hash chain
 
 ## Phase 1 — Adapters, CLI, single-worker baseline
 
@@ -58,20 +58,24 @@ Council and fan-out only after measured readiness.
 - [x] Inline adapter (harness is the executor) — `adapters/inline.py`
 - [x] Command adapter with `claude-code` preset (codex/aider experimental) — `adapters/command.py`
 - [x] Simulated adapter for tests — `adapters/simulated.py`
-- [ ] Lifecycle loop: Builder → verify → required reviews → finish — `orchestration/lifecycle.py`
-- [ ] Role prompts / skills (builder, reviewers, gate) shipped as package data
-- [ ] CLI: `init`, `on/off`, `start`, `run`, `status`, `verify`, `finish`, `cancel`, `log`/`audit`
-- [ ] CLI human decisions: `approve`, `deny`, `attest`, `amend`, `risk-exception`, `reconcile`, `act`
-- [ ] Claude Code shim: Stop hook gates "done", SessionStart injects run context, `daedalus install claude-code`
-- [ ] Human-authority commands require an interactive terminal (defence in depth)
-- [ ] End-to-end test with a scripted Builder and reviewer on a synthetic repo
+- [x] Lifecycle loop: Builder → verify → required reviews → finish — `orchestration/lifecycle.py`
+- [x] Role prompts / skills (builder, reviewers, gate) shipped as package data
+- [x] CLI: `init`, `on/off`, `start`, `run`, `status`, `verify`, `finish`, `cancel`, `log`/`audit`
+- [x] CLI human decisions: `approve`, `deny`, `attest`, `amend`, `risk-exception`, `reconcile`, `act`
+- [x] Claude Code shim: Stop hook gates "done", SessionStart injects run context, `daedalus install claude-code`
+- [x] Human-authority commands require an interactive terminal (defence in depth)
+- [x] End-to-end test with a scripted Builder and reviewer on a synthetic repo
+- [ ] Live baseline: run real tasks through the `claude-code` adapter and record acceptance, rework, cost, latency
+- [ ] Exercise the experimental `codex` / `aider` presets against the real CLIs
+
+Status: 76 tests passing (`python -m pytest`).
 
 ## Docs and schemas
 
 - [x] Build plan (this file)
-- [ ] README: three-surface quickstart (toggle, contract, status)
-- [ ] `docs/architecture.md`, `docs/state-machine.md`, `docs/security-model.md`, `docs/adapter-contract.md`
-- [ ] JSON schemas: task contract, evidence record, approval record, worker result, policy
+- [x] README: three-surface quickstart (toggle, contract, status)
+- [x] `docs/architecture.md`, `docs/state-machine.md`, `docs/security-model.md`, `docs/adapter-contract.md`
+- [x] JSON schemas: task contract, evidence record, approval record, worker result, policy
 
 ## Phase 2 — Council and bounded fan-out (not started; gated on Phase 1 measurements)
 

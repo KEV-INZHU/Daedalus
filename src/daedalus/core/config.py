@@ -166,6 +166,49 @@ def load_config(root: str | Path) -> RepoConfig:
     )
 
 
+TOGGLE_FILE = "enabled"
+
+
+def gate_enabled(root: Path) -> bool:
+    """`daedalus on|off` writes a local override in .daedalus/ (never part of a
+    candidate); otherwise `enabled:` from .daedalus.yml decides."""
+    try:
+        return (root / STATE_DIR / TOGGLE_FILE).read_text(encoding="utf-8").strip() != "off"
+    except OSError:
+        pass
+    try:
+        return load_config(root).enabled
+    except PolicyError:
+        return True  # a broken config must not silently switch the gate off
+
+
+def set_gate(root: Path, on: bool) -> None:
+    d = root / STATE_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    (d / TOGGLE_FILE).write_text("on\n" if on else "off\n", encoding="utf-8")
+
+
+def uncommitted_policy_files(root: Path) -> list[str]:
+    """Policy is trusted repository configuration: it must be committed before a
+    run pins it, or the run would be certified by a policy nobody reviewed."""
+    paths = [CONFIG_FILE]
+    try:
+        cfg = yaml.safe_load((root / CONFIG_FILE).read_text(encoding="utf-8")) or {}
+        if isinstance(cfg, dict) and cfg.get("policy_file"):
+            paths.append(str(cfg["policy_file"]))
+    except (OSError, yaml.YAMLError):
+        pass
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "--", *paths], capture_output=True, text=True
+        )
+    except FileNotFoundError:
+        return []
+    if r.returncode != 0:
+        return []  # not a git repository: nothing to compare against
+    return [line[3:] for line in r.stdout.splitlines() if line.strip()]
+
+
 def render_config(checks: dict[str, dict[str, Any]], adapter: str | None = None) -> str:
     lines = [
         "# Daedalus gate configuration (see the Daedalus README).",

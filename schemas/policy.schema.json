@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Daedalus policy",
+  "type": "object",
+  "required": [
+    "policy_version",
+    "tiers",
+    "checks"
+  ],
+  "$defs": {
+    "floor": {
+      "type": "object",
+      "required": [
+        "patterns",
+        "tier"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "patterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tier": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "properties": {
+    "policy_version": {
+      "type": [
+        "string",
+        "integer"
+      ]
+    },
+    "tiers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "tier_requirements": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "reviews": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "approvals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "independent_review": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "path_floors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/floor"
+      }
+    },
+    "change_floors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/floor"
+      }
+    },
+    "behavioral_floors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/floor"
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "timeout_s": {
+            "type": "number"
+          },
+          "max_attempts": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "mandatory": {
+            "type": "boolean"
+          },
+          "env_inputs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "transient_exit_codes": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "retry_on_timeout": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "trusted_verifiers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "authorities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "not": {
+            "pattern": "^agent:"
+          }
+        }
+      }
+    },
+    "restricted_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "actions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requires_acceptance": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "approval_ttl_seconds": {
+      "type": "number"
+    },
+    "blocking_severities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_degradations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "violation_disposition": {
+      "enum": [
+        "REJECTED",
+        "BLOCKED"
+      ]
+    },
+    "default_budget": {
+      "type": "object"
+    },
+    "candidate": {
+      "type": "object",
+      "properties": {
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
