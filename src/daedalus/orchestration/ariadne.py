@@ -1031,6 +1031,12 @@ class Ariadne:
             )
             return cand
 
+    def stop_check(self, run_id: str) -> Callable[[], bool]:
+        """For launched sessions: True once the run is cancelled or has a final disposition,
+        whoever recorded it (`daedalus cancel` runs in another process). Safe on worker threads."""
+        store, types = self.store, (ev.CANCEL_REQUESTED, ev.DISPOSITION)
+        return lambda: store.has_event(run_id, types)
+
     def charge(self, run_id: str, *, cost: float = 0.0, attempts: int = 0, note: str = "") -> None:
         self._append(run_id, ev.COST_CHARGED, SYSTEM, {"cost": cost, "attempts": attempts, "note": note})
 

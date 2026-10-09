@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,9 @@ class AgentRequest:
     cwd: Path
     timeout_s: float = 3600.0
     read_only: bool = False
+    # Polled while the session runs; True means the run no longer wants it (cancelled or
+    # finished elsewhere), and an adapter that owns the session stops it.
+    should_stop: Callable[[], bool] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)

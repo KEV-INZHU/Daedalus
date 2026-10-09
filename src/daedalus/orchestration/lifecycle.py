@@ -30,7 +30,7 @@ from typing import Any
 from daedalus.adapters.base import Adapter, AgentRequest, AgentResult, require
 from daedalus.core.acceptance import Decision
 from daedalus.core.errors import ContractError, DaedalusError, IntegrationError
-from daedalus.core.state_machine import Disposition, WorkerState
+from daedalus.core.state_machine import Disposition, ExecutionState, WorkerState
 from daedalus.orchestration import prompts
 from daedalus.orchestration.ariadne import SYSTEM, Ariadne
 from daedalus.repository.candidate import diff_text
@@ -82,7 +82,10 @@ def launch_review(
     )
     notify(f"launching {perspective} review of candidate {cand.short}")
     res = adapter.run_agent(
-        AgentRequest(run_id, f"review-{perspective}", perspective, prompt, ari.root, REVIEW_TIMEOUT_S, read_only=True)
+        AgentRequest(
+            run_id, f"review-{perspective}", perspective, prompt, ari.root, REVIEW_TIMEOUT_S, read_only=True,
+            should_stop=ari.stop_check(run_id),
+        )
     )
     if res.cost:
         ari.charge(run_id, cost=res.cost, note=f"{perspective} review")
@@ -161,7 +164,10 @@ def arbitrate(
     )
     notify(f"Plato is arbitrating {finding_id}")
     res = adapter.run_agent(
-        AgentRequest(run_id, f"arbitrate-{finding_id}", "plato", prompt, ari.root, REVIEW_TIMEOUT_S, read_only=True)
+        AgentRequest(
+            run_id, f"arbitrate-{finding_id}", "plato", prompt, ari.root, REVIEW_TIMEOUT_S, read_only=True,
+            should_stop=ari.stop_check(run_id),
+        )
     )
     if res.cost:
         ari.charge(run_id, cost=res.cost, note=f"arbitrate {finding_id}")
@@ -237,6 +243,7 @@ def build_round(
                 prompts.builder_prompt(state.contract, feedback, round_no),
                 ari.root,
                 BUILD_TIMEOUT_S,
+                should_stop=ari.stop_check(run_id),
             )
         )
     except Exception as exc:
@@ -329,7 +336,7 @@ def fan_out_round(
     before = ari.capture(state).candidate_id
     plan_req = AgentRequest(
         run_id, f"plan-{round_no}", "brunel", prompts.plan_prompt(state.contract, cap), ari.root,
-        REVIEW_TIMEOUT_S, read_only=True,
+        REVIEW_TIMEOUT_S, read_only=True, should_stop=ari.stop_check(run_id),
     )
     try:
         res = adapter.run_agent(plan_req)
@@ -386,6 +393,7 @@ def fan_out_round(
         except IntegrationError as exc:
             fail(tid, str(exc))
 
+    stop = ari.stop_check(run_id)
     pool = ThreadPoolExecutor(max_workers=cap, thread_name_prefix="daedalus-worker")
     aborted = False
     try:
@@ -414,7 +422,7 @@ def fan_out_round(
                     continue
                 req = AgentRequest(
                     run_id, tid, "brunel", prompts.worker_prompt(state.contract, w.package),
-                    Path(w.workspace), BUILD_TIMEOUT_S,
+                    Path(w.workspace), BUILD_TIMEOUT_S, should_stop=stop,
                 )
                 running[pool.submit(adapter.run_agent, req)] = tid
                 notify(f"dispatched {tid} ({len(running)}/{cap} running)")
@@ -496,6 +504,8 @@ def drive(
     feedback: list[str] = []
     rounds = 0
     for round_no in range(1, max_rounds + 1):
+        if ari.state(run_id).execution is not ExecutionState.RUNNING:
+            break  # cancelled (or finished) elsewhere: no further rounds
         rounds = round_no
         try:
             fan = None
@@ -539,5 +549,21 @@ def drive(
             break  # what remains is for a human (or a reviewer that keeps failing)
     decision = ari.finish(run_id)
     if decision.disposition is Disposition.BLOCKED:
-        notes.append("run left open: resolve the [human] items, then `daedalus finish`")
+        notes.append(left_open_note(decision, rounds))
     return RunReport(run_id, decision, rounds, notes)
+
+
+def left_open_note(decision: Decision, rounds: int) -> str:
+    """What a BLOCKED run is waiting for, by who can act on it."""
+    who = {r.fixable_by for r in decision.reasons}
+    if "human" in who:
+        return "run left open: resolve the [human] items, then `daedalus finish`"
+    if "agent" in who:
+        return (
+            f"run left open after {rounds} round(s): the [agent] items remain; fix them "
+            "(or `daedalus run` again with more rounds), then `daedalus finish`"
+        )
+    return (
+        "run left open: the [system] items remain (after an interruption, `daedalus reconcile`), "
+        "then `daedalus finish`"
+    )

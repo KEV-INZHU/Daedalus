@@ -33,8 +33,17 @@ def test_review_launch_gets_only_an_allowlist_of_read_tools():
     assert not any(t in CLAUDE_REVIEW_TOOLS.split(",") for t in EDITING_OR_SHELL)
 
 
+def test_review_launch_ignores_settings_files_and_stays_in_the_repository():
+    # Run 10: without --restricted the user's settings let a reviewer read outside the
+    # repository, and it loaded `.claude/CLAUDE.md` and auto-memory a Builder can write.
+    cmd = argv({"args": ["--verbose"]}, read_only=True)
+    assert "--restricted" in cmd
+    assert cmd.index("--restricted") > cmd.index("--disable-slash-commands")  # among the final read-only args
+
+
 def test_builder_launch_is_not_restricted_to_read_tools():
     assert "--tools" not in argv({}, read_only=False)
+    assert "--restricted" not in argv({}, read_only=False)
 
 
 def test_models_are_selected_per_role():
