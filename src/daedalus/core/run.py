@@ -60,6 +60,8 @@ WORKER_TRANSITION = "worker.transition"
 WORKER_INTEGRATED = "worker.integrated"
 WORKSPACE_REMOVED = "worker.workspace_removed"
 COST_CHARGED = "budget.charged"
+SESSION_USAGE = "session.usage"
+QUOTA_OBSERVED = "quota.observed"
 CANCEL_REQUESTED = "cancel.requested"
 UNRESOLVABLE = "run.unresolvable"
 DISPOSITION = "disposition.recorded"
@@ -151,7 +153,11 @@ class RunState:
     workers: dict[str, WorkerRecord] = field(default_factory=dict)
     plan_versions: int = 0
     attempts_used: int = 0
-    cost_used: float = 0.0
+    cost_used: float = 0.0  # every charge, estimates and cash together
+    cash_used: float = 0.0  # charges whose basis is cash (money actually billed)
+    cash_unknown: bool = False  # a billed session ended without reporting what it cost
+    sessions: list[dict[str, Any]] = field(default_factory=list)  # session.usage payloads
+    quota: dict[str, Any] | None = None  # latest quota.observed reading in this run
     unresolvable: str | None = None
     cancel_requested: bool = False
     disposition: Disposition | None = None
@@ -345,7 +351,15 @@ def _apply(s: RunState, ev: Event) -> None:
         s.workers[p["task_id"]].integrated = True
     elif t == COST_CHARGED:
         s.cost_used += float(p.get("cost", 0.0))
+        if p.get("basis") == "cash":  # charges recorded before bases existed are estimates
+            s.cash_used += float(p.get("cost", 0.0))
         s.attempts_used += int(p.get("attempts", 0))
+    elif t == SESSION_USAGE:
+        s.sessions.append(dict(p))
+        if p.get("cost_unknown") and p.get("basis") == "cash":
+            s.cash_unknown = True
+    elif t == QUOTA_OBSERVED:
+        s.quota = dict(p)
     elif t == CANCEL_REQUESTED:
         s.cancel_requested = True
     elif t == UNRESOLVABLE:

@@ -108,6 +108,10 @@
         "max_workers": {
           "type": "integer",
           "minimum": 1
+        },
+        "max_cash": {
+          "type": "number",
+          "minimum": 0
         }
       }
     },

@@ -88,7 +88,9 @@ def test_allowed_extra_args_reach_builders_only():
     builder = argv(cfg, read_only=False)
     assert builder[-4:] == ["--verbose", "--max-turns", "40", "--fallback-model=sonnet"]
     review = argv(cfg, read_only=True)
-    assert "--verbose" not in review and review[-2:] == ["--tools", CLAUDE_REVIEW_TOOLS]
+    # --verbose is part of every launch (stream-json needs it); config's copy never reaches a review
+    assert review.count("--verbose") == 1 and "--max-turns" not in review and "--fallback-model=sonnet" not in review
+    assert review[-2:] == ["--tools", CLAUDE_REVIEW_TOOLS]
 
 
 def test_model_is_a_single_argument():

@@ -87,8 +87,7 @@ def launch_review(
             should_stop=ari.stop_check(run_id),
         )
     )
-    if res.cost:
-        ari.charge(run_id, cost=res.cost, note=f"{perspective} review")
+    ari.record_session(run_id, f"review-{perspective}", perspective, res)
 
     def failed(why: str) -> None:
         ari.record_failed_review(run_id, perspective, why)
@@ -169,8 +168,7 @@ def arbitrate(
             should_stop=ari.stop_check(run_id),
         )
     )
-    if res.cost:
-        ari.charge(run_id, cost=res.cost, note=f"arbitrate {finding_id}")
+    ari.record_session(run_id, f"arbitrate-{finding_id}", "plato", res)
 
     def failed(why: str) -> None:
         ari.record_failed_arbitration(run_id, finding_id, why)
@@ -249,13 +247,13 @@ def build_round(
     except Exception as exc:
         ari.worker_finished(run_id, task_id, status="FAILED", note=f"adapter error: {exc}")
         raise
+    ari.record_session(run_id, task_id, "brunel", res)
     status = res.status if res.status in ("COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED") else "FAILED"
     rec = ari.worker_finished(
         run_id,
         task_id,
         status=status,
         proposal={"summary": (res.structured or {}).get("summary", ""), "output_tail": res.output[-2000:]},
-        cost=res.cost,
         note=res.error or "",
         session_id=res.session_id,
     )
@@ -343,8 +341,7 @@ def fan_out_round(
     except Exception as exc:  # noqa: BLE001 — planning is optional; a crashed planner means "no plan"
         notify(f"planner failed ({exc}); a single Builder works in place")
         return None
-    if res.cost:
-        ari.charge(run_id, cost=res.cost, note="plan")
+    ari.record_session(run_id, f"plan-{round_no}", "brunel", res)
     if ari.capture(ari.state(run_id)).candidate_id != before:
         notify("the planner changed the working tree; ignoring its plan")
         return None
@@ -371,12 +368,12 @@ def fan_out_round(
         body = out.structured or {}
         status = out.status if out.status in ok else "FAILED"
         blocked = status == "COMPLETED" and body.get("status") == "blocked"
+        ari.record_session(run_id, tid, "brunel", out)
         rec = ari.worker_finished(
             run_id,
             tid,
             status="FAILED" if blocked else status,
             proposal={"summary": body.get("summary", ""), "output_tail": out.output[-2000:]},
-            cost=out.cost,
             note=f"worker reported blocked: {body.get('blocker', '')}" if blocked else out.error or "",
             session_id=out.session_id,
         )

@@ -17,7 +17,7 @@ from daedalus.core.errors import CapabilityError
 
 EXACT_REVIEW_ARGV = {
     "claude-code": [
-        "claude", "-p", "--output-format", "json",
+        "claude", "-p", "--output-format", "stream-json", "--verbose",
         "--strict-mcp-config", "--disable-slash-commands",
         "--restricted", "--tools", "Read,Grep,Glob",
     ],

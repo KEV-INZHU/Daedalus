@@ -9,6 +9,8 @@ Authority checks key off the acting principal: principals starting with
 
 from __future__ import annotations
 
+import json
+import math
 import subprocess
 import time
 import uuid
@@ -18,7 +20,7 @@ from typing import Any
 
 import yaml
 
-from daedalus.adapters.base import Adapter
+from daedalus.adapters.base import COST_BASES, Adapter, AgentResult
 from daedalus.audit.store import EventStore
 from daedalus.core import run as ev
 from daedalus.core.acceptance import Decision, Observation, evaluate, observed_violations
@@ -901,7 +903,6 @@ class Ariadne:
         *,
         status: str,
         proposal: dict[str, Any] | None = None,
-        cost: float = 0.0,
         note: str = "",
         session_id: str | None = None,
     ) -> WorkerRecord:
@@ -909,8 +910,6 @@ class Ariadne:
         w = state.workers.get(task_id)
         if w is None:
             raise ContractError(f"unknown task {task_id}")
-        if cost:
-            self._append(run_id, ev.COST_CHARGED, SYSTEM, {"cost": cost, "task_id": task_id})
         if w.state not in WORKER_ACTIVE:
             raise IntegrationError(
                 f"late result for {task_id} ({w.state.value}) rejected; nothing was recorded as authoritative"
@@ -1037,8 +1036,63 @@ class Ariadne:
         store, types = self.store, (ev.CANCEL_REQUESTED, ev.DISPOSITION)
         return lambda: store.has_event(run_id, types)
 
-    def charge(self, run_id: str, *, cost: float = 0.0, attempts: int = 0, note: str = "") -> None:
-        self._append(run_id, ev.COST_CHARGED, SYSTEM, {"cost": cost, "attempts": attempts, "note": note})
+    def charge(
+        self, run_id: str, *, cost: float = 0.0, attempts: int = 0, note: str = "", basis: str = "api_equivalent"
+    ) -> None:
+        self._append(
+            run_id, ev.COST_CHARGED, SYSTEM, {"cost": cost, "attempts": attempts, "note": note, "basis": basis}
+        )
+
+    def record_session(self, run_id: str, task_id: str, role: str, res: AgentResult) -> None:
+        """Record what a launched session reported: its cost (with its basis), the models
+        and tokens it used, and any subscription quota reading. An unknown basis is
+        counted as cash, so money is never under-counted. Adapter-supplied usage and quota
+        that are not JSON objects are dropped (noted), never allowed to break the caller,
+        and they cannot overwrite the ledger's own fields."""
+        basis = res.cost_basis if res.cost_basis in COST_BASES else "cash"
+        try:
+            cost = float(res.cost)
+        except (TypeError, ValueError, OverflowError):
+            cost = math.nan
+        if not (math.isfinite(cost) and cost >= 0):
+            # Never let a nonsense cost poison the ledger (NaN would disable every cap); record the anomaly.
+            self._append(run_id, ev.SESSION_USAGE, SYSTEM, {"task_id": task_id, "role": role,
+                                                            "dropped": f"unusable cost {res.cost!r}"})
+            cost = 0.0
+        if cost:
+            self.charge(run_id, cost=cost, note=f"{role} {task_id}", basis=basis)
+
+        def clean(d: Any, what: str) -> dict[str, Any] | None:
+            if d is None:
+                return None
+            try:
+                if isinstance(d, dict):
+                    out = json.loads(json.dumps(d, allow_nan=False))
+                    for reserved in ("dropped", "cost_unknown"):  # the ledger's own markers
+                        out.pop(reserved, None)
+                    return out
+            except (TypeError, ValueError):
+                pass
+            self._append(run_id, ev.SESSION_USAGE, SYSTEM, {"task_id": task_id, "role": role,
+                                                            "dropped": f"unreadable {what} from the adapter"})
+            return None
+
+        usage, quota = clean(res.usage, "usage"), clean(res.quota, "quota")
+        if usage is not None:
+            self._append(
+                run_id,
+                ev.SESSION_USAGE,
+                SYSTEM,
+                {**usage, "task_id": task_id, "role": role, "session_id": res.session_id, "status": res.status,
+                 "cost": cost, "basis": basis},
+            )
+        if quota is not None:
+            self._append(run_id, ev.QUOTA_OBSERVED, SYSTEM, quota)
+        if usage is None and res.status != "COMPLETED" and not cost:
+            # The session ended without reporting its cost; record the gap rather than imply it was free.
+            self._append(run_id, ev.SESSION_USAGE, SYSTEM, {"task_id": task_id, "role": role,
+                                                            "session_id": res.session_id, "status": res.status,
+                                                            "cost_unknown": True, "basis": basis})
 
     def note_stop_blocked(self, run_id: str, reasons: list[str]) -> None:
         self._append(run_id, ev.HARNESS_STOP_BLOCKED, SYSTEM, {"reasons": reasons})

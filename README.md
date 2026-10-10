@@ -98,6 +98,14 @@ policy:                     # optional: override any key of the default policy
 
 `daedalus policy --default` prints the full default policy.
 
+Budgets keep two currencies apart. `max_cost` caps everything a run is charged, including
+API-equivalent estimates from subscription sessions; `max_cash` caps money actually billed and
+defaults to 0. Like `max_cost`, an exhausted cash budget turns a run that still has unmet
+conditions into REJECTED; a run whose conditions all hold is not undone by it. A billed session
+that ends without reporting its cost (a timeout, a cancellation) counts as exhausting `max_cash`,
+since the spend cannot be shown to fit. The budget records spend after the fact; routing
+is what declines a paid route before it is called.
+
 ## What it guarantees and what it doesn't
 
 - Every mandatory check must PASS on the **current** candidate. A candidate is

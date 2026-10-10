@@ -161,6 +161,10 @@ def budget_exhausted(state: RunState, now: float) -> list[str]:
         out.append(f"wall time {int(now - state.created_at)}s/{int(b.max_wall_seconds)}s")
     if state.cost_used >= b.max_cost:
         out.append(f"cost {state.cost_used:.2f}/{b.max_cost:.2f}")
+    if state.cash_unknown:
+        out.append("cash unknown (a billed session ended before reporting its cost)")
+    elif state.cash_used > 0 and state.cash_used >= b.max_cash:
+        out.append(f"cash {state.cash_used:.2f}/{b.max_cash:.2f}")
     return out
 
 

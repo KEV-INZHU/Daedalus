@@ -23,7 +23,17 @@ timeout, a `read_only` flag and an optional `should_stop` check. The lifecycle
 sets `should_stop` to "this run has been cancelled or has a final disposition";
 an adapter that owns the session polls it and stops the session when it turns true. `AgentResult` returns a status
 (`COMPLETED | FAILED | TIMED_OUT | CANCELLED`), the raw output, an optional
-structured result, cost, and a session id.
+structured result, cost, and a session id. It also says what the cost means
+(`cost_basis`: `api_equivalent` for a list-price estimate such as a subscription
+session, `cash` for money actually billed), and may carry `usage` (models and
+token counts) and `quota` (a subscription rate-limit reading). Ariadne records
+all three per session (`budget.charged` with its basis, `session.usage`,
+`quota.observed`). An unknown basis is counted as cash, and a non-finite or negative
+cost is never charged. The `claude-code` preset reports `api_equivalent` only when the
+session says it used no API key (`apiKeySource: "none"`, a subscription login) and the
+launch environment carries no billed credential, gateway or cloud provider
+(`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`); anything else is cash.
 
 ## Capabilities
 
@@ -65,9 +75,12 @@ Every command adapter preset (`claude-code`, `codex`, `aider`, custom `argv`) st
 markers (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`) are
 removed and `DAEDALUS_AGENT=1` is set, so a launched agent can't pass for its
 parent session, and Daedalus's human-only commands refuse inside it. The
-`claude-code` preset accepts both shapes of `claude -p --output-format json`:
-a single result object (older releases) or the array of session messages
-(2.1.x), whose last `type: result` entry is the outcome. A result whose `subtype` is not
+`claude-code` preset launches `claude -p --output-format stream-json --verbose`,
+the only format that carries the subscription's `rate_limit_event` (5-hour and
+7-day utilization and reset times; undocumented, so a missing or malformed event
+is recorded as no reading, never as headroom). The parser also accepts `json`
+output: a single result object (older releases) or the array of session messages
+(2.1.x). The last `type: result` message is the outcome. A result whose `subtype` is not
 `success` (e.g. `error_max_turns`), `is_error: true`, or a non-zero exit is FAILED; reported cost is kept.
 
 ## Launch profile and plan usage

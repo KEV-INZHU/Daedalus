@@ -607,7 +607,8 @@ def cmd_metrics(args: argparse.Namespace) -> int:
         )
         latency = None if agg.median_latency_accepted_s is None else agg.median_latency_accepted_s / 60
         _print(
-            f"median latency (accepted) {num(latency, 'm')} · cost, all runs {agg.cost_total:.2f} · "
+            f"median latency (accepted) {num(latency, 'm')} · cost, all runs {agg.cost_total:.2f} "
+            f"(cash {agg.cash_total:.2f}; the rest is API-equivalent estimate) · "
             f"cost per accepted (finished runs) {num(agg.cost_per_accepted)}"
         )
         _print(
