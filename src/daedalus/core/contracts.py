@@ -8,6 +8,7 @@ make every artifact bound to the previous version stale.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, fields
 from typing import Any
 
@@ -57,6 +58,7 @@ class Budget:
     max_wall_seconds: float = 86400.0
     max_cost: float = 50.0
     max_workers: int = 1
+    max_cash: float = 0.0  # money actually billed (cash routes); 0 allows none
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -169,11 +171,14 @@ def _budget(raw: Any, policy: Policy) -> Budget:
             max_wall_seconds=float(merged["max_wall_seconds"]),
             max_cost=float(merged["max_cost"]),
             max_workers=int(merged["max_workers"]),
+            max_cash=float(merged["max_cash"]),
         )
     except (TypeError, ValueError) as exc:
         raise ContractError(f"invalid budget: {exc}") from exc
-    if budget.max_attempts < 1 or budget.max_wall_seconds <= 0 or budget.max_cost < 0:
+    if budget.max_attempts < 1 or not budget.max_wall_seconds > 0 or not budget.max_cost >= 0:
         raise ContractError("budget limits must be positive")
+    if not 0 <= budget.max_cash < math.inf:  # NaN fails this too, so it can never disable the cap
+        raise ContractError("budget.max_cash must be a finite, non-negative amount")
     cap = int(policy.default_budget.get("max_workers", 1))
     if not 1 <= budget.max_workers <= cap:
         raise ContractError(f"max_workers must be between 1 and the policy cap ({cap})")

@@ -72,6 +72,14 @@ class AgentResult:
     cost: float = 0.0
     session_id: str | None = None
     error: str | None = None
+    # What `cost` means: "api_equivalent" (a list-price estimate, e.g. a subscription session; never
+    # a charge) or "cash" (money actually billed). The two are budgeted separately.
+    cost_basis: str = "api_equivalent"
+    usage: dict[str, Any] | None = None  # models and token counts the session reported
+    quota: dict[str, Any] | None = None  # subscription rate-limit reading, when the harness reports one
+
+
+COST_BASES = ("api_equivalent", "cash")
 
 
 class Adapter(ABC):

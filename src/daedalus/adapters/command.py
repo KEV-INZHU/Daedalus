@@ -10,6 +10,7 @@ is not exercised by Daedalus's tests, and they declare that limitation.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -61,7 +62,9 @@ _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$")
 # writing belongs in `argv` or `args`.
 PRESETS: dict[str, dict[str, Any]] = {
     "claude-code": {
-        "argv": ["claude", "-p", "--output-format", "json"],
+        # stream-json (which needs --verbose) is the only format that carries the
+        # subscription's rate-limit reading; the parser also accepts plain json.
+        "argv": ["claude", "-p", "--output-format", "stream-json", "--verbose"],
         # Lean sessions: no MCP servers, no skills or slash commands. The harness's
         # own setup otherwise loads ~37k input tokens into every launch.
         "args": ["--strict-mcp-config", "--disable-slash-commands"],
@@ -202,20 +205,126 @@ def agent_env() -> dict[str, str]:
     return env
 
 
-def claude_result(text: str) -> dict[str, Any] | None:
-    """The final result message from `claude -p --output-format json`.
-
-    Older releases print one result object; newer ones print the array of
-    session messages, whose last `type: result` entry is the outcome.
-    """
+def claude_messages(text: str) -> list[dict[str, Any]]:
+    """Every message a `claude -p` session printed, whatever the output format:
+    one result object (`json`, older releases), an array (`json`, 2.1.x) or one
+    message per line (`stream-json`). Unparseable lines are skipped."""
     try:
         doc = json.loads(text)
     except ValueError:
-        return None
+        doc = None
+        out = []
+        for line in text.split("\n"):  # not splitlines(): U+2028 and friends can sit inside JSON strings
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(m, dict):
+                out.append(m)
+        return out
     if isinstance(doc, list):
-        results = [m for m in doc if isinstance(m, dict) and m.get("type") == "result"]
-        return results[-1] if results else None
-    return doc if isinstance(doc, dict) and doc.get("type") == "result" else None
+        return [m for m in doc if isinstance(m, dict)]
+    return [doc] if isinstance(doc, dict) else []
+
+
+def claude_result(text: str) -> dict[str, Any] | None:
+    """The session's final `type: result` message, or None."""
+    results = [m for m in claude_messages(text) if m.get("type") == "result"]
+    return results[-1] if results else None
+
+
+def claude_quota(messages: list[dict[str, Any]], now: float) -> dict[str, Any] | None:
+    """The last subscription rate-limit reading (`rate_limit_event`, stream-json only).
+
+    The event is undocumented, so this never raises: anything missing, malformed or
+    non-finite (in any window) yields None, which budget policy must treat as
+    "unknown", never as headroom.
+    """
+    events = [m for m in messages if m.get("type") == "rate_limit_event"]
+    info = events[-1].get("rate_limit_info") if events else None
+    if not isinstance(info, dict):
+        return None
+
+    def window(w: Any, util: str, reset: str) -> dict[str, float] | None:
+        try:
+            u, r = float(w[util]), float(w[reset])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        return {"utilization": u, "resets_at": r} if math.isfinite(u) and math.isfinite(r) else None
+
+    raw = info.get("unifiedWindows")
+    windows: dict[str, dict[str, float]] = {}
+    if raw is not None:
+        if not isinstance(raw, dict) or not raw:
+            return None
+        for name, w in raw.items():
+            parsed = window(w, "utilization", "resetsAt")
+            if parsed is None:
+                return None  # a partial reading could hide the binding window
+            windows[str(name)] = parsed
+    else:
+        parsed = window(info, "utilization", "resetsAt")
+        if parsed is None or not isinstance(info.get("rateLimitType"), str):
+            return None
+        windows[info["rateLimitType"]] = parsed
+    return {"source": "claude-code rate_limit_event", "status": str(info.get("status", "")), "windows": windows,
+            "observed_at": now}
+
+
+def claude_usage(result: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Models and token counts from a result message (plus the init message's model).
+    Never raises: malformed fields count as zero or are left out."""
+    def num(d: Any, key: str) -> int:
+        try:
+            v = float(d.get(key) or 0) if isinstance(d, dict) else 0.0
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return int(v) if math.isfinite(v) and v >= 0 else 0
+
+    u = result.get("usage")
+    model_usage = result.get("modelUsage")
+    models = {}
+    for name, m in (model_usage.items() if isinstance(model_usage, dict) else ()):
+        if isinstance(m, dict):
+            models[str(name)] = {k: num(m, k) for k in ("inputTokens", "outputTokens", "cacheReadInputTokens",
+                                                        "cacheCreationInputTokens")}
+    init = claude_init(messages)
+    model = init.get("model")
+    return {
+        "model": model if isinstance(model, str) else (next(iter(models)) if models else None),
+        "models": models,
+        "input_tokens": num(u, "input_tokens"),
+        "output_tokens": num(u, "output_tokens"),
+        "cache_read_input_tokens": num(u, "cache_read_input_tokens"),
+        "cache_creation_input_tokens": num(u, "cache_creation_input_tokens"),
+        "num_turns": num(result, "num_turns"),
+        "duration_ms": num(result, "duration_ms"),
+    }
+
+
+def claude_init(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    return next((m for m in messages if m.get("type") == "system" and m.get("subtype") == "init"), {})
+
+
+# Environment variables under which a claude session is billed rather than drawn from a subscription:
+# API keys and bearer tokens, a gateway base URL, or a cloud provider.
+BILLING_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
+                    "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
+
+
+def claude_cost_basis(messages: list[dict[str, Any]], env: dict[str, str]) -> str:
+    """`api_equivalent` only when nothing suggests billing: the launch environment
+    carries no billed credential, gateway or cloud provider, and the session's init
+    message says `apiKeySource: "none"` (a subscription login). An init message without
+    that field, or with any other value, is cash. Plain `json` output has no init
+    message; then the environment alone decides. Billed money is never mistaken for an
+    estimate."""
+    if any(env.get(v) for v in BILLING_ENV_VARS):
+        return "cash"
+    init = claude_init(messages)
+    if not init:
+        return "api_equivalent"  # plain `json` output has no init message; the environment showed no billing
+    return "api_equivalent" if init.get("apiKeySource") == "none" else "cash"
 
 
 _PRESET_CONFIG_KEYS = frozenset({"name", "args"})
@@ -399,7 +508,8 @@ class CommandAdapter(Adapter):
                     proc.communicate(timeout=10)
                 except subprocess.TimeoutExpired:
                     pass  # a grandchild still holds the pipes; the session process itself is dead
-                return AgentResult(stopped[0], session_id=session, error=stopped[1])
+                basis = claude_cost_basis([], agent_env()) if self.parse == "claude-json" else "api_equivalent"
+                return AgentResult(stopped[0], session_id=session, error=stopped[1], cost_basis=basis)
         except BaseException:
             tree.kill()  # an orchestrator error or Ctrl-C never leaves the session running
             raise
@@ -413,20 +523,29 @@ class CommandAdapter(Adapter):
 
     def _parse(self, text: str, err: str, code: int, session: str) -> AgentResult:
         cost = 0.0
+        usage = quota = None
         if self.parse == "claude-json":
-            doc = claude_result(text)
-            if doc is None:
+            messages = claude_messages(text)
+            results = [m for m in messages if m.get("type") == "result"]
+            quota = claude_quota(messages, time.time())
+            basis = claude_cost_basis(messages, agent_env())
+            if not results:
                 return AgentResult(
                     "FAILED",
-                    output=text,
+                    output=text[-4000:],
                     session_id=session,
                     error=f"unparseable claude output (exit {code}): {err[-500:]}",
+                    quota=quota,
                 )
+            doc = results[-1]
             text = str(doc.get("result", ""))
+            usage = claude_usage(doc, messages)
             try:
                 cost = float(doc.get("total_cost_usd") or 0.0)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 cost = 0.0  # an unreadable cost must not turn a session report into a crash
+            if not (math.isfinite(cost) and cost >= 0):
+                cost = 0.0  # Ariadne refuses such costs too; never let one disable a budget cap
             subtype = str(doc.get("subtype", "success"))
             if doc.get("is_error") or subtype != "success" or code != 0:
                 return AgentResult(
@@ -436,11 +555,15 @@ class CommandAdapter(Adapter):
                     session_id=session,
                     error=f"agent reported an error (subtype {subtype}, exit {code})"
                     + (f": {err[-500:]}" if code != 0 and err.strip() else ""),
+                    usage=usage,
+                    quota=quota,
+                    cost_basis=basis,
                 )
         elif code != 0:
             return AgentResult("FAILED", output=text, session_id=session, error=f"exit {code}: {err[-500:]}")
         return AgentResult(
-            "COMPLETED", output=text, structured=extract_json(text), cost=cost, session_id=session
+            "COMPLETED", output=text, structured=extract_json(text), cost=cost, session_id=session,
+            usage=usage, quota=quota, cost_basis=basis if self.parse == "claude-json" else "api_equivalent",
         )
 
     def cancel(self, session_id: str) -> bool:

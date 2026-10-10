@@ -59,6 +59,11 @@ class RunMetrics:
     recoveries: int = 0
     disputes: int = 0
     arbitrations: int = 0
+    cash: float = 0.0  # part of `cost` actually billed; the rest is API-equivalent estimate
+    sessions: int = 0  # launched sessions that reported usage
+    unknown_cost_sessions: int = 0  # stopped (timed out, cancelled) before reporting a cost
+    input_tokens: int = 0  # uncached + cache read + cache creation, over those sessions
+    output_tokens: int = 0
 
     @property
     def finished(self) -> bool:
@@ -80,6 +85,13 @@ class RunMetrics:
 
     def to_dict(self) -> dict[str, Any]:
         return {**asdict(self), "first_pass": self.first_pass}
+
+
+def _tokens(session: dict[str, Any], key: str) -> int:
+    try:
+        return max(int(session.get(key) or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def run_metrics(events: Iterable[Event]) -> RunMetrics:
@@ -110,6 +122,15 @@ def run_metrics(events: Iterable[Event]) -> RunMetrics:
         recoveries=recoveries,
         disputes=sum(len(f.disputes) for f in state.findings.values()),
         arbitrations=sum(1 for e in events if e.type == ev.ARBITRATION_RECORDED),
+        cash=round(state.cash_used, 4),
+        sessions=sum(1 for x in state.sessions if "dropped" not in x and not x.get("cost_unknown")),
+        input_tokens=sum(
+            _tokens(x, k)
+            for x in state.sessions
+            for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        ),
+        output_tokens=sum(_tokens(x, "output_tokens") for x in state.sessions),
+        unknown_cost_sessions=sum(1 for x in state.sessions if x.get("cost_unknown")),
     )
 
 
@@ -130,6 +151,7 @@ class Aggregate:
     recoveries: int
     disputes: int = 0
     arbitrations: int = 0
+    cash_total: float = 0.0  # billed money across every run; cost_total includes it
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -164,6 +186,7 @@ def aggregate(metrics: Iterable[RunMetrics]) -> Aggregate:
         recoveries=sum(m.recoveries for m in ms),
         disputes=sum(m.disputes for m in ms),
         arbitrations=sum(m.arbitrations for m in ms),
+        cash_total=round(sum(m.cash for m in ms), 4),
     )
 
 
