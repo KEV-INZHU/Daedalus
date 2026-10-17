@@ -217,6 +217,8 @@ def build_round(
     """Plan, dispatch and run one in-place Builder package. Returns the Builder's structured result."""
     state = ari._running(run_id)
     task_id = f"build-{round_no}"
+    if task_id in state.workers:  # a resumed run starts counting rounds again
+        task_id = f"build-{round_no}.{len(state.workers) + 1}"
     ari.plan(
         run_id,
         [
@@ -285,7 +287,7 @@ def run_task(
 PACKAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
-def _plan_packages(body: Any, round_no: int) -> list[dict[str, Any]] | None:
+def _plan_packages(body: Any, round_no: int, taken: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]] | None:
     """Brunel's plan as Ariadne work packages, ids namespaced by round.
 
     None for anything malformed. Ids become directory names, so they must match
@@ -315,6 +317,14 @@ def _plan_packages(body: Any, round_no: int) -> list[dict[str, Any]] | None:
                 "deadline_s": BUILD_TIMEOUT_S,
             }
         )
+    # A resumed run counts rounds from 1 again: move to a fresh namespace rather than reuse ids.
+    ns, n = f"r{round_no}", 2
+    while any(p["task_id"].replace(f"r{round_no}-", f"{ns}-", 1) in taken for p in out):
+        ns, n = f"r{round_no}.{n}", n + 1
+    if ns != f"r{round_no}":
+        for p in out:
+            p["task_id"] = p["task_id"].replace(f"r{round_no}-", f"{ns}-", 1)
+            p["depends_on"] = [d.replace(f"r{round_no}-", f"{ns}-", 1) for d in p["depends_on"]]
     return out
 
 
@@ -345,7 +355,8 @@ def fan_out_round(
     if ari.capture(ari.state(run_id)).candidate_id != before:
         notify("the planner changed the working tree; ignoring its plan")
         return None
-    packages = _plan_packages(res.structured, round_no) if res.status == "COMPLETED" else None
+    taken = set(ari.state(run_id).workers)
+    packages = _plan_packages(res.structured, round_no, taken) if res.status == "COMPLETED" else None
     if packages is None or len(packages) == 1:
         notify("nothing to parallelize; a single Builder works in place")
         return None

@@ -1,0 +1,19 @@
+# Daedalus builds Daedalus: this order runs through the factory line (`daedalus factory run`).
+objective: >-
+  Track escaped defects in the factory. A later commit on the integration branch whose message has a
+  `Fixes-Order: <id>` trailer marks that shipped order as escaped, and `daedalus factory status`
+  reports how many shipped orders escaped.
+acceptance_criteria:
+  - A shipped order named by a later commit's `Fixes-Order:` trailer is reported as escaped by `daedalus factory status --json`
+  - "`daedalus factory status` prints the escape rate: escaped shipped orders / shipped orders"
+  - Shipped orders that no commit names in a `Fixes-Order:` trailer are not counted as escaped
+  - A `Fixes-Order:` trailer naming an order that never shipped is ignored
+scope:
+  - src/daedalus/factory/**
+  - src/daedalus/cli.py
+  - tests/integration/test_factory.py
+  - docs/factory.md
+design_decisions:
+  - Derive escapes from git history on demand (git log trailers); do not store them in the ledger
+priority: 10
+mode: review
