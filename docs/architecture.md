@@ -29,6 +29,7 @@ engineering lifecycle.
 | Verification     | `daedalus.verification`       | Proof Gate: runs trusted checks, binds results to candidates |
 | Repository       | `daedalus.repository`         | Candidate manifests and diffs; isolated worker worktrees |
 | Adapters         | `daedalus.adapters`           | Harness translation with declared capabilities           |
+| Factory          | `daedalus.factory`            | Work orders, the sequential line (branch, run, ship or park), planner, ledger |
 | Harness shims    | `daedalus.harness`            | Claude Code hooks and skill installation                 |
 | Skills           | `daedalus/data/skills`        | Instruction packages; never enforcement                  |
 
@@ -66,6 +67,8 @@ Roles live in the prompts and skills. Their authority lives in the core.
 - **Plato** arbitrates disputed findings and material design disagreements. Its ruling resolves a
   finding only if policy opts in (`arbitration_resolves_findings`), and never overrides checks,
   approvals or risk floors.
+- **Vitruvius** (factory planner) drafts work orders from a large goal. It is read-only, and a human
+  commits its drafts before anything is built.
 - **Ariadne** enforces the rules and derives the disposition.
 - **Humans** hold authorities (`merge`, `deploy`, `attest`, `contract_change`, ...).
   Principals beginning `agent:` never hold authority, whatever the policy file says.

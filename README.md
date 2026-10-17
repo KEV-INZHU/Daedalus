@@ -1,7 +1,7 @@
 # Daedalus
 
-**An acceptance gate for AI coding agents.** Run your agent normally, or run it
-under the gate: the agent still does the work, but "done" is decided by a
+**An acceptance gate for AI coding agents, and a small software factory built on it.**
+Run your agent normally, or run it under the gate: the agent still does the work, but "done" is decided by a
 deterministic predicate over trusted, revision-bound evidence. The agent can't
 make that decision for itself.
 
@@ -60,6 +60,25 @@ If a review finding looks wrong, dispute it rather than arguing in circles:
 `daedalus dispute F2 --reason "..."`, then `daedalus arbitrate F2` has Plato rule on it.
 By default the ruling is advice for a human. Set `arbitration_resolves_findings: true` under
 `policy:` to let an overrule resolve the finding.
+
+## The factory: a queue of orders through the gate
+
+One run turns one goal into one accepted change. The factory puts a line around that station: a
+backlog of committed **work orders** goes in, and each one is built on its own branch under the gate.
+Accepted work ships as one commit on your branch, and anything that doesn't pass is parked with its
+work kept.
+
+```bash
+daedalus factory plan "rate limiting for the public API"   # a planner drafts orders (optional)
+daedalus factory add "Return 429 after 100 requests a minute" -c "the 101st request gets HTTP 429"
+git add factory/orders && git commit -m "Factory orders"   # the line builds committed orders only
+daedalus factory run                                       # build, verify, review, ship; repeat
+daedalus factory status                                    # board, yield, cost per shipped order
+```
+
+Orders can depend on each other and carry priorities. The line halts when an order needs a human
+decision, and stops itself (the andon cord) when several orders in a row fail. See
+[docs/factory.md](docs/factory.md).
 
 ## Modes
 
@@ -121,6 +140,7 @@ is what declines a paid route before it is called.
 ## Documentation
 
 - [docs/PLAN.md](docs/PLAN.md): build plan and progress
+- [docs/factory.md](docs/factory.md): the factory line, work orders and what it guarantees
 - [docs/architecture.md](docs/architecture.md): layers and responsibilities
 - [docs/state-machine.md](docs/state-machine.md): states, transitions, disposition precedence
 - [docs/adapter-contract.md](docs/adapter-contract.md): writing a harness adapter

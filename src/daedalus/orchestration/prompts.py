@@ -22,6 +22,7 @@ ROLE_SKILLS = {
     "aristotle": "aristotle-quality-review",
     "james": "james-functionality-review",
     "plato": "plato-arbitration",
+    "vitruvius": "vitruvius-planner",
     "gate": "daedalus-gate",
 }
 
@@ -207,4 +208,33 @@ def review_prompt(
         parts += ["", "## Your earlier open findings", ""]
         parts += [f"- {f['id']} [{f['severity']}] {f['title']}: {f['required_change']}" for f in prior_findings]
     parts += ["", "## Candidate diff", "", "```diff", diff or "(no changes)", "```"]
+    return "\n".join(parts)
+
+
+FACTORY_PLAN_OUTPUT = """## Your task: plan work orders, do not implement
+
+Plan at most {max_orders} orders. Order ids are lowercase slugs (letters, digits, `-`); they name git
+branches. `depends_on` may name orders in this plan or the existing orders listed below. Higher
+`priority` runs first among orders that are ready. Do not edit any files.
+
+End your reply with exactly one fenced JSON block:
+
+```json
+{{"summary": "how the plan breaks the goal down, and anything left out",
+  "orders": [
+    {{"id": "api-keys", "objective": "what to build, in one or two sentences",
+      "acceptance_criteria": ["a behaviour a test can decide"],
+      "scope": ["src/api/**", "tests/api/**"],
+      "depends_on": [], "priority": 0}}
+  ]}}
+```
+"""
+
+
+def factory_plan_prompt(goal: str, existing: list[dict[str, Any]], checks: list[str], max_orders: int) -> str:
+    parts = [skill_body("vitruvius"), "", FACTORY_PLAN_OUTPUT.format(max_orders=max_orders), "", "## The goal", ""]
+    parts += [goal.strip(), "", "## Checks every order must pass", ""]
+    parts += [f"- {c}" for c in checks] or ["- none configured"]
+    parts += ["", "## Existing orders", ""]
+    parts += [f"- {o['id']} ({o['status']}): {o['objective']}" for o in existing] or ["- none"]
     return "\n".join(parts)

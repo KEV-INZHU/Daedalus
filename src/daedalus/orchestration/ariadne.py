@@ -786,6 +786,9 @@ class Ariadne:
     ) -> list[str]:
         state = self._running(run_id)
         pkgs = [WorkPackage.from_dict(p) for p in packages]
+        reused = [p.task_id for p in pkgs if p.task_id in state.workers]
+        if reused:  # replay keys workers by id: a reused id would overwrite a recorded outcome
+            raise IntegrationError(f"plan rejected: task ids already used in this run: {reused}")
         conflicts = validate_plan(pkgs, interfaces or {}, live_packages(state))
         if conflicts:
             raise IntegrationError("plan rejected: " + "; ".join(conflicts))

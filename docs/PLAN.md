@@ -68,7 +68,7 @@ Council and fan-out only after measured readiness.
 - [x] Live baseline: a real launched Builder and reviewer through `daedalus run` (Run 10, below)
 - [ ] Exercise the experimental `codex` / `aider` presets against the real CLIs
 
-Status: 275 passed, 1 skipped (`python -m pytest`).
+Status: 349 passed, 2 skipped (`python -m pytest`).
 
 ## Docs and schemas
 
@@ -90,6 +90,27 @@ Status: 275 passed, 1 skipped (`python -m pytest`).
 - [x] `daedalus metrics`: acceptance, first-pass, rework, cost and latency per accepted change, manual interventions
 - [ ] Escaped-defect and regression tracking (needs a way to link later fixes back to accepted runs)
 - [ ] Parallelism savings vs integration overhead
+
+## Phase 4 — Lightweight factory
+
+A line around the single-run station: committed work orders in, gated commits out. See
+[factory.md](factory.md).
+
+- [x] Work orders: contract + routing (`depends_on`, `priority`, `mode`, `rounds`), validated by the
+  contract builder; text criteria bound to the required checks — `factory/orders.py`
+- [x] Ledger: order status as a fold over an append-only event file — `factory/ledger.py`
+- [x] Line: branch per order, drive the run, ship exactly the accepted candidate (fast-forward only),
+  park with work kept, halt on human gates, resume after interruption, andon, stop/limit/budget,
+  one line at a time — `factory/line.py`
+- [x] Planner (Vitruvius): read-only decomposition of a goal into draft orders — `factory/planner.py`
+- [x] CLI: `factory add | plan | run | status | retry | park | stop`
+- [x] Core fixes found while building it: a reused task id no longer overwrites a recorded worker
+  outcome (`Ariadne.plan` rejects it; a resumed run's Builder round picks a fresh id)
+- [ ] Live line run with the `claude-code` adapter on a multi-order backlog (exercised so far with
+  scripted agents and a stand-in command agent)
+- [ ] Holdout checks: criteria verified by checks the Builder never sees
+- [ ] Escaped defects: `Fixes-Order:` trailers on later commits link regressions back to shipped orders
+- [ ] Optional ship step (push the integration branch / open a pull request)
 
 ## Deliberately out of scope until usage justifies it
 
