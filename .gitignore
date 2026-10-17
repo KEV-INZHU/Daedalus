@@ -1,5 +1,8 @@
 # Agent harness state — never committed
-.claude/
+.claude/*
+!.claude/settings.json
+!.claude/skills/
+.claude/settings.local.json
 .pi-glla/
 
 # Daedalus local run state

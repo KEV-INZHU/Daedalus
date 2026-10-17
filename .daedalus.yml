@@ -5,8 +5,13 @@ enabled: true
 # Risk floors in the default policy can require more reviews and approvals.
 mode: review
 
-# Agent harness used by `daedalus run` and `daedalus review`.
+# Agent harness used by `daedalus run` and `daedalus review`, and to launch reviews automatically.
 adapter: claude-code
+
+# Fresh containers (Claude Code on the web) start without Daedalus; the committed SessionStart
+# hook runs this when it is missing, so every session here is gated from the first prompt.
+harness:
+  bootstrap: python -m pip install -q -e .
 
 checks:
   tests:
