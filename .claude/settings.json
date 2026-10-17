@@ -1,0 +1,50 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v daedalus >/dev/null 2>&1; then daedalus hook stop; fi",
+            "timeout": 3600
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v daedalus >/dev/null 2>&1 || ( python -m pip install -q -e . ) >/dev/null 2>&1; if command -v daedalus >/dev/null 2>&1; then daedalus hook session-start; else echo '{\"systemMessage\": \"This repository is gated by Daedalus, which is not installed here: pip install \\\"git+https://github.com/KEV-INZHU/Daedalus\\\"\"}'; fi"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v daedalus >/dev/null 2>&1; then daedalus hook prompt; fi"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v daedalus >/dev/null 2>&1; then daedalus hook pre-edit; fi"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "if command -v daedalus >/dev/null 2>&1; then daedalus statusline; fi"
+  }
+}
