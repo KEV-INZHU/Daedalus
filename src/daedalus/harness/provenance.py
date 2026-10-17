@@ -53,12 +53,15 @@ def install_git_hook(root: Path, *, only_if_absent: bool = False) -> str:
     p = hook_path(root)
     if p is None:
         raise DaedalusError("not a git repository; the commit hook was not installed")
-    if only_if_absent:
-        top = _git(root, "rev-parse", "--show-toplevel").stdout.strip()
-        if top and Path(top).resolve() in p.resolve().parents and ".git" not in p.resolve().relative_to(Path(top).resolve()).parts:
-            # core.hooksPath points into the work tree (husky and friends): writing there would
-            # change a tracked file behind the user's back.
-            return f"git hooks live in the work tree ({p.parent}); run `daedalus install claude-code` to add ours"
+    common = _git(root, "rev-parse", "--git-common-dir").stdout.strip()  # hooks live here, even in a worktree
+    git_dir = (Path(common) if Path(common).is_absolute() else root / common) if common else None
+    outside = git_dir is not None and git_dir.resolve() not in p.resolve().parents
+    if only_if_absent and (outside or _git(root, "config", "core.hooksPath").stdout.strip()):
+        # A custom hooks directory is either tracked (husky and friends) or shared by other
+        # repositories (~/.githooks). Installing unasked would change something beyond this
+        # repository's own .git, so only an explicit `daedalus install claude-code` does it.
+        return (f"git hooks live in {p.parent}, outside this repository's .git (core.hooksPath or a symlink); "
+                "run `daedalus install claude-code` to add ours there")
     if p.exists():
         if MARK in p.read_text(encoding="utf-8", errors="replace"):
             if only_if_absent:

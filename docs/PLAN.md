@@ -68,7 +68,7 @@ Council and fan-out only after measured readiness.
 - [x] Live baseline: a real launched Builder and reviewer through `daedalus run` (Run 10, below)
 - [ ] Exercise the experimental `codex` / `aider` presets against the real CLIs
 
-Status: 349 passed, 2 skipped (`python -m pytest`).
+Status: 406 passed, 2 skipped (`python -m pytest`).
 
 ## Docs and schemas
 
@@ -128,7 +128,8 @@ without it; see the dogfooding log). Nothing in the loop may depend on someone r
 - [x] Accepted commits carry `Daedalus-Run` trailers via a `prepare-commit-msg` hook — `harness/provenance.py`
 - [x] Status line; `daedalus init` installs everything; `-c` criteria are proved by the checks (`--attest`
   for criteria only a person can judge)
-- [ ] `daedalus ci` + workflow template (next run)
+- [x] `daedalus ci`: fresh checks, whole-diff risk, commit provenance, job summary; `daedalus init --ci`
+  writes the workflow — `ci.py`
 
 ## Deliberately out of scope until usage justifies it
 
@@ -195,6 +196,10 @@ independent reviewer through the `claude-code` adapter).
 | f318fc00189d | Phase 2: isolated worktrees for non-in-place workers | 4 candidates | ACCEPTED ($1.65) | Reviewer caught 2 MAJORs: committed worker changes dropped from proposals; a shared /tmp hooks path I introduced. F15/F16 fixed in 8ea5 |
 | 8ea56a7320bc | Phase 2: bounded fan-out (plan → parallel worktrees → ordered integration) | 4 candidates | ACCEPTED ($1.65) | Default cap stays 1. Reviewer caught 2 MAJORs (unsanitized package ids as paths; aborted rounds leaking sessions) and a flaky test as a BLOCKER |
 | 09eb250a50f2 | Phase 2: disputes and Plato arbitration | 2 candidates | ACCEPTED | Overrules advisory unless policy opts in |
+| 75787c4300b4 | Phase 4: the factory, gated after the fact | 2 candidates | REJECTED ($1.31) | The factory was first written without the gate. Gating it found a MAJOR (accepted work shipping unreviewed edits) and a BLOCKER (retries shipping unreviewed WIP); then the run was rejected: reviewers here bill cash and `max_cash` was 0, which the gate only found out after paying. Owner raised `max_cash` to 5 |
+| bb2af06702cb | Phase 4: the factory | 2 candidates | ACCEPTED ($1.29) | A fresh reviewer found 5 more, incl. a MAJOR (Builder-staged paths outside the candidate shipping). 10 findings in all, 8 fixed |
+| 9f00ef5992ac | Phase 5: ambient gate (auto-open runs, self-launching reviews, trailers, budget pre-flight) | 4 candidates | ACCEPTED | 25 findings over 4 rounds, 21 fixed. MAJOR: `-c` binding silently changed contract-file criteria. This run's own friction (reviews needing a typed command, `-c` needing attestation, the $0 cash trap) became its features |
+| ce56ac76b585 | Phase 5: `daedalus ci`; deferred F22-F25 | — | (this run) | First run whose review is launched by `daedalus verify` itself |
 
 Follow-ups: run f318 F17 (filter drivers during proposal), F18 (tests use the real temp dir). Run 64c6 F6 (utf8_output only from the console entry point). Run 27c6: F7 (`--adapter claude-code` when
 config omits `name`), F8 (aider's `--yes-always` sits in the shared argv), F9 (dedupe preset-lock tests).

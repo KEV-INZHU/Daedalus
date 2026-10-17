@@ -49,6 +49,10 @@ and rerun `daedalus install claude-code`. The SessionStart hook runs that comman
 is missing, unprompted, on every machine that opens the repository. It's committed configuration
 like the rest of `.daedalus.yml`, so changing it raises the run's tier to critical.
 
+An auto-opened run's objective is your prompt (up to 600 characters). It is stored with the run in
+`.daedalus/` (local, never committed) and appears in `daedalus status`, so keep secrets out of prompts
+as you would out of commit messages. Set `harness: {auto_start: false}` to open runs only by hand.
+
 ## The three things you touch
 
 | Surface  | Command                                   | What runs underneath                                    |
@@ -74,6 +78,27 @@ If a review finding looks wrong, dispute it rather than arguing in circles:
 `daedalus dispute F2 --reason "..."`, then `daedalus arbitrate F2` has Plato rule on it.
 By default the ruling is advice for a human. Set `arbitration_resolves_findings: true` under
 `policy:` to let an overrule resolve the finding.
+
+## In CI: the gate on every pull request
+
+```bash
+daedalus init --ci --ci-install 'pip install -e ".[dev]"'   # writes .github/workflows/daedalus.yml
+```
+
+On each pull request, `daedalus ci` uses only what is committed, so no contributor's machine has to be
+trusted:
+
+- **Checks.** It re-runs every mandatory check in the committed policy on the head. That's fresh
+  evidence, not anyone's local claim.
+- **Risk.** It classifies the whole diff with the same floors a run uses, and lists the reviews and
+  approvals that tier requires.
+- **Provenance.** It reports which commits carry `Daedalus-Run` trailers (were accepted by the gate where
+  they were written). `--require-provenance` makes a missing trailer fail the job.
+
+Pin what the workflow installs with `--ci-source 'git+https://github.com/KEV-INZHU/Daedalus@<tag>'`,
+so the tool judging pull requests doesn't change under them. It writes the report to the job summary
+and fails when a check fails. Trailers are claims anyone can
+type, which is why the checks are always re-run.
 
 ## The factory: a queue of orders through the gate
 

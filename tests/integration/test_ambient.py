@@ -297,10 +297,31 @@ def test_a_pathspec_commit_of_part_of_the_candidate_gets_no_trailers(ari, repo, 
     assert "Daedalus-Run" not in out(repo, "log", "-1", "--format=%B")
 
 
-def test_automatic_hook_install_never_writes_into_the_work_tree(repo):
-    git(repo, "config", "core.hooksPath", ".husky")
+def test_automatic_hook_install_works_in_a_linked_worktree(repo, tmp_path):
+    wt = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", str(wt), "-b", "side")
+    msg = provenance.install_git_hook(wt, only_if_absent=True)
+    assert "prepare-commit-msg ->" in msg and (repo / ".git" / "hooks" / "prepare-commit-msg").exists()
+
+
+def test_automatic_hook_install_skips_a_symlinked_shared_hooks_dir(repo, tmp_path):
+    import shutil
+
+    shared = tmp_path / "template-hooks"
+    shared.mkdir()
+    hooks = repo / ".git" / "hooks"
+    shutil.rmtree(hooks)
+    hooks.symlink_to(shared)
     msg = provenance.install_git_hook(repo, only_if_absent=True)
-    assert "work tree" in msg and not (repo / ".husky").exists()
+    assert "outside this repository" in msg and not (shared / "prepare-commit-msg").exists()
+
+
+@pytest.mark.parametrize("where", ["in-tree", "shared"])
+def test_automatic_hook_install_only_writes_into_this_repositorys_git_dir(repo, tmp_path, where):
+    hooks = repo / ".husky" if where == "in-tree" else tmp_path / "shared-githooks"
+    git(repo, "config", "core.hooksPath", str(hooks))
+    msg = provenance.install_git_hook(repo, only_if_absent=True)
+    assert "core.hooksPath" in msg and not hooks.exists()
 
 
 # ------------------------------------------------------------------ status line

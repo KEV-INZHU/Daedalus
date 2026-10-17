@@ -139,8 +139,8 @@ def _spec_from_args(args: argparse.Namespace, policy: Any = None) -> dict[str, A
             "acceptance_criteria"
         ]
     crits += [{"description": a, "checks": []} for a in getattr(args, "attest", None) or []]
-    if crits:
-        spec["acceptance_criteria"] = crits
+    if crits:  # flags add to the contract file's criteria rather than replacing them
+        spec["acceptance_criteria"] = list(spec.get("acceptance_criteria") or []) + crits
     if args.scope:
         spec["scope"] = list(args.scope)
     if args.risk:
@@ -170,6 +170,13 @@ def render_decision(d: Decision, *, verbose: bool = True) -> list[str]:
 
 # ------------------------------------------------------------------ commands
 def cmd_init(args: argparse.Namespace) -> int:
+    if (args.ci_install or args.require_provenance or args.ci_source) and not args.ci:
+        raise DaedalusError("--ci-install, --ci-source and --require-provenance configure the workflow: add --ci")
+    workflow = None
+    if args.ci:  # render (and so validate) before writing anything
+        from daedalus.ci import DEFAULT_SOURCE, render_workflow
+
+        workflow = render_workflow(args.ci_source or DEFAULT_SOURCE, args.ci_install, args.require_provenance)
     root = find_root(args.dir)
     cfg = root / CONFIG_FILE
     if cfg.exists() and not args.force:
@@ -191,7 +198,16 @@ def cmd_init(args: argparse.Namespace) -> int:
         except DaedalusError as exc:
             _print(f"note: {exc}")
         _ensure_ignored(root, ".claude/settings.local.json")
-    _print(f"Next: review and commit {CONFIG_FILE}" + ("" if args.no_hooks else " and .claude/") + ".")
+    if workflow is not None:
+        wf = root / ".github" / "workflows" / "daedalus.yml"
+        if wf.exists() and not args.force:
+            _print(f"{wf.relative_to(root).as_posix()} already exists (use --force to overwrite)")
+        else:
+            wf.parent.mkdir(parents=True, exist_ok=True)
+            wf.write_text(workflow, encoding="utf-8")
+            _print(f"wrote {wf.relative_to(root).as_posix()}: pull requests now run `daedalus ci`")
+    _print(f"Next: review and commit {CONFIG_FILE}" + ("" if args.no_hooks else " and .claude/")
+           + (" and .github/workflows/daedalus.yml" if args.ci else "") + ".")
     _print("Then just work: in Claude Code the first edit opens a run and the gate decides when it is done.")
     return 0
 
@@ -318,6 +334,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
             d, notes, _ = settle(ari, rid, notify=lambda m: _print(f"· {m}"))
             for n in notes:
                 _print(f"note: {n}")
+            for f in ari.state(rid).open_findings:
+                _print(f"  {f.finding_id} [{f.severity.value}] {f.title}: {f.required_change}"[:300])
         d = ari.evaluate(rid)
         _print(f"Disposition: {d.disposition.value}")
         for r in d.reasons:
@@ -681,6 +699,14 @@ def cmd_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ci(args: argparse.Namespace) -> int:
+    from daedalus.ci import run_ci
+
+    report = run_ci(find_root(args.dir), args.base, require_provenance=args.require_provenance)
+    _print(report.markdown())
+    return 0 if report.ok else 1
+
+
 def cmd_statusline(args: argparse.Namespace) -> int:
     from daedalus.harness.claude_code import statusline
 
@@ -994,6 +1020,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--adapter", help="agent harness for `daedalus run` (e.g. claude-code)")
     sp.add_argument("--claude-code", action="store_true", help=argparse.SUPPRESS)  # the default now
     sp.add_argument("--no-hooks", action="store_true", help="do not install the Claude Code hooks and git hook")
+    sp.add_argument("--ci", action="store_true", help="also write .github/workflows/daedalus.yml")
+    sp.add_argument("--ci-install", metavar="CMD", help="command the workflow runs to install what your checks need")
+    sp.add_argument("--ci-source", metavar="SPEC",
+                    help="what the workflow pip-installs as Daedalus; pin it, e.g. 'git+https://...@<tag>'")
+    sp.add_argument("--require-provenance", action="store_true",
+                    help="the workflow fails pull requests whose commits were not accepted by the gate")
     sp.add_argument("--force", action="store_true")
     add("on", cmd_toggle, "turn the gate on for this repository")
     add("off", cmd_toggle, "turn the gate off for this repository (human only)", human=True)
@@ -1068,6 +1100,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("name", choices=("stop", "session-start", "prompt", "pre-edit", "commit-msg"))
     sp.add_argument("args", nargs="*", help="arguments a git hook passes through")
     add("statusline", cmd_statusline, "one status line for Claude Code (reads its JSON on stdin)")
+    sp = add("ci", cmd_ci, "gate a branch in CI: fresh checks, risk for the whole diff, commit provenance")
+    sp.add_argument("--base", default="origin/main", help="branch or commit to compare against (default origin/main)")
+    sp.add_argument("--require-provenance", action="store_true",
+                    help="fail when a commit lacks a Daedalus-Run trailer (it was not accepted by the gate)")
     sp = add("install", cmd_install, "install harness integration")
     sp.add_argument("harness", choices=("claude-code",))
     sp.add_argument("--all-skills", action="store_true", help="also install the role skills")
