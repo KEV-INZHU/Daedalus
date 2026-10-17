@@ -466,6 +466,11 @@ class CommandAdapter(Adapter):
             review_model=review_model,
         )
 
+    def expected_cost_basis(self) -> str | None:
+        if self.parse == "claude-json":
+            return claude_cost_basis([], agent_env())
+        return None
+
     def available(self) -> bool:
         return shutil.which(self.argv[0]) is not None
 

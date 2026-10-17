@@ -29,7 +29,7 @@ from typing import Any
 
 from daedalus.adapters.base import Adapter, AgentRequest, AgentResult, require
 from daedalus.core.acceptance import Decision
-from daedalus.core.errors import ContractError, DaedalusError, IntegrationError
+from daedalus.core.errors import BudgetExhausted, ContractError, DaedalusError, IntegrationError
 from daedalus.core.state_machine import Disposition, ExecutionState, WorkerState
 from daedalus.orchestration import prompts
 from daedalus.orchestration.ariadne import SYSTEM, Ariadne
@@ -55,6 +55,27 @@ def _quiet(_: str) -> None:
 
 
 # ------------------------------------------------------------------- reviews
+def refuse_unaffordable(state: Any, adapter: Adapter, what: str) -> None:
+    """Refuse a launch that would be billed in cash when the run's cash budget is spent.
+
+    The budget charges spend after the fact; checking first means a run is never billed
+    for a session whose cost alone would reject it."""
+    expected = getattr(adapter, "expected_cost_basis", None)  # adapters predating it cannot tell
+    if expected is None or expected() != "cash":
+        return
+    budget = state.contract.budget
+    # The next session is assumed to cost as much as the dearest billed one so far in this run.
+    # A billing source the adapter cannot see before launch is still only caught afterwards.
+    estimate = max((float(x.get("cost") or 0) for x in state.sessions if x.get("basis") == "cash"), default=0.0)
+    if state.cash_unknown or state.cash_used + estimate > budget.max_cash or state.cash_used >= budget.max_cash:
+        raise BudgetExhausted(
+            f"{what} would be billed in cash, and this run's cash budget cannot cover it "
+            f"({state.cash_used:.2f} spent of {budget.max_cash:.2f}; the last billed session cost up to "
+            f"{estimate:.2f}). To allow billed reviews, raise "
+            "`max_cash` in .daedalus.yml (`policy: {default_budget: {max_cash: 5}}`) and start a new run"
+        )
+
+
 def launch_review(
     ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, notify: Notify = _quiet
 ) -> str | None:
@@ -66,6 +87,7 @@ def launch_review(
         {"launch_agent": True, "structured_results": True, "identity": "launched"},
         state.policy.allowed_degradations,
     )
+    refuse_unaffordable(state, adapter, f"a {perspective} review")
     cand = ari.record_candidate(run_id, actor=SYSTEM, authored=False, label=f"review {perspective}")
     decision = ari.evaluate(run_id)
     prior = [
@@ -136,6 +158,7 @@ def arbitrate(
         {"launch_agent": True, "structured_results": True, "identity": "launched"},
         state.policy.allowed_degradations,
     )
+    refuse_unaffordable(state, adapter, "an arbitration")
     f = state.findings.get(finding_id)
     if f is None or f.resolved_by is not None or not f.disputes:
         raise ContractError(f"{finding_id} is not an open, disputed finding")
@@ -572,6 +595,6 @@ def left_open_note(decision: Decision, rounds: int) -> str:
             "(or `daedalus run` again with more rounds), then `daedalus finish`"
         )
     return (
-        "run left open: the [system] items remain (after an interruption, `daedalus reconcile`), "
-        "then `daedalus finish`"
+        "run left open: the [system] items remain (a required review that could not run: check the adapter "
+        "and budget, then `daedalus verify`; after an interruption, `daedalus reconcile`), then `daedalus finish`"
     )

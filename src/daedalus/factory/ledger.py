@@ -116,6 +116,9 @@ class Ledger:
                 # allowed to take later records with it.
                 self.skipped += 1
                 continue
+            if not isinstance(e, dict) or not isinstance(e.get("type"), str) or "ts" not in e:
+                self.skipped += 1  # valid JSON, but not a ledger record
+                continue
             out.append(e)
         return out
 

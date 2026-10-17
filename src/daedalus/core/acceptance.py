@@ -329,8 +329,10 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
             reasons.append(
                 Reason(
                     f"review:{p}",
-                    f"{why} requires {kind} {p} review of candidate {cid[:12]}. Run `daedalus review {p}`.",
-                    AGENT,
+                    f"{why} requires {kind} {p} review of candidate {cid[:12]}. Daedalus launches it once "
+                    "the checks pass (`daedalus verify`, or when the agent stops); the author never reviews "
+                    "its own work.",
+                    SYSTEM,
                 )
             )
 

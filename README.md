@@ -11,29 +11,43 @@ Daedalus is harness-agnostic. The core owns contracts, lifecycle state, risk
 policy, evidence, authorization and the acceptance decision. Thin adapters
 connect it to Claude Code, Codex, other CLIs, or a plain terminal.
 
-## Quickstart
+## Quickstart: set it up once, then just work
 
 ```bash
-pip install -e .                       # from this repository
+pip install "git+https://github.com/KEV-INZHU/Daedalus"
 cd your-repo
-daedalus init --claude-code            # writes .daedalus.yml (detected test command) + Claude Code hooks
-git add .daedalus.yml && git commit -m "Add Daedalus gate"   # runs only trust committed policy
-
-daedalus start "add rate limiting to the API"   # open a run (a contract)
-# ... work with your agent as usual ...
-daedalus status                                  # what blocks acceptance, and who can fix it
+daedalus init          # .daedalus.yml (detected test command), Claude Code hooks, git hook
+git add .daedalus.yml .claude .gitignore && git commit -m "Gate this repository with Daedalus"
 ```
 
-With the Claude Code hooks installed, an agent that tries to stop while
-agent-fixable blockers remain is sent back with the exact reasons. When only
-human decisions remain, it is allowed to stop and you're told which command to
-run. When the predicate holds, the run is recorded **ACCEPTED**.
+That's all the setup there is. Everyone who opens the repository in Claude Code now works under the
+gate, with nothing to remember:
 
-To have Daedalus drive the agent itself (Builder → verify → review → finish):
+1. **You ask for something.** Questions open nothing. The agent's first file edit opens a run, and
+   the run's objective is your request.
+2. **The agent works as usual.** The status line shows the run and what it's waiting on.
+3. **The agent tries to stop.** Daedalus runs the trusted checks on the exact working tree. Once
+   they pass, it launches every independent review the risk tier or mode requires (read-only, and
+   never by the agent that wrote the code). Anything the agent can fix goes back to it with exact
+   reasons. Anything only you can decide (an approval, a sign-off, a budget) is put to you. When the
+   predicate holds, the run is recorded **ACCEPTED**.
+4. **You commit.** A commit that is exactly the accepted work gets `Daedalus-Run` trailers, so the
+   log and the PR show what passed the gate.
+
+Without Claude Code, the same loop is three commands: `daedalus start "goal"`, then work, then
+`daedalus verify` (runs the checks and launches the required reviews). `daedalus status` always says
+what blocks acceptance and who can fix it. To have Daedalus drive the agent itself:
 
 ```bash
 daedalus run "fix the flaky retry in the uploader" --mode review
 ```
+
+In CI, `daedalus ci` re-runs the committed checks on every pull request (see below).
+
+For fresh containers (cloud sessions), set `harness: {bootstrap: "pip install ..."}` in `.daedalus.yml`
+and rerun `daedalus install claude-code`. The SessionStart hook runs that command whenever Daedalus
+is missing, unprompted, on every machine that opens the repository. It's committed configuration
+like the rest of `.daedalus.yml`, so changing it raises the run's tier to critical.
 
 ## The three things you touch
 
@@ -49,7 +63,7 @@ acceptance rate, rework, cost and latency across runs, plus a few human-only dec
 
 ```bash
 daedalus approve merge          # scoped to this candidate + contract version, expiring, single-use
-daedalus attest C2 pass --evidence "checked the UI manually"
+daedalus attest C2 pass --evidence "checked the UI manually"   # only for --attest criteria
 daedalus amend --set scope='["src/api/**"]' --rationale "narrowed"
 daedalus risk-exception low --rationale "docs-only change under auth/"
 ```

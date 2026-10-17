@@ -11,13 +11,16 @@ declare the task done, waive a check, or approve anything on a human's behalf.
 
 ## Loop
 
-1. Read the contract: `daedalus status` (objective, scope, acceptance criteria, required checks).
+1. Read the contract: `daedalus status` (objective, scope, acceptance criteria, required checks). If no
+   run is open yet, your first file edit opens one for the user's request.
 2. Make changes **inside the contract scope only**. Changes outside it are recorded as violations.
-3. Run `daedalus verify`. Evidence binds to the exact working tree, so any later edit makes it STALE.
-4. Run `daedalus status` and work through every blocker marked `[agent]`.
-5. When every agent-fixable blocker is gone, stop. The stop hook (or `daedalus finish`) records the
-   disposition. Blockers marked `[human]` (approvals, attestations, risk exceptions) are for the user:
-   tell them exactly which command to run, then stop.
+3. Prove each acceptance criterion with a test the required checks run. Evidence binds to the exact
+   working tree, so any later edit makes it STALE.
+4. Stop when you believe the work is done. The gate then runs the checks and launches the required
+   independent reviews itself. If it sends you back, fix every `[agent]` item it lists (failing checks,
+   review findings) and stop again. You never launch reviews of your own work.
+5. Items for the user (`[human]`: approvals, attestations, budgets) are not yours to resolve: tell them
+   exactly which command to run, then stop.
 
 ## Rules
 

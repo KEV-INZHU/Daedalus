@@ -173,7 +173,7 @@ def test_cli_status_and_verify(repo, capsys, monkeypatch):
     from daedalus import cli
 
     monkeypatch.setenv("CLAUDECODE", "1")
-    assert cli.main(["-C", str(repo), "start", "make app ok", "-c", "app says ok"]) == 0
+    assert cli.main(["-C", str(repo), "start", "make app ok", "--attest", "app says ok"]) == 0
     fix(repo)
     cli.main(["-C", str(repo), "verify"])
     assert cli.main(["-C", str(repo), "status"]) == 0
@@ -184,6 +184,16 @@ def test_cli_status_and_verify(repo, capsys, monkeypatch):
     assert cli.main(["-C", str(repo), "attest", "C1", "pass", "--evidence", "x", "-y"]) == 2
     assert cli.main(["-C", str(repo), "audit"]) == 0
     assert "audit chain intact" in capsys.readouterr().out
+
+
+def test_cli_criteria_are_proved_by_the_checks(repo, capsys, monkeypatch):
+    from daedalus import cli
+
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert cli.main(["-C", str(repo), "start", "make app ok", "-c", "app says ok"]) == 0
+    fix(repo)
+    assert cli.main(["-C", str(repo), "verify"]) == 0
+    assert cli.main(["-C", str(repo), "finish"]) == 0  # no human attestation needed
 
 
 def test_hooks_ignore_daedalus_launched_sessions(ari, repo, monkeypatch):

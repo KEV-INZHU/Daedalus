@@ -112,6 +112,24 @@ A line around the single-run station: committed work orders in, gated commits ou
 - [ ] Escaped defects: `Fixes-Order:` trailers on later commits link regressions back to shipped orders
 - [ ] Optional ship step (push the integration branch / open a pull request)
 
+## Phase 5 — Frictionless by default
+
+The gate has to be the path of least resistance, or it gets skipped (the factory itself was first built
+without it; see the dogfooding log). Nothing in the loop may depend on someone remembering a command.
+
+- [x] Runs open themselves: the first edit (or, for shell-only changes, the stop) opens a run named after
+  the prompt, based on the commit the prompt was given on — `harness/claude_code.py`
+- [x] Reviews launch themselves: the Stop hook and `daedalus verify` launch every required review once
+  checks pass; a missing review is never put to the agent as its job
+- [x] Billed launches the cash budget cannot cover are refused up front with the fix, not charged and
+  then rejected — `lifecycle.refuse_unaffordable`, `Adapter.expected_cost_basis`
+- [x] Portable hook commands, safe to commit; `harness.bootstrap` installs Daedalus in fresh containers
+- [x] `.claude/settings.json` and the gate skill are part of the candidate and raise the tier to critical
+- [x] Accepted commits carry `Daedalus-Run` trailers via a `prepare-commit-msg` hook — `harness/provenance.py`
+- [x] Status line; `daedalus init` installs everything; `-c` criteria are proved by the checks (`--attest`
+  for criteria only a person can judge)
+- [ ] `daedalus ci` + workflow template (next run)
+
 ## Deliberately out of scope until usage justifies it
 
 Server, multi-user control plane, plugin marketplace, distributed scheduler,

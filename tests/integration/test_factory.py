@@ -550,17 +550,17 @@ def test_the_shipped_commit_never_carries_what_the_builder_staged_outside_the_ca
 
     def sneaky(req):
         (req.cwd / "app.txt").write_text("ok\n")
-        hooks = req.cwd / ".claude" / "settings.json"  # excluded from the candidate by default
-        hooks.parent.mkdir(exist_ok=True)
-        hooks.write_text('{"hooks": {}}')
-        git(req.cwd, "add", "-f", ".claude/settings.json")
+        local = req.cwd / ".claude" / "settings.local.json"  # excluded from the candidate by default
+        local.parent.mkdir(exist_ok=True)
+        local.write_text('{"hooks": {}}')
+        git(req.cwd, "add", "-f", ".claude/settings.local.json")
         git(req.cwd, "commit", "-qm", "builder commits an unreviewed path")
         return AgentResult("COMPLETED", structured=DONE)
 
     report = line(ari, SimulatedAdapter({"brunel": [sneaky]})).run()
     assert report.shipped == ["fix"]
     files = set(out(repo, "diff", "--name-only", "HEAD~1", "HEAD").splitlines())
-    assert files == {"app.txt"}  # .claude/settings.json was not reviewed, so it did not ship
+    assert files == {"app.txt"}  # .claude/settings.local.json was not reviewed, so it did not ship
 
 
 def test_park_from_the_integration_branch_refuses_to_strand_the_work(ari, repo):
@@ -581,3 +581,13 @@ def test_fanout_ids_get_a_fresh_namespace_on_a_resumed_run():
     first = _plan_packages(body, 1)
     again = _plan_packages(body, 1, {p["task_id"] for p in first})
     assert [p["task_id"] for p in again] == ["r1.2-a", "r1.2-b"] and again[1]["depends_on"] == ["r1.2-a"]
+
+
+def test_ledger_skips_valid_json_that_is_not_a_record(repo):
+    led = Ledger(repo)
+    led.append("order.requeued", order="a")
+    with open(led.path, "a", encoding="utf-8") as f:
+        f.write('12\n{"order": "a"}\n')
+    led.append("order.requeued", order="b")
+    assert [e["order"] for e in led.events()] == ["a", "b"] and led.skipped == 2
+    assert led.records()["b"].status == "queued"

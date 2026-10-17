@@ -234,7 +234,11 @@ class Ariadne:
                 known.add(key)
 
     # ================================================================ start
-    def start(self, spec: dict[str, Any], *, actor: str, mode: str | None = None) -> str:
+    def start(
+        self, spec: dict[str, Any], *, actor: str, mode: str | None = None, base_revision: str | None = None
+    ) -> str:
+        """Open a run. `base_revision` (default HEAD) must be HEAD or one of its ancestors: work
+        committed since then is still part of the candidate."""
         _require_principal(actor)
         open_run = self.active_run_id()
         if open_run:
@@ -251,7 +255,14 @@ class Ariadne:
         if mode not in MODES:
             raise ContractError(f"mode must be one of {MODES}")
         run_id = uuid.uuid4().hex[:12]
-        contract = build_contract(run_id, spec, policy, git_head(self.root))
+        head = git_head(self.root)
+        if base_revision is not None and base_revision != head:
+            from daedalus.repository.candidate import is_ancestor
+
+            if not is_ancestor(self.root, base_revision):
+                raise ContractError(f"base revision {base_revision[:12]} is not HEAD or an ancestor of it")
+            head = base_revision
+        contract = build_contract(run_id, spec, policy, head)
         rel, fhash = self._write_contract(contract)
         self._append(
             run_id,
