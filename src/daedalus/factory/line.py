@@ -318,7 +318,9 @@ class Line:
             order = self._orders().get(oid)
             if state.execution is ExecutionState.RUNNING:
                 d = self.ari.evaluate(rid)
-                if not d.acceptable and any(r.fixable_by == "agent" for r in d.reasons):
+                if not d.acceptable and any(
+                    r.fixable_by == "agent" or r.code.startswith("review:") for r in d.reasons
+                ):
                     rounds = (order.rounds if order and order.rounds else None) or self.cfg.rounds
                     drive(self.ari, rid, adapter=self.adapter, max_rounds=rounds, notify=self.notify)
             outcome = self._settle(oid, rid, rounds=0)  # resumed: not a first pass
@@ -437,7 +439,7 @@ class Line:
         cand = self.ari.capture(state)
         # The candidate the disposition was recorded for. (`decision.candidate_id` describes the
         # tree as it is now, which after acceptance may include unreviewed edits.)
-        accepted = state.finalized_candidate_id
+        accepted = state.accepted_candidate_id
         if not accepted or cand.candidate_id != accepted:
             return self._park(oid, rid, ["the working tree changed after acceptance; nothing was shipped"])
         rec = self.ledger.records()[oid]
@@ -454,13 +456,13 @@ class Line:
         files = set(cand.manifest["files"])
         gitops.git(self.root, "reset", "-q", "--mixed", into_head)
         gitops.stage_exact(self.root, sorted(files))
-        sha = None
-        if gitops.has_staged_changes(self.root):
-            sha = gitops.commit(self.root, self._message(oid, rid, decision))
-            shipped = set(gitops.git(self.root, "diff", "--name-only", "--no-renames", into_head, sha).splitlines())
-            if shipped != files:
-                why = f"the shipped commit would differ from the accepted candidate ({sorted(shipped ^ files)[:5]})"
-                return self._park(oid, rid, [why + "; nothing was shipped"])
+        if not gitops.has_staged_changes(self.root):  # F6: the candidate is not empty, yet nothing differs
+            return self._park(oid, rid, ["the accepted changes are already on the integration branch; nothing was shipped"])
+        sha = gitops.commit(self.root, self._message(oid, rid, decision))
+        shipped = set(gitops.git(self.root, "diff", "--name-only", "--no-renames", into_head, sha).splitlines())
+        if shipped != files:
+            why = f"the shipped commit would differ from the accepted candidate ({sorted(shipped ^ files)[:5]})"
+            return self._park(oid, rid, [why + "; nothing was shipped"])
         branch = gitops.current_branch(self.root)
         gitops.git(self.root, "checkout", "-q", self.into or "")
         if branch and branch != self.into:
@@ -473,7 +475,7 @@ class Line:
                 return "parked"
             gitops.ok(self.root, "branch", "-q", "-d", branch)
         self._outcome(oid, rid, "shipped", [], commit=sha, rounds=rounds)
-        self.notify(f"{oid}: shipped" + (f" as {sha[:10]}" if sha else " (its earlier work was already on the branch)"))
+        self.notify(f"{oid}: shipped as {sha[:10]}")
         return "shipped"
 
     def _message(self, oid: str, rid: str, d: Decision) -> str:
@@ -489,7 +491,7 @@ class Line:
         lines += [
             f"Daedalus-Order: {oid}",
             f"Daedalus-Run: {rid}",
-            f"Daedalus-Candidate: {self.ari.state(rid).finalized_candidate_id}",
+            f"Daedalus-Candidate: {self.ari.state(rid).accepted_candidate_id}",
             f"Daedalus-Risk: {d.risk.effective_tier}",
         ]
         return "\n".join(lines) + "\n"

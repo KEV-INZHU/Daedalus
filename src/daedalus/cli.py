@@ -37,6 +37,7 @@ from daedalus.core.config import (
     render_config,
     set_gate,
 )
+from daedalus.core.contracts import bind_text_criteria
 from daedalus.core.errors import AuthorizationError, DaedalusError
 from daedalus.core.policy import default_policy_text
 from daedalus.core.state_machine import Disposition
@@ -119,7 +120,10 @@ def _print(s: str = "") -> None:
     print(s, flush=True)
 
 
-def _spec_from_args(args: argparse.Namespace) -> dict[str, Any]:
+def _spec_from_args(args: argparse.Namespace, policy: Any = None) -> dict[str, Any]:
+    """The contract spec from flags and `--contract`. Criteria given with `-c` are proved by the
+    required checks (bound here, when `policy` is given); `--attest` criteria need a person; bare
+    strings in a contract file keep their meaning (a person attests them)."""
     spec: dict[str, Any] = {}
     if getattr(args, "contract", None):
         loaded = yaml.safe_load(Path(args.contract).read_text(encoding="utf-8")) or {}
@@ -128,8 +132,15 @@ def _spec_from_args(args: argparse.Namespace) -> dict[str, Any]:
         spec.update(loaded)
     if args.goal:
         spec["objective"] = args.goal
-    if args.criterion:
-        spec["acceptance_criteria"] = list(args.criterion)
+    crits: list[Any] = list(args.criterion or [])
+    if policy is not None and crits:
+        merged = list(spec.get("required_checks") or []) + list(args.check or [])  # file + --check
+        crits = bind_text_criteria({"acceptance_criteria": crits, "required_checks": merged}, policy)[
+            "acceptance_criteria"
+        ]
+    crits += [{"description": a, "checks": []} for a in getattr(args, "attest", None) or []]
+    if crits:
+        spec["acceptance_criteria"] = crits
     if args.scope:
         spec["scope"] = list(args.scope)
     if args.risk:
@@ -167,18 +178,32 @@ def cmd_init(args: argparse.Namespace) -> int:
         checks = detect_checks(root)
         cfg.write_text(render_config(checks, args.adapter), encoding="utf-8")
         _print(f"wrote {CONFIG_FILE} with checks: {', '.join(checks) or 'NONE — add one before starting a run'}")
-    gi = root / ".gitignore"
-    existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
-    if f"{STATE_DIR}/" not in existing.split():
-        gi.write_text(existing + ("" if existing.endswith("\n") or not existing else "\n") + f"{STATE_DIR}/\n")
+    if _ensure_ignored(root, f"{STATE_DIR}/"):
         _print(f"added {STATE_DIR}/ to .gitignore")
-    if args.claude_code:
+    if not args.no_hooks:
         from daedalus.harness.claude_code import install
+        from daedalus.harness.provenance import install_git_hook
 
         for line in install(root):
             _print(line)
-    _print(f"Next: review and commit {CONFIG_FILE} (runs only trust committed policy), then `daedalus start \"<goal>\"`.")
+        try:
+            _print(install_git_hook(root))
+        except DaedalusError as exc:
+            _print(f"note: {exc}")
+        _ensure_ignored(root, ".claude/settings.local.json")
+    _print(f"Next: review and commit {CONFIG_FILE}" + ("" if args.no_hooks else " and .claude/") + ".")
+    _print("Then just work: in Claude Code the first edit opens a run and the gate decides when it is done.")
     return 0
+
+
+def _ensure_ignored(root: Path, entry: str) -> bool:
+    """Add `entry` to .gitignore unless present. Returns True when it was added."""
+    gi = root / ".gitignore"
+    existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
+    if entry in existing.split():
+        return False
+    gi.write_text(existing + ("" if existing.endswith("\n") or not existing else "\n") + entry + "\n")
+    return True
 
 
 def cmd_toggle(args: argparse.Namespace) -> int:
@@ -193,7 +218,8 @@ def cmd_toggle(args: argparse.Namespace) -> int:
 def cmd_start(args: argparse.Namespace) -> int:
     ari = _ari(args)
     try:
-        rid = ari.start(_spec_from_args(args), actor=starter_actor(), mode=args.mode)
+        spec = _spec_from_args(args, ari.config().policy)
+        rid = ari.start(spec, actor=starter_actor(), mode=args.mode)
         state = ari.state(rid)
         _print(f"run {rid} started (mode {state.mode}, contract v{state.contract.contract_version})")
         _print(f"contract: {state.contract_file}")
@@ -212,7 +238,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         report = run_task(
             ari,
-            _spec_from_args(args),
+            _spec_from_args(args, ari.config().policy),
             actor=starter_actor(),
             adapter=ari.adapter,
             mode=args.mode,
@@ -283,11 +309,20 @@ def cmd_verify(args: argparse.Namespace) -> int:
         for r in recs:
             extra = f" ({r.error})" if r.error else (f" exit {r.exit_code}" if r.result == "FAIL" else "")
             _print(f"{r.check_id}: {r.result} on {r.candidate_id[:12]}{extra}")
+        passed = all(r.result == "PASS" for r in recs if r.mandatory)
+        from daedalus.harness.claude_code import launched_by_daedalus
+
+        if passed and not args.no_review and not args.only and not launched_by_daedalus():
+            from daedalus.harness.claude_code import settle
+
+            d, notes, _ = settle(ari, rid, notify=lambda m: _print(f"· {m}"))
+            for n in notes:
+                _print(f"note: {n}")
         d = ari.evaluate(rid)
         _print(f"Disposition: {d.disposition.value}")
         for r in d.reasons:
             _print(f"  [{r.fixable_by}] {r.message}")
-        return 0 if all(r.result == "PASS" for r in recs if r.mandatory) else 1
+        return 0 if passed else 1
     finally:
         ari.close()
 
@@ -639,9 +674,25 @@ def cmd_policy(args: argparse.Namespace) -> int:
 def cmd_hook(args: argparse.Namespace) -> int:
     from daedalus.harness.claude_code import run_hook
 
-    out = run_hook(args.name, sys.stdin.buffer.read().decode("utf-8-sig", "replace"))  # harnesses send UTF-8 JSON
+    stdin = "" if args.name == "commit-msg" else sys.stdin.buffer.read().decode("utf-8-sig", "replace")  # UTF-8 JSON
+    out = run_hook(args.name, stdin, list(args.args)) if args.args else run_hook(args.name, stdin)
     if out:
         _print(out)
+    return 0
+
+
+def cmd_statusline(args: argparse.Namespace) -> int:
+    from daedalus.harness.claude_code import statusline
+
+    try:
+        payload = json.loads(sys.stdin.read() or "{}") if not sys.stdin.isatty() else {}
+    except ValueError:
+        payload = {}
+    if not payload.get("cwd") and not (payload.get("workspace") or {}).get("current_dir"):
+        payload["cwd"] = args.dir
+    line = statusline(payload)
+    if line:
+        _print(line)
     return 0
 
 
@@ -649,10 +700,17 @@ def cmd_install(args: argparse.Namespace) -> int:
     from daedalus.harness.claude_code import install
 
     root = find_root(args.dir)
+    from daedalus.harness.provenance import install_git_hook
+
     roles = ("gate",) + (("brunel", "socrates", "mozi", "aristotle", "james", "plato", "vitruvius") if args.all_skills else ())
     for line in install(root, skills=roles):
         _print(line)
-    _print("Claude Code will now stop at the Daedalus gate whenever a run is open and the gate is ON.")
+    try:
+        _print(install_git_hook(root))
+    except DaedalusError as exc:
+        _print(f"note: {exc}")
+    _print("Commit .claude/ so every session works under the gate: the first edit opens a run, and the")
+    _print("gate verifies, reviews and decides when the agent stops.")
     return 0
 
 
@@ -924,7 +982,9 @@ def build_parser() -> argparse.ArgumentParser:
     def contract_args(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("goal", nargs="?", help="the objective, in plain words")
         sp.add_argument("--contract", help="YAML file with contract fields")
-        sp.add_argument("-c", "--criterion", action="append", help="acceptance criterion (repeatable)")
+        sp.add_argument("-c", "--criterion", action="append", help="acceptance criterion, proved by the required checks (repeatable)")
+        sp.add_argument("--attest", action="append", metavar="CRITERION",
+                        help="acceptance criterion only a person can judge; needs `daedalus attest` (repeatable)")
         sp.add_argument("--scope", action="append", help="path glob the change may touch (repeatable)")
         sp.add_argument("--risk", help="declared risk tier (can only raise the computed tier)")
         sp.add_argument("--check", action="append", help="extra required check from policy (repeatable)")
@@ -932,7 +992,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("init", cmd_init, "write .daedalus.yml with detected checks")
     sp.add_argument("--adapter", help="agent harness for `daedalus run` (e.g. claude-code)")
-    sp.add_argument("--claude-code", action="store_true", help="also install the Claude Code hooks and skill")
+    sp.add_argument("--claude-code", action="store_true", help=argparse.SUPPRESS)  # the default now
+    sp.add_argument("--no-hooks", action="store_true", help="do not install the Claude Code hooks and git hook")
     sp.add_argument("--force", action="store_true")
     add("on", cmd_toggle, "turn the gate on for this repository")
     add("off", cmd_toggle, "turn the gate off for this repository (human only)", human=True)
@@ -948,6 +1009,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--brief", action="store_true")
     sp = add("verify", cmd_verify, "run trusted checks against the current working tree", run=True)
     sp.add_argument("--only", action="append", help="run only this check (repeatable)")
+    sp.add_argument("--no-review", action="store_true",
+                    help="do not launch the reviews the run requires once checks pass")
     add("finish", cmd_finish, "derive and record the final disposition if it is decided", run=True)
     sp = add("review", cmd_review, "launch an independent review through the adapter", run=True)
     sp.add_argument("perspective", choices=("required", "socrates", "mozi", "aristotle", "james"))
@@ -1002,7 +1065,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("policy", cmd_policy, "print the effective policy")
     sp.add_argument("--default", action="store_true", help="print the built-in default policy")
     sp = add("hook", cmd_hook, "harness hook entry point (reads the hook payload on stdin)")
-    sp.add_argument("name", choices=("stop", "session-start"))
+    sp.add_argument("name", choices=("stop", "session-start", "prompt", "pre-edit", "commit-msg"))
+    sp.add_argument("args", nargs="*", help="arguments a git hook passes through")
+    add("statusline", cmd_statusline, "one status line for Claude Code (reads its JSON on stdin)")
     sp = add("install", cmd_install, "install harness integration")
     sp.add_argument("harness", choices=("claude-code",))
     sp.add_argument("--all-skills", action="store_true", help="also install the role skills")

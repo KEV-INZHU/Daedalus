@@ -37,7 +37,7 @@ from typing import Any
 
 import yaml
 
-from daedalus.core.contracts import MODES, build_contract
+from daedalus.core.contracts import MODES, bind_text_criteria, build_contract
 from daedalus.core.errors import ContractError, DaedalusError
 from daedalus.core.policy import Policy
 
@@ -76,14 +76,7 @@ class WorkOrder:
 
     def contract_spec(self, policy: Policy) -> dict[str, Any]:
         """The contract this order runs under, with text criteria bound to its checks."""
-        spec = dict(self.spec)
-        requested = [str(c) for c in spec.get("required_checks") or []]
-        checks = list(dict.fromkeys(policy.mandatory_checks() + tuple(requested)))
-        crits = spec.get("acceptance_criteria")
-        if isinstance(crits, list):
-            spec["acceptance_criteria"] = [
-                {"description": c, "checks": checks} if isinstance(c, str) else c for c in crits
-            ]
+        spec = bind_text_criteria(dict(self.spec), policy)
         spec.setdefault("verification_plan", DEFAULT_VERIFICATION)
         return spec
 

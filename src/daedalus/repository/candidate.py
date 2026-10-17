@@ -53,6 +53,11 @@ def git_head(root: Path) -> str | None:
     return r.stdout.decode().strip() or None
 
 
+def is_ancestor(root: Path, rev: str) -> bool:
+    """True when `rev` is HEAD or one of its ancestors."""
+    return _git(root, "merge-base", "--is-ancestor", rev, "HEAD", check=False).returncode == 0
+
+
 def _split_z(data: bytes) -> list[str]:
     return [normalize(p.decode("utf-8", "surrogateescape")) for p in data.split(b"\0") if p]
 
