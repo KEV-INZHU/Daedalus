@@ -1,0 +1,12 @@
+objective: >-
+  Add a git pre-push hook (installed by `daedalus init` and `daedalus install claude-code`, alongside the
+  prepare-commit-msg hook, with the same never-overwrite and stay-inside-.git rules) that lists outgoing
+  commits without a `Daedalus-Run` trailer. By default it only warns; with `harness: {require_provenance_on_push: true}`
+  in .daedalus.yml it refuses the push. Merge commits and commits already on the remote are not checked.
+acceptance_criteria:
+  - Pushing a commit without a Daedalus-Run trailer prints a warning naming it, and the push proceeds by default
+  - With require_provenance_on_push true, the same push is refused
+  - Commits that carry the trailer, merge commits, and commits already on the remote are not reported
+  - The hook never overwrites another pre-push hook and never writes outside this repository's .git
+scope: ["src/daedalus/harness/**", "src/daedalus/cli.py", "tests/integration/test_ambient.py", "README.md"]
+priority: 7

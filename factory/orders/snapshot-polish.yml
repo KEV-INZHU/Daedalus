@@ -1,0 +1,13 @@
+# Deferred from run 001484dd99f1 (findings F20, F22-F25).
+objective: >-
+  Make follow-up undo lossless and its failures explicit. Keep the undone follow-up content byte-exact (copy
+  every changed plain file into run_dir/followup-undone-<short>/files, hash-checked) alongside the diff;
+  have snapshot.restore report the paths a failed rollback could not put back, and restore_followup say
+  "the working tree may be partly rewritten: <paths>" in that case; count the base side's blob size
+  (`git cat-file -s`) in inter_diff's size budget before reading it.
+acceptance_criteria:
+  - After an automatic or manual undo, every undone file is kept byte-exact and hash-checked under the run directory
+  - A rollback that cannot restore some paths is reported with those paths, never as "left as it was"
+  - A base-side file larger than the delta budget makes the review full without reading the file
+scope: ["src/daedalus/repository/snapshot.py", "src/daedalus/orchestration/lifecycle.py", "tests/integration/test_review_efficiency.py"]
+priority: 4
