@@ -8,6 +8,7 @@ structured fields Ariadne validates.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -86,8 +87,68 @@ def contract_block(c: TaskContract) -> str:
     return "\n".join(lines)
 
 
-def builder_prompt(c: TaskContract, feedback: list[str], round_no: int) -> str:
-    parts = [skill_body("brunel"), "", contract_block(c)]
+# Programs that run arbitrary code by themselves: a grant ending in one of these would let a
+# Builder execute anything, so such a check is never granted.
+RUNNERS = frozenset({
+    "python", "python3", "py", "sh", "bash", "zsh", "dash", "pwsh", "powershell", "cmd", "node", "deno",
+    "bun", "npx", "env", "uv", "uvx", "poetry", "pipx", "make", "ruby", "perl", "php", "go", "cargo", "npm",
+    "yarn", "pnpm", "java", "dotnet", "xargs", "nix", "docker",
+})
+_UNSAFE = set(",()\"'`$;&|<>*?!{}[]\\")
+
+
+def _program(token: str) -> str:
+    """`/usr/bin/python3.12`, `python.exe` -> `python`: the name a runner is known by. (Paths with a
+    backslash never get here as a grant: `_UNSAFE` rejects them.)"""
+    name = token.rsplit("/", 1)[-1].lower().removesuffix(".exe").removesuffix(".cmd")
+    return re.sub(r"[\d.]+$", "", name) or name
+
+
+def check_prefix(command: tuple[str, ...] | list[str]) -> str:
+    """The part of a check command that names the program (`python -m pytest`, `npm test`), so a
+    Builder may run it on a subset (`python -m pytest tests/x.py -q`). Empty (nothing granted) when
+    the result would be a bare interpreter, shell or runner (`python -c ...` gives `python`), or
+    contains characters that could change the meaning of a permission rule."""
+    out: list[str] = []
+    i = 0
+    while i < len(command):
+        t = command[i]
+        if t == "-m" and i + 1 < len(command):
+            out += [t, command[i + 1]]
+            i += 2
+            continue
+        if t.startswith("-"):
+            break
+        out.append(t)
+        i += 1
+    if not out or _program(out[-1]) in RUNNERS or any(set(t) & _UNSAFE for t in out):
+        return ""
+    if len(out) == 2 and _program(out[0]) in RUNNERS and out[1] in ("run", "exec", "x", "-m"):
+        return ""  # `uv run`, `npm exec`: a runner waiting for any program
+    return " ".join(out)
+
+
+def run_checks_section(run_commands: tuple[str, ...], skipped: tuple[str, ...] = ()) -> list[str]:
+    """What a Builder may run to test its work, shared by in-place Builders and fan-out workers."""
+    if not run_commands and not skipped:
+        return []
+    parts = ["", "## Run the checks yourself", ""]
+    if run_commands:
+        parts += ["You may run commands that **start with** these prefixes, with any further arguments, to test "
+                  "your work before you finish. Run them directly, without pipes or redirection (only these "
+                  "commands are allowed). The gate runs the full checks afterwards; a candidate that fails "
+                  "them costs a round:", ""]
+        parts += [f"- `{cmd}`" for cmd in run_commands]
+    if skipped:
+        parts += ["", f"The gate also runs {', '.join(f'`{c}`' for c in skipped)}, which you cannot run yourself."]
+    return parts
+
+
+def builder_prompt(
+    c: TaskContract, feedback: list[str], round_no: int, run_commands: tuple[str, ...] = (),
+    skipped: tuple[str, ...] = (),
+) -> str:
+    parts = [skill_body("brunel"), "", contract_block(c)] + run_checks_section(run_commands, skipped)
     if feedback:
         parts += [
             "",
@@ -125,7 +186,8 @@ def plan_prompt(c: TaskContract, cap: int) -> str:
     return "\n".join([skill_body("brunel"), "", PLAN_OUTPUT.format(cap=cap), "", contract_block(c)])
 
 
-def worker_prompt(c: TaskContract, package: dict[str, Any]) -> str:
+def worker_prompt(c: TaskContract, package: dict[str, Any], run_commands: tuple[str, ...] = (),
+                  skipped: tuple[str, ...] = ()) -> str:
     owned = ", ".join(package.get("owned_paths", ()))
     return "\n".join(
         [
@@ -139,6 +201,7 @@ def worker_prompt(c: TaskContract, package: dict[str, Any]) -> str:
             "",
             f"You may change **only** these paths: {owned}. Other packages, built in parallel, own the rest;",
             "a change outside your paths gets your whole package rejected.",
+            *run_checks_section(run_commands, skipped),
         ]
     )
 

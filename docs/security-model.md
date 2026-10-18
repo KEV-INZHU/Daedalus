@@ -62,7 +62,15 @@ same user can:
 - One orchestrator per repository. Locks on other hosts are presumed alive.
 - The Builder is not sandboxed. A `claude-code` Builder launch loads the user's
   settings, so their permission allow-rules decide which shell commands it may run
-  (in run 10 it ran `pytest` through PowerShell). Its session can also write the project's
+  (in run 10 it ran `pytest` through PowerShell). Daedalus itself also grants each Builder
+  the run's check commands (`--allowedTools Bash(<prefix>:*)`, e.g. `python -m pytest`), so
+  it can test its work before handing it in; without that, headless Builders could run
+  nothing and a quarter of factory rounds failed checks they never saw. That is code
+  execution: the tests a Builder writes run in its session's environment, which holds the
+  agent CLI's own credentials and is **not** scrubbed the way the gate's checks are.
+  Checks whose prefix would be a bare interpreter, shell or runner (`python -c ...`) are
+  never granted. Set `policy: {builder_runs_checks: false}` to grant nothing.
+  The Builder's session can also write the project's
   auto-memory and `.claude/`, which later Builder rounds load. Reviews are protected from this;
   builders are not.
 - Off Windows, a session whose orchestrator is killed outright (not cancelled, timed
