@@ -366,6 +366,32 @@ def test_an_interrupted_order_is_resumed_by_the_next_line(ari, repo):
     assert workers == {"build-1": "FAILED", "build-1.2": "COMPLETED"}  # the crashed session is not presumed done
 
 
+def test_escape_rate_from_fixes_order_trailers(ari, repo, capsys):
+    import json
+
+    from daedalus import cli
+
+    add_orders(repo, {"one": {"objective": "one"}, "two": {"objective": "two"}})
+    adapter = SimulatedAdapter({"brunel": [build({"app.txt": "ok\n", "one.txt": "1\n"}), build({"app.txt": "ok\n", "two.txt": "2\n"})]})
+    line(ari, adapter).run()
+    assert {r.status for r in Ledger(repo).records().values()} == {"shipped"}
+    d = str(repo)
+
+    def status() -> dict:
+        assert cli.main(["-C", d, "factory", "status", "--json"]) == 0
+        return json.loads(capsys.readouterr().out)
+
+    assert status()["summary"]["escaped"] == 0  # nothing names them yet
+    (repo / "fix.txt").write_text("fix\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "fix it\n\nFixes-Order: one\nFixes-Order: never-shipped")
+    data = status()
+    assert data["summary"]["escaped_orders"] == ["one"] and data["summary"]["escape_rate"] == 0.5
+    assert {o["id"]: o["escaped"] for o in data["orders"]} == {"one": True, "two": False}
+    assert cli.main(["-C", d, "factory", "status"]) == 0
+    assert "escaped 1 of 2 shipped · escape rate 50%" in capsys.readouterr().out
+
+
 def test_only_one_line_runs_at_a_time(ari, repo):
     import json as _json
     import os

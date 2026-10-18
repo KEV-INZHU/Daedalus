@@ -124,6 +124,11 @@ recovers crashed sessions without presuming they succeeded. Only one line runs a
 | first-pass yield | shipped on the first attempt, in the first round / orders attempted  |
 | cost per shipped | all spend on the orders (failures included) / shipped orders         |
 | median cycle     | first start to ship, for shipped orders                              |
+| escape rate      | shipped orders later named by a `Fixes-Order:` trailer / shipped     |
+
+A commit on the integration branch made after an order shipped, whose message has a
+`Fixes-Order: <order-id>` trailer, marks that order as escaped. Trailers naming orders that never
+shipped are ignored. Escapes are derived from git history each time, not stored in the ledger.
 
 `daedalus metrics` still reports each underlying run.
 
