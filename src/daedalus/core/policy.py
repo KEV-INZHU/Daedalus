@@ -111,6 +111,8 @@ class Policy:
     rereview: str = "delta"
     # Non-blocking findings offered for one fix round before acceptance.
     followup_severities: frozenset[str] = frozenset({"MAJOR", "MINOR"})
+    # Whether Builders may run the run's check commands themselves (see docs/security-model.md).
+    builder_runs_checks: bool = True
     raw: dict[str, Any] = field(repr=False, compare=False, default_factory=dict)
 
     # ------------------------------------------------------------------ hashing
@@ -160,8 +162,8 @@ def _floors(items: Any, where: str) -> tuple[Floor, ...]:
     return tuple(out)
 
 
-def _strict_bool(raw: dict[str, Any], key: str) -> bool:
-    value = raw.get(key, False)
+def _strict_bool(raw: dict[str, Any], key: str, default: bool = False) -> bool:
+    value = raw.get(key, default)
     if not isinstance(value, bool):
         raise PolicyError(f"{key} must be true or false (got {value!r})")
     return value
@@ -282,6 +284,7 @@ def policy_from_dict(raw: dict[str, Any]) -> Policy:
         arbitration_resolves_findings=_strict_bool(raw, "arbitration_resolves_findings"),
         rereview=rereview,
         followup_severities=frozenset(str(s) for s in followups),
+        builder_runs_checks=_strict_bool(raw, "builder_runs_checks", True),
         raw=raw,
     )
 

@@ -144,6 +144,20 @@ unaddressed because only blocking findings went back to the Builder.
 - [x] One follow-up round for non-blocking findings (lifecycle and Stop hook), never blocking acceptance
 - [x] Metrics: delta reviews, late findings, follow-up rounds, reviews per accepted change
 
+### Factory lines with real agents (claude-code adapter)
+
+| Line | Gate | Orders | Shipped | Cost | Reviews/order | Late findings | Findings found → fixed |
+|------|------|--------|---------|------|---------------|---------------|------------------------|
+| 1 | before Phase 6 | 3 small | 3 | $1.33 | 1 | 0 | 9 → 0 (only blockers went back to the Builder) |
+| 2 | Phase 6 | 5 features | 5 | $10.89 | 1–2 (second always a delta) | 0 | 53 → 19 |
+
+Line 2: where the follow-up round worked, it fixed 5/9, 7/12 and 7/11 findings, including the only
+MAJOR. Where it failed, the Builder broke tests it could not run, the gate undid the round and shipped
+the accepted candidate, and 21 findings were lost. A quarter of all rounds failed the checks for the
+same reason: headless Builders were denied every shell command, so none ever ran the tests.
+
+- [x] Builders may run exactly the run's check commands (`--allowedTools Bash(<prefix>:*)`), and are told so
+
 ## Deliberately out of scope until usage justifies it
 
 Server, multi-user control plane, plugin marketplace, distributed scheduler,

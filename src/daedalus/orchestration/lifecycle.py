@@ -56,6 +56,20 @@ def _quiet(_: str) -> None:
 
 
 # ------------------------------------------------------------------- reviews
+def check_commands(state: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The run's required checks a Builder may run (as command prefixes), and the ids of those it
+    may not (no safe prefix, or `policy: {builder_runs_checks: false}`)."""
+    granted, skipped = [], []
+    for cid in state.contract.required_checks:
+        d = state.policy.checks.get(cid)
+        p = prompts.check_prefix(d.command) if (d is not None and state.policy.builder_runs_checks) else ""
+        if p:
+            granted.append(p)
+        else:
+            skipped.append(cid)
+    return tuple(dict.fromkeys(granted)), tuple(skipped)
+
+
 def delta_ok(state: Any) -> bool:
     """Whether re-reviews may be scoped to the change (`rereview: delta`, the default)."""
     return state.policy.rereview == "delta"
@@ -296,16 +310,18 @@ def build_round(
     )
     w = ari.dispatch(run_id, task_id, principal="agent:brunel")
     notify(f"round {round_no}: Brunel is building ({task_id})")
+    runnable, skipped = check_commands(state)
     try:
         res = adapter.run_agent(
             AgentRequest(
                 run_id,
                 task_id,
                 "brunel",
-                prompts.builder_prompt(state.contract, feedback, round_no),
+                prompts.builder_prompt(state.contract, feedback, round_no, runnable, skipped),
                 ari.root,
                 BUILD_TIMEOUT_S,
                 should_stop=ari.stop_check(run_id),
+                run_commands=runnable,
             )
         )
     except Exception as exc:
@@ -464,6 +480,7 @@ def fan_out_round(
             fail(tid, str(exc))
 
     stop = ari.stop_check(run_id)
+    runnable, skipped = check_commands(state)
     pool = ThreadPoolExecutor(max_workers=cap, thread_name_prefix="daedalus-worker")
     aborted = False
     try:
@@ -491,8 +508,8 @@ def fan_out_round(
                     finish(tid, AgentResult("FAILED", error="no isolated workspace"), integrate=False)
                     continue
                 req = AgentRequest(
-                    run_id, tid, "brunel", prompts.worker_prompt(state.contract, w.package),
-                    Path(w.workspace), BUILD_TIMEOUT_S, should_stop=stop,
+                    run_id, tid, "brunel", prompts.worker_prompt(state.contract, w.package, runnable, skipped),
+                    Path(w.workspace), BUILD_TIMEOUT_S, should_stop=stop, run_commands=runnable,
                 )
                 running[pool.submit(adapter.run_agent, req)] = tid
                 notify(f"dispatched {tid} ({len(running)}/{cap} running)")

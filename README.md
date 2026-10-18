@@ -105,6 +105,10 @@ Reviews cost time and money, so the gate aims for one round:
   MAJOR or MINOR findings (`policy: {followup_severities: [...]}`), the agent gets exactly one pass to fix
   them, delta-reviewed. What's left open never blocks acceptance.
 
+Builders may run the run's check commands themselves (for example `python -m pytest`), so they hand in
+tested work. A check that would grant a bare interpreter or shell is never granted, and
+`policy: {builder_runs_checks: false}` grants nothing (see [docs/security-model.md](docs/security-model.md)).
+
 `daedalus metrics` reports reviews per accepted change, delta reviews, and **late findings**: every
 finding raised by a *full* re-review, meaning a full review of a perspective after its first one. Those are
 what one thorough pass plus delta reviews should have made unnecessary, so that's the number this design
