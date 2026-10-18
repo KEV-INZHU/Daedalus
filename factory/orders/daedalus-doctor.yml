@@ -1,0 +1,12 @@
+objective: >-
+  `daedalus doctor` checks that a repository is set up for the frictionless gate and says exactly how to fix
+  each problem: .daedalus.yml committed and valid; at least one mandatory check; Claude Code hooks installed
+  and committed; the git hooks installed; `daedalus` reachable on PATH (what the hooks call); a launching
+  adapter configured and available for reviews; and, when that adapter bills in cash, a max_cash budget above
+  zero. It exits non-zero when any check fails, and never changes anything.
+acceptance_criteria:
+  - Each problem listed in the objective is reported with a one-line fix when present
+  - A correctly set-up repository passes with exit status 0
+  - The command makes no changes to the repository
+scope: ["src/daedalus/doctor.py", "src/daedalus/cli.py", "tests/integration/test_doctor.py", "README.md"]
+priority: 6
