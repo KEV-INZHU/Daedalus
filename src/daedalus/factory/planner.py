@@ -24,7 +24,7 @@ from daedalus.orchestration.ariadne import Ariadne
 from daedalus.repository.candidate import capture
 
 PLAN_TIMEOUT_S = 1800.0
-FIELDS = ("objective", "acceptance_criteria", "scope", "depends_on", "priority", "invariants",
+FIELDS = ("title", "objective", "acceptance_criteria", "scope", "depends_on", "priority", "invariants",
           "design_decisions", "risk_tier")
 
 
@@ -65,7 +65,7 @@ def plan_orders(
     recs = Ledger(root).records()
     listing = [
         {"id": o.order_id, "status": recs[o.order_id].status if o.order_id in recs else "queued",
-         "objective": o.title}
+         "title": o.title}
         for o in existing
     ]
     before = _snapshot(root, policy.candidate_exclude)
@@ -95,6 +95,8 @@ def plan_orders(
             oid, n = f"{base}-{n}", n + 1
         if asked and asked not in taken:  # a dependency on an existing id means the existing order
             renamed[asked] = oid
+        if isinstance(item.get("title"), str):  # a blank title is no title: the objective names the order
+            item["title"] = item["title"].strip()
         spec = {k: item[k] for k in FIELDS if item.get(k) not in (None, [], "")}
         try:
             order = parse_order(oid, spec, f"{cfg.orders_dir}/{oid}.yml", policy)

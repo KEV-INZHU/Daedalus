@@ -416,6 +416,98 @@ def test_order_title_is_a_clean_commit_subject():
     assert len(long) <= 72 and long.endswith("word…")
 
 
+def test_an_order_title_is_its_commit_subject_and_its_board_label(ari, repo, capsys):
+    import json
+
+    from daedalus import cli
+
+    add_orders(repo, {
+        "titled": {"title": "Make the app say ok", "objective": "The app is wrong. Fix it.", "priority": 1},
+        "plain": {"objective": "Add the lib. It is small."},
+    })
+    adapter = SimulatedAdapter({"brunel": [build({"app.txt": "ok\n"}), build({"src/lib.py": "x = 4\n"})]})
+    base = out(repo, "rev-parse", "HEAD")
+    assert line(ari, adapter).run().shipped == ["titled", "plain"]
+    subjects = out(repo, "log", "--format=%s", f"{base}..HEAD").splitlines()
+    assert subjects == ["Add the lib", "Make the app say ok"]  # titled, then the first-sentence fallback
+    assert "Daedalus-Order: titled" in out(repo, "log", "-1", "--format=%B", "HEAD~1")
+    assert cli.main(["-C", str(repo), "factory", "status"]) == 0
+    assert "Make the app say ok" in capsys.readouterr().out
+    assert cli.main(["-C", str(repo), "factory", "status", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)["orders"]
+    assert {o["id"]: o["title"] for o in shown} == {"titled": "Make the app say ok", "plain": "Add the lib"}
+    assert {o["id"]: o["objective"] for o in shown} == {"titled": "The app is wrong. Fix it.",
+                                                        "plain": "Add the lib. It is small."}
+    adapter = planner({"orders": []})  # the planner lists existing orders by title
+    plan_orders(ari, adapter, "more")
+    assert "- titled (shipped): Make the app say ok" in adapter.requests[0].prompt
+
+
+def test_a_title_that_is_too_long_or_not_one_line_is_an_invalid_order(ari, repo):
+    add_orders(repo, {
+        "long": {"title": "x" * 73, "objective": "x"},
+        "multi": {"title": "first line\nsecond line", "objective": "x"},
+        "empty": {"title": "  ", "objective": "x"},
+        "not-text": {"title": ["a"], "objective": "x"},
+        "number": {"title": 123, "objective": "x"},
+        "cr": {"title": "a\rb", "objective": "x"},
+        "separator": {"title": "a b", "objective": "x"},
+        "control": {"title": "a\x07b", "objective": "x"},
+        "edge": {"title": "y" * 72, "objective": "x"},
+        "padded": {"title": "  " + "p" * 72 + " ", "objective": "x"},
+        "tabbed": {"title": "a\tb", "objective": "x"},
+    })
+    orders, errors = load_orders(repo, "factory/orders", ari.config().policy)
+    titles = sorted((o.order_id, o.title) for o in orders)
+    assert titles == [("edge", "y" * 72), ("padded", "p" * 72), ("tabbed", "a b")]
+    bad = ("long", "multi", "empty", "not-text", "number", "cr", "separator", "control")
+    assert set(errors) == {f"factory/orders/{n}.yml" for n in bad}
+    assert "72" in errors["factory/orders/long.yml"]
+    assert all("one line" in errors[f"factory/orders/{n}.yml"] for n in ("multi", "cr", "separator"))
+    assert "control" in errors["factory/orders/control.yml"]
+    assert all("title" not in o.spec for o in orders)  # a routing key, not a contract field
+
+
+def test_planner_is_asked_for_titles_and_planned_orders_keep_them(ari, repo):
+    body = {"orders": [
+        {"id": "keys", "title": "Issue API keys", "objective": "Issue keys. Store them hashed."},
+        {"id": "untitled", "objective": "Rotate keys. Weekly."},
+        {"id": "too-long", "title": "t" * 80, "objective": "x"},
+        {"id": "empty", "title": "", "objective": "Empty title. Falls back."},
+        {"id": "blank", "title": "   ", "objective": "Blank title. Falls back."},
+        {"id": "padded", "title": "  Pad me ", "objective": "x"},
+    ]}
+    adapter = planner(body)
+    plan = plan_orders(ari, adapter, "keys")
+    assert "title" in adapter.requests[0].prompt and "72 characters" in adapter.requests[0].prompt
+    planned = dict(plan.orders)
+    assert planned["keys"]["title"] == "Issue API keys" and planned["padded"]["title"] == "Pad me"
+    assert all("title" not in planned[o] for o in ("untitled", "empty", "blank"))  # first-sentence fallback
+    assert any(d.startswith("too-long:") and "72" in d for d in plan.dropped)
+    from daedalus.factory.orders import write_order
+
+    p = write_order(repo, "factory/orders", "keys", dict(plan.orders)["keys"], ari.config().policy)
+    assert yaml.safe_load(p.read_text())["title"] == "Issue API keys"
+    orders, _ = load_orders(repo, "factory/orders", ari.config().policy)
+    assert {o.order_id: o.title for o in orders} == {"keys": "Issue API keys"}
+
+
+def test_cli_add_sets_a_title(repo, capsys, monkeypatch):
+    from daedalus import cli
+
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("DAEDALUS_AGENT", raising=False)
+    d = str(repo)
+    add = ["-C", d, "factory", "add"]
+    assert cli.main([*add, "Make the app OK. Details.", "--id", "ok", "--title", "Fix app"]) == 0
+    body = yaml.safe_load((repo / "factory/orders/ok.yml").read_text())
+    assert body == {"title": "Fix app", "objective": "Make the app OK. Details."}
+    assert cli.main([*add, "x", "--id", "bad", "--title", "z" * 73]) == 2
+    assert "72" in capsys.readouterr().err and not (repo / "factory/orders/bad.yml").exists()
+    assert cli.main([*add, "x", "--id", "multi", "--title", "a\nb"]) == 2
+    assert "one line" in capsys.readouterr().err and not (repo / "factory/orders/multi.yml").exists()
+
+
 def test_retry_of_a_branch_that_conflicts_with_the_integration_branch_is_parked(ari, repo):
     add_orders(repo, {"a": {"objective": "first try", "rounds": 1, "priority": 1}, "b": {"objective": "fix app"}})
     adapter = SimulatedAdapter({"brunel": [build({"app.txt": "conflicting\n"}), build({"app.txt": "ok\n"})]})
