@@ -695,6 +695,10 @@ def cmd_policy(args: argparse.Namespace) -> int:
 
 
 def cmd_hook(args: argparse.Namespace) -> int:
+    if args.name == "pre-push":  # a git hook: exit status 3 (and only 3) refuses the push
+        from daedalus.harness.provenance import pre_push_hook
+
+        return pre_push_hook(list(args.args), sys.stdin.buffer.read().decode("utf-8", "replace"))
     from daedalus.harness.claude_code import run_hook
 
     stdin = "" if args.name == "commit-msg" else sys.stdin.buffer.read().decode("utf-8-sig", "replace")  # UTF-8 JSON
@@ -1147,7 +1151,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("policy", cmd_policy, "print the effective policy")
     sp.add_argument("--default", action="store_true", help="print the built-in default policy")
     sp = add("hook", cmd_hook, "harness hook entry point (reads the hook payload on stdin)")
-    sp.add_argument("name", choices=("stop", "session-start", "prompt", "pre-edit", "commit-msg"))
+    sp.add_argument("name", choices=("stop", "session-start", "prompt", "pre-edit", "commit-msg", "pre-push"))
     sp.add_argument("args", nargs="*", help="arguments a git hook passes through")
     add("statusline", cmd_statusline, "one status line for Claude Code (reads its JSON on stdin)")
     add("restore", cmd_restore, "undo a follow-up round: put back the candidate that was acceptable before it", run=True)

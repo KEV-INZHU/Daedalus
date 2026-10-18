@@ -16,14 +16,20 @@ one that adds anything after acceptance, gets no trailers. The hook never blocks
 Trailers are claims, not proof: anyone can type them. They make the gate's
 result visible where people look (the log, the PR) and give CI something to
 check; `daedalus ci` re-runs the trusted checks rather than trusting them.
+
+A `pre-push` hook, installed alongside it under the same rules, lists outgoing
+commits without a `Daedalus-Run` trailer. Merge commits and commits the remote
+already has are not checked. It only warns, unless `.daedalus.yml` sets
+`harness: {require_provenance_on_push: true}`, in which case it refuses the push.
 """
 
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
-from daedalus.core.config import find_root, load_config
+from daedalus.core.config import CONFIG_FILE, STATE_DIR, find_root, gate_enabled, load_config
 from daedalus.core.errors import DaedalusError
 from daedalus.core.state_machine import Disposition
 
@@ -33,6 +39,23 @@ HOOK_SCRIPT = f"""#!/bin/sh
 command -v daedalus >/dev/null 2>&1 || exit 0
 daedalus hook commit-msg "$1" "$2" >/dev/null 2>&1 || true
 """
+PUSH_MARK = "# daedalus: pre-push"
+PUSH_HOOK_SCRIPT = f"""#!/bin/sh
+{PUSH_MARK} (lists outgoing commits without a Daedalus-Run trailer; blocks only if require_provenance_on_push)
+command -v daedalus >/dev/null 2>&1 || exit 0
+daedalus hook pre-push "$1" "$2"; s=$?
+[ "$s" -eq 3 ] && exit 1  # 3 is a deliberate refusal; any other failure only skips the check
+exit 0
+"""
+REFUSE = 3  # pre_push_hook's status for "refuse the push", distinct from a crash
+MAX_LISTED = 20
+# (hook name, marker, script, how to add ours to someone else's hook)
+GIT_HOOKS = (
+    ("prepare-commit-msg", MARK, HOOK_SCRIPT, 'add `daedalus hook commit-msg "$1" "$2"` to it'),
+    ("pre-push", PUSH_MARK, PUSH_HOOK_SCRIPT,
+     'pipe that hook\'s stdin to `daedalus hook pre-push "$1" "$2"` and exit non-zero when it exits '
+     f'{REFUSE} (a refusal); treat any other status as "check skipped"'),
+)
 RECENT_RUNS = 5  # a commit hook must stay fast: only the latest runs can be what is committed
 
 
@@ -40,8 +63,8 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False)
 
 
-def hook_path(root: Path) -> Path | None:
-    r = _git(root, "rev-parse", "--git-path", "hooks/prepare-commit-msg")
+def hook_path(root: Path, name: str = "prepare-commit-msg") -> Path | None:
+    r = _git(root, "rev-parse", "--git-path", f"hooks/{name}")
     if r.returncode != 0 or not r.stdout.strip():
         return None
     p = Path(r.stdout.strip())
@@ -49,10 +72,24 @@ def hook_path(root: Path) -> Path | None:
 
 
 def install_git_hook(root: Path, *, only_if_absent: bool = False) -> str:
-    """Install the hook. Never replaces someone else's prepare-commit-msg hook."""
-    p = hook_path(root)
+    """Install the prepare-commit-msg and pre-push hooks. Never replaces someone else's hook;
+    one that is in the way does not stop the other from being installed."""
+    done: list[str] = []
+    refused: list[str] = []
+    for name, mark, script, hint in GIT_HOOKS:
+        try:
+            done.append(_install_one(root, name, mark, script, hint, only_if_absent=only_if_absent))
+        except DaedalusError as exc:
+            refused.append(str(exc))
+    if refused:
+        raise DaedalusError("\n".join([*refused, *done]))
+    return "\n".join(dict.fromkeys(done))  # the "outside .git" note is the same for both
+
+
+def _install_one(root: Path, name: str, mark: str, script: str, hint: str, *, only_if_absent: bool) -> str:
+    p = hook_path(root, name)
     if p is None:
-        raise DaedalusError("not a git repository; the commit hook was not installed")
+        raise DaedalusError(f"not a git repository; the {name} hook was not installed")
     common = _git(root, "rev-parse", "--git-common-dir").stdout.strip()  # hooks live here, even in a worktree
     git_dir = (Path(common) if Path(common).is_absolute() else root / common) if common else None
     outside = git_dir is not None and git_dir.resolve() not in p.resolve().parents
@@ -62,18 +99,16 @@ def install_git_hook(root: Path, *, only_if_absent: bool = False) -> str:
         # repository's own .git, so only an explicit `daedalus install claude-code` does it.
         return (f"git hooks live in {p.parent}, outside this repository's .git (core.hooksPath or a symlink); "
                 "run `daedalus install claude-code` to add ours there")
-    if p.exists():
-        if MARK in p.read_text(encoding="utf-8", errors="replace"):
+    if p.exists() or p.is_symlink():
+        if p.exists() and mark in p.read_text(encoding="utf-8", errors="replace"):
             if only_if_absent:
-                return "git hook prepare-commit-msg already installed"
+                return f"git hook {name} already installed"
         else:
-            raise DaedalusError(
-                f"{p} already exists and is not Daedalus's; add `daedalus hook commit-msg \"$1\" \"$2\"` to it"
-            )
+            raise DaedalusError(f"{p} already exists and is not Daedalus's; {hint}")
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(HOOK_SCRIPT, encoding="utf-8")
+    p.write_text(script, encoding="utf-8")
     p.chmod(0o755)
-    return f"git hook prepare-commit-msg -> {p}"
+    return f"git hook {name} -> {p}"
 
 
 def accepted_run_for_commit(root: Path, source: str = "") -> tuple[str, str] | None:
@@ -138,3 +173,90 @@ def commit_msg_hook(args: list[str]) -> None:
         subprocess.run([*cmd, str(msg_file)], capture_output=True, check=False)
     except Exception:  # noqa: BLE001 — a commit hook must never break a commit
         return
+
+
+def unprovenanced_commits(root: Path, remote: str, updates: str) -> list[tuple[str, str]]:
+    """(sha, subject) of outgoing non-merge commits without a Daedalus-Run trailer. `updates` is
+    what git gives a pre-push hook on stdin: `<local ref> <local sha> <remote ref> <remote sha>` lines."""
+    tips: list[str] = []
+    known: list[str] = []
+    for line in updates.splitlines():
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        local_sha, remote_sha = parts[1], parts[3]
+        if set(local_sha) == {"0"}:
+            continue  # deleting a remote branch pushes no commits
+        tips.append(local_sha)
+        if set(remote_sha) != {"0"} and _git(root, "cat-file", "-e", f"{remote_sha}^{{commit}}").returncode == 0:
+            known.append(remote_sha)
+    if not tips:
+        return []
+    # What the remote has at the pushed refs, or in its tracking refs, is already there: not outgoing.
+    # When the remote has no tracking refs here (a URL that is no configured remote, or one never
+    # fetched), every remote-tracking ref is excluded instead: a commit some remote has goes
+    # unreported rather than the remote's whole history being reported.
+    name = _remote_name(root, remote)
+    tracked = bool(name) and bool(_git(root, "for-each-ref", "--count=1", f"refs/remotes/{name}/").stdout.strip())
+    exclude = ["--not", *known, f"--remotes={name}" if tracked else "--remotes"]
+    r = _git(root, "log", "--no-merges", "--format=%H%x1f%s%x1f%(trailers:key=Daedalus-Run,valueonly)%x1e",
+             *tips, *exclude, "--")
+    if r.returncode != 0:
+        raise DaedalusError(f"git log failed: {r.stderr.strip()}")
+    missing = []
+    for rec in r.stdout.split("\x1e"):
+        fields = rec.strip("\n").split("\x1f")
+        if len(fields) >= 3 and not fields[2].strip():
+            missing.append((fields[0], fields[1]))
+    return missing
+
+
+def _remote_name(root: Path, remote: str) -> str:
+    """The configured remote that `remote` names or is the URL of ("" if none)."""
+    names = _git(root, "remote").stdout.split()
+    if not remote or remote in names:
+        return remote
+    for n in names:
+        urls = _git(root, "remote", "get-url", "--all", n).stdout.split()
+        urls += _git(root, "remote", "get-url", "--push", "--all", n).stdout.split()
+        if remote in urls:
+            return n
+    return ""
+
+
+def _require_on_push(root: Path) -> bool:
+    try:
+        return load_config(root).harness.get("require_provenance_on_push") is True
+    except Exception as exc:  # noqa: BLE001 — an unreadable config cannot say "refuse"; say so
+        print(f"daedalus: could not read the configuration ({exc}); "
+              "whether to refuse is unknown, so this is only a warning", file=sys.stderr)
+        return False
+
+
+def _uses_daedalus(root: Path) -> bool:
+    return (root / CONFIG_FILE).exists() or (root / STATE_DIR).is_dir()
+
+
+def pre_push_hook(args: list[str], stdin_text: str) -> int:
+    """`pre-push <remote> <url>`: report outgoing commits without a Daedalus-Run trailer, and refuse
+    the push if `harness.require_provenance_on_push` is true. Returns REFUSE to refuse, else 0.
+    Silent in a repository that does not use Daedalus, or with the gate switched off."""
+    try:
+        root = find_root(".")
+        if not _uses_daedalus(root) or not gate_enabled(root):
+            return 0
+        missing = unprovenanced_commits(root, args[0] if args else "", stdin_text)
+    except Exception as exc:  # noqa: BLE001 — our own failure never blocks a push
+        print(f"daedalus: provenance check skipped: {exc}", file=sys.stderr)
+        return 0
+    if not missing:
+        return 0
+    require = _require_on_push(root)
+    lines = [f"daedalus: {len(missing)} outgoing commit(s) without a Daedalus-Run trailer (not accepted by the gate):"]
+    lines += [f"  {sha[:12]} {subject}" for sha, subject in missing[:MAX_LISTED]]
+    if len(missing) > MAX_LISTED:
+        lines.append(f"  … and {len(missing) - MAX_LISTED} more")
+    lines.append("daedalus: push refused (harness.require_provenance_on_push is true)" if require else
+                 "daedalus: pushing anyway; set `harness: {require_provenance_on_push: true}` to refuse such pushes")
+    print("\n".join(lines), file=sys.stderr)
+    return REFUSE if require else 0
