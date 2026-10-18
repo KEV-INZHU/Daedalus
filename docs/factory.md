@@ -41,6 +41,7 @@ order is a Daedalus contract with a few routing keys added:
 
 ```yaml
 # factory/orders/rate-limit.yml
+title: Rate-limit the public API   # optional: the commit subject and board label
 objective: Add rate limiting to the public API
 acceptance_criteria:
   - Requests over 100 a minute from one key get HTTP 429
@@ -56,6 +57,12 @@ Every other contract field (`invariants`, `hard_constraints`, `design_decisions`
 `required_checks`, `budget`, `verification_plan`) passes through unchanged and is validated by the
 same code a run uses. An invalid order, an order that depends on an unknown id, and every order on a
 dependency cycle are reported and skipped. They never stop the line.
+
+**Titles.** `title` is one line of at most 72 characters; a longer one, or one with a line break or
+another control character, makes the order invalid. Surrounding whitespace is stripped and a tab
+becomes a space. It becomes the subject of the order's shipped commit and its label in `factory
+status`. Without a title, the objective's first sentence (cut to 72 characters at a word) is used.
+`daedalus factory add --title "..."` sets it, and the planner proposes one for every order it drafts.
 
 **Criteria are proved by tests.** A plain-text criterion is bound to the order's required checks, and
 the contract's verification plan says each criterion must be demonstrated by a test those checks run.
@@ -124,6 +131,11 @@ recovers crashed sessions without presuming they succeeded. Only one line runs a
 | first-pass yield | shipped on the first attempt, in the first round / orders attempted  |
 | cost per shipped | all spend on the orders (failures included) / shipped orders         |
 | median cycle     | first start to ship, for shipped orders                              |
+| escape rate      | shipped orders later named by a `Fixes-Order:` trailer / shipped     |
+
+A commit on the integration branch made after an order shipped, whose message has a
+`Fixes-Order: <order-id>` trailer, marks that order as escaped. Trailers naming orders that never
+shipped are ignored. Escapes are derived from git history each time, not stored in the ledger.
 
 `daedalus metrics` still reports each underlying run.
 

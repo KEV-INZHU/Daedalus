@@ -104,7 +104,25 @@ def required_approvals(state: RunState, tier: str) -> tuple[str, ...]:
     )
 
 
-def review_satisfied(state: RunState, perspective: str, candidate_id: str, independent: bool) -> bool:
+def is_moot(state: RunState, finding: Any, candidate_id: str) -> bool:
+    """A finding a *delta* review raised against a candidate whose change was then reverted, while
+    that candidate is not the current one. A delta review reports only what its change introduced,
+    so the finding is about code that is gone. Full-review findings are never moot: they may be
+    about code that is still there."""
+    if finding.candidate_id not in state.reverted_candidates or finding.candidate_id == candidate_id:
+        return False
+    review = next((r for r in state.reviews if r.review_id == finding.review_id), None)
+    return review is not None and review.scope == "delta"
+
+
+def review_satisfied(
+    state: RunState, perspective: str, candidate_id: str, independent: bool, _seen: frozenset[str] = frozenset()
+) -> bool:
+    """A full review of this candidate, or a delta review of it whose `delta_from` candidate is
+    itself satisfied (by a full review, or by a chain of deltas ending in one). Together they
+    have covered every line: the full review saw the earlier candidate, each delta the change."""
+    if candidate_id in _seen:
+        return False  # a malformed cycle never satisfies anything
     for r in state.reviews:
         if (
             r.perspective == perspective
@@ -113,7 +131,12 @@ def review_satisfied(state: RunState, perspective: str, candidate_id: str, indep
             and r.reviewer not in state.candidate_authors
             and (not independent or (r.source == "launched" and not r.exposed_to))
         ):
-            return True
+            if r.scope != "delta":
+                return True
+            if r.delta_from and review_satisfied(
+                state, perspective, r.delta_from, independent, _seen | {candidate_id}
+            ):
+                return True
     return False
 
 
@@ -294,6 +317,8 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
             )
 
     for f in state.open_findings:
+        if is_moot(state, f, cid):
+            continue
         if f.severity.value in policy.blocking_severities:
             ruling = f.ruling if f.ruling and f.ruling.get("candidate_id") == cid else None
             if ruling and ruling.get("decision") == "overrule":

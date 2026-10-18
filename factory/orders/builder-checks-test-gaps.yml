@@ -1,0 +1,9 @@
+title: Cover the .cmd suffix in the check-prefix tests
+objective: Add check_prefix test cases for Windows `.cmd` launchers that only the name normalisation rejects (`npm.cmd`
+  alone, `npm.cmd exec`), and one showing that a launcher with a named program is still granted
+  (`npx.cmd pytest` grants `npx.cmd pytest`).
+acceptance_criteria:
+- '`npm.cmd` alone and `npm.cmd exec` grant nothing, and `npx.cmd pytest` grants `npx.cmd pytest`'
+scope:
+- tests/unit/test_builder_checks.py
+priority: 2

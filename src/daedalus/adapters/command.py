@@ -479,6 +479,13 @@ class CommandAdapter(Adapter):
         model = self.review_model if req.read_only else self.model
         cmd = self.argv + self.args + ([f"--model={model}"] if model else [])
         cmd += self.read_only_args if req.read_only else self.builder_args
+        # Only when the prompt goes on stdin: `--allowedTools` takes every following argument as a
+        # rule, so a prompt passed as an argument would be swallowed by it. (The built-in claude-code
+        # preset always uses stdin; a custom claude-json adapter with `prompt_via: arg` gets no grant,
+        # and its Builder prompt still lists the commands, which then need the user's allow-rules.)
+        if not req.read_only and req.run_commands and self.parse == "claude-json" and self.prompt_via == "stdin":
+            # Headless sessions deny shell commands they were not granted: grant exactly the checks.
+            cmd += ["--allowedTools", *(f"Bash({c}:*)" for c in req.run_commands)]  # one rule per argument
         if self.prompt_via == "stdin":
             return cmd, req.prompt.encode("utf-8")
         if self.prompt_via == "message":

@@ -115,6 +115,10 @@ closed. The launch line is **locked**. For `claude-code`,
 - Model names are validated and passed as one `--model=<name>` argument.
 - Anything else (`argv`, `read_only_args`, `prompt_via`, MCP, plugin, settings or permission
   flags) fails closed with a configuration error.
+- Daedalus itself adds one permission flag, to **builder** launches only: `--allowedTools`
+  followed by one `Bash(<prefix>:*)` rule per required check, where the prefix is the check's
+  program (`python -m pytest`, `npm test`). It is never added to a review, and never for a
+  check whose prefix would be a bare interpreter, shell or runner. See the security model.
 
 Every built-in preset splits its launch line in three parts: shared flags for
 every launch, **builder-only** flags (write-enabling ones such as claude's

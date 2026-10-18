@@ -63,6 +63,20 @@ from daedalus.repository.candidate import CandidateManifest, capture, file_sha25
 DEFAULT_VERIFIER = "daedalus-proof-gate@local"
 CLEANUP_ATTEMPTS = 3  # workspace removals tried before leaving it to a human
 SYSTEM = "system:ariadne"
+# Synonyms whose usual meaning is advisory; only these may map below MINOR.
+ADVISORY_SYNONYMS = frozenset({"NIT", "INFO", "SUGGESTION", "STYLE"})
+# Common reviewer synonyms, each mapped to a severity at least as strict as its usual meaning:
+# anything outside ADVISORY_SYNONYMS maps to MINOR or above, so no synonym can lower a blocking finding.
+SEVERITY_SYNONYMS = {
+    "CRITICAL": Severity.BLOCKER,
+    "HIGH": Severity.MAJOR,
+    "MEDIUM": Severity.MINOR,
+    "LOW": Severity.MINOR,
+    "NIT": Severity.ADVISORY,
+    "INFO": Severity.ADVISORY,
+    "SUGGESTION": Severity.ADVISORY,
+    "STYLE": Severity.ADVISORY,
+}
 
 
 def _uid(prefix: str) -> str:
@@ -311,6 +325,12 @@ class Ariadne:
                 self._record_disposition(state, decision, actor)
             return decision
 
+    def _prune_snapshots(self, run_id: str) -> None:
+        """Reviewed-content snapshots exist only to scope the next review of an open run."""
+        import shutil
+
+        shutil.rmtree(self.state_dir / "runs" / run_id / "snapshots", ignore_errors=True)
+
     def _record_disposition(self, state: RunState, d: Decision, actor: str) -> None:
         self._transition(state, ExecutionState.FINISHED, SYSTEM, f"final disposition {d.disposition.value}")
         self._append(
@@ -326,6 +346,7 @@ class Ariadne:
             },
         )
         d.terminal = True
+        self._prune_snapshots(state.run_id)
 
     # ======================================================= cancel / abandon
     def cancel(self, run_id: str, *, actor: str, reason: str = "") -> RunState:
@@ -353,6 +374,7 @@ class Ariadne:
             and not state.checks_in_flight
         ):
             self._transition(state, ExecutionState.FINISHED, SYSTEM, "cancellation complete")
+            self._prune_snapshots(run_id)
             self._append(
                 run_id,
                 ev.DISPOSITION,
@@ -389,9 +411,12 @@ class Ariadne:
         source: str = "submitted",
         exposed_to: Iterable[str] = (),
         candidate_id: str | None = None,
+        scope: str = "full",
+        delta_from: str | None = None,
     ) -> str:
         """Record a review. `source="launched"` is reserved for reviews Daedalus
-        itself launched through an adapter (orchestration.lifecycle)."""
+        itself launched through an adapter (orchestration.lifecycle). A `delta` review
+        covers only the change since the `delta_from` candidate was reviewed."""
         state = self._running(run_id)
         _require_principal(reviewer)
         if perspective not in PERSPECTIVES:
@@ -403,13 +428,20 @@ class Ariadne:
         if reviewer in state.candidate_authors:
             raise AuthorizationError(f"{reviewer} authored this candidate and cannot review it")
         cid = candidate_id or self.capture(state).candidate_id
+        if scope not in ("full", "delta"):
+            raise ContractError("review scope must be full or delta")
+        if scope == "delta" and not any(
+            r.perspective == perspective and r.candidate_id == delta_from for r in state.reviews
+        ):
+            raise ContractError("a delta review must extend an earlier review of the same perspective")
         out = []
         for i, f in enumerate(findings):
             title, evidence = str(f.get("title", "")).strip(), str(f.get("evidence", "")).strip()
             if not title or not evidence:
                 raise ContractError(f"finding {i + 1} needs a title and evidence")
+            raw = str(f.get("severity", "")).strip().upper()
             try:
-                severity = Severity(str(f.get("severity", "")).upper())
+                severity = SEVERITY_SYNONYMS.get(raw) or Severity(raw)
             except ValueError as exc:
                 raise ContractError(
                     f"finding {i + 1} severity must be one of {[s.value for s in Severity]}"
@@ -449,6 +481,7 @@ class Ariadne:
                     "summary": summary,
                     "findings": out,
                     "resolves": resolves,
+                    **({"scope": "delta", "delta_from": delta_from} if scope == "delta" else {}),
                 }
             },
         )
@@ -1107,6 +1140,31 @@ class Ariadne:
             self._append(run_id, ev.SESSION_USAGE, SYSTEM, {"task_id": task_id, "role": role,
                                                             "session_id": res.session_id, "status": res.status,
                                                             "cost_unknown": True, "basis": basis})
+
+    def followup_candidates(self, run_id: str) -> list[Any]:
+        """Open, non-blocking findings worth one fix round (`followup_severities`), or [] once a
+        follow-up round has been offered: there is exactly one per run, so it can never loop."""
+        state = self.state(run_id)
+        if state.followup_rounds:
+            return []
+        wanted = state.policy.followup_severities
+        return [
+            f for f in state.open_findings
+            if f.severity.value in wanted and f.severity.value not in state.policy.blocking_severities
+        ]
+
+    def request_followup(self, run_id: str, finding_ids: list[str], candidate_id: str | None = None) -> None:
+        state = self.state(run_id)
+        self._append(
+            run_id, ev.FOLLOWUP_REQUESTED, SYSTEM,
+            {"findings": list(finding_ids), "candidate_id": candidate_id, "reviews_before": len(state.reviews)},
+        )
+
+    def record_revert(self, run_id: str, restored: str) -> None:
+        """The follow-up's candidates were undone and `restored` (where it started) is back."""
+        state = self.state(run_id)
+        undone = {r.candidate_id for r in state.reviews[state.followup_reviews_before:]} - {restored}
+        self._append(run_id, ev.FOLLOWUP_REVERTED, SYSTEM, {"candidates": sorted(undone), "restored": restored})
 
     def note_stop_blocked(self, run_id: str, reasons: list[str]) -> None:
         self._append(run_id, ev.HARNESS_STOP_BLOCKED, SYSTEM, {"reasons": reasons})

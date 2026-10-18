@@ -33,6 +33,7 @@ from daedalus.core.errors import BudgetExhausted, ContractError, DaedalusError, 
 from daedalus.core.state_machine import Disposition, ExecutionState, WorkerState
 from daedalus.orchestration import prompts
 from daedalus.orchestration.ariadne import SYSTEM, Ariadne
+from daedalus.repository import snapshot
 from daedalus.repository.candidate import diff_text
 
 Notify = Callable[[str], None]
@@ -55,6 +56,49 @@ def _quiet(_: str) -> None:
 
 
 # ------------------------------------------------------------------- reviews
+def check_commands(state: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The run's required checks a Builder may run (as command prefixes), and the ids of those it
+    may not (no safe prefix, or `policy: {builder_runs_checks: false}`)."""
+    granted, skipped = [], []
+    for cid in state.contract.required_checks:
+        d = state.policy.checks.get(cid)
+        p = prompts.check_prefix(d.command) if (d is not None and state.policy.builder_runs_checks) else ""
+        if p:
+            granted.append(p)
+        else:
+            skipped.append(cid)
+    return tuple(dict.fromkeys(granted)), tuple(skipped)
+
+
+def delta_ok(state: Any) -> bool:
+    """Whether re-reviews may be scoped to the change (`rereview: delta`, the default)."""
+    return state.policy.rereview == "delta"
+
+
+def _delta_basis(ari: Ariadne, state: Any, perspective: str, cand: Any, run_dir: Path):
+    """(reviewed candidate, inter-diff, touched paths) for a delta review, or None when this
+    perspective has no satisfied review in this contract version to extend, or the change
+    since it cannot be proven from snapshots."""
+    from daedalus.core.acceptance import review_satisfied
+
+    for r in reversed(state.reviews):
+        if r.perspective != perspective or r.contract_version != state.contract.contract_version:
+            continue
+        if r.candidate_id == cand.candidate_id or r.candidate_id not in state.candidates:
+            continue
+        # Extend only a review that holds under the strictest rule (launched, unexposed), so the
+        # chain stays valid whatever tier the candidate ends up at.
+        if not review_satisfied(state, perspective, r.candidate_id, True):
+            continue
+        old = state.candidates[r.candidate_id]["manifest"]
+        try:
+            inter, touched = snapshot.inter_diff(ari.root, run_dir, r.candidate_id, old, cand.manifest)
+        except snapshot.NoDelta:
+            return None
+        return r.candidate_id, inter, touched
+    return None
+
+
 def refuse_unaffordable(state: Any, adapter: Adapter, what: str) -> None:
     """Refuse a launch that would be billed in cash when the run's cash budget is spent.
 
@@ -95,14 +139,21 @@ def launch_review(
         for f in state.open_findings
         if f.perspective == perspective
     ]
-    prompt = prompts.review_prompt(
-        perspective,
-        state.contract,
-        diff_text(ari.root, cand),
-        {k: (v[0].value, v[1]) for k, v in decision.check_states.items()},
-        prior,
-    )
-    notify(f"launching {perspective} review of candidate {cand.short}")
+    checks = {k: (v[0].value, v[1]) for k, v in decision.check_states.items()}
+    run_dir = ari.state_dir / "runs" / run_id
+    delta = _delta_basis(ari, state, perspective, cand, run_dir) if delta_ok(state) else None
+    if delta is not None:
+        old_id, inter, touched = delta
+        prompt = prompts.delta_review_prompt(perspective, state.contract, inter, touched, old_id, checks, prior)
+        notify(f"launching {perspective} delta review of candidate {cand.short} "
+               f"({len(touched)} file(s) changed since {old_id[:12]})")
+    else:
+        again = any(r.perspective == perspective and r.contract_version == state.contract.contract_version
+                    for r in state.reviews)
+        prompt = prompts.review_prompt(perspective, state.contract, diff_text(ari.root, cand), checks, prior,
+                                       first_pass=not again)
+        notify(f"launching {perspective} review of candidate {cand.short}")
+    snapshot.save(ari.root, run_dir, cand.candidate_id, cand.manifest)  # best effort: else the next is full
     res = adapter.run_agent(
         AgentRequest(
             run_id, f"review-{perspective}", perspective, prompt, ari.root, REVIEW_TIMEOUT_S, read_only=True,
@@ -138,6 +189,8 @@ def launch_review(
             source="launched",
             exposed_to=(),
             candidate_id=cand.candidate_id,
+            scope="delta" if delta is not None else "full",
+            delta_from=delta[0] if delta is not None else None,
         )
     except (ContractError, DaedalusError) as exc:
         failed(f"invalid review result: {exc}")
@@ -257,16 +310,18 @@ def build_round(
     )
     w = ari.dispatch(run_id, task_id, principal="agent:brunel")
     notify(f"round {round_no}: Brunel is building ({task_id})")
+    runnable, skipped = check_commands(state)
     try:
         res = adapter.run_agent(
             AgentRequest(
                 run_id,
                 task_id,
                 "brunel",
-                prompts.builder_prompt(state.contract, feedback, round_no),
+                prompts.builder_prompt(state.contract, feedback, round_no, runnable, skipped),
                 ari.root,
                 BUILD_TIMEOUT_S,
                 should_stop=ari.stop_check(run_id),
+                run_commands=runnable,
             )
         )
     except Exception as exc:
@@ -425,6 +480,7 @@ def fan_out_round(
             fail(tid, str(exc))
 
     stop = ari.stop_check(run_id)
+    runnable, skipped = check_commands(state)
     pool = ThreadPoolExecutor(max_workers=cap, thread_name_prefix="daedalus-worker")
     aborted = False
     try:
@@ -452,8 +508,8 @@ def fan_out_round(
                     finish(tid, AgentResult("FAILED", error="no isolated workspace"), integrate=False)
                     continue
                 req = AgentRequest(
-                    run_id, tid, "brunel", prompts.worker_prompt(state.contract, w.package),
-                    Path(w.workspace), BUILD_TIMEOUT_S, should_stop=stop,
+                    run_id, tid, "brunel", prompts.worker_prompt(state.contract, w.package, runnable, skipped),
+                    Path(w.workspace), BUILD_TIMEOUT_S, should_stop=stop, run_commands=runnable,
                 )
                 running[pool.submit(adapter.run_agent, req)] = tid
                 notify(f"dispatched {tid} ({len(running)}/{cap} running)")
@@ -534,9 +590,13 @@ def drive(
     notes: list[str] = []
     feedback: list[str] = []
     rounds = 0
+    accepted_before_followup: Any = None  # the acceptable candidate a follow-up round started from
+    followup_round = 0
     for round_no in range(1, max_rounds + 1):
         if ari.state(run_id).execution is not ExecutionState.RUNNING:
             break  # cancelled (or finished) elsewhere: no further rounds
+        if accepted_before_followup is not None and round_no > followup_round + 1:
+            break  # the follow-up gets exactly one round; whatever it left is undone below
         rounds = round_no
         try:
             fan = None
@@ -555,6 +615,9 @@ def drive(
             break
         if built.get("status") == "blocked":
             why = str(built.get("blocker") or built.get("summary") or "builder reported it cannot proceed")
+            if accepted_before_followup is not None:  # an optional pass: end it, never block the run
+                notes.append(f"the follow-up builder stopped: {why}")
+                break
             ari.raise_blocker(run_id, why, actor=built["_principal"])
             notes.append(f"builder blocked: {why}")
             break
@@ -574,14 +637,92 @@ def drive(
         launch_required_reviews(ari, run_id, adapter, notify)
         decision = ari.evaluate(run_id)
         if decision.acceptable:
-            break
+            # One fix round for non-blocking findings. It never costs an acceptance: the acceptable
+            # candidate is snapshotted first and restored if the run ends any other way.
+            followup = ari.followup_candidates(run_id) if round_no < max_rounds else []
+            cand = ari.capture(ari.state(run_id)) if followup else None
+            if not followup or not snapshot.save(ari.root, _run_dir(ari, run_id), cand.candidate_id, cand.manifest):
+                break
+            accepted_before_followup, followup_round = cand, round_no
+            ari.request_followup(run_id, [f.finding_id for f in followup], cand.candidate_id)
+            notify(f"round {round_no}: acceptable; one follow-up round for {len(followup)} non-blocking finding(s)")
+            feedback = followup_feedback(followup)
+            continue
         feedback = [r.message for r in decision.agent_fixable if not r.code.startswith("review:")]
         if not feedback:
             break  # what remains is for a human (or a reviewer that keeps failing)
+    if (
+        accepted_before_followup is not None
+        and ari.state(run_id).execution is ExecutionState.RUNNING
+        and not ari.evaluate(run_id).acceptable
+    ):
+        try:
+            notes += restore_followup(ari, run_id, notify)
+        except DaedalusError as exc:
+            notes.append(str(exc))
     decision = ari.finish(run_id)
     if decision.disposition is Disposition.BLOCKED:
         notes.append(left_open_note(decision, rounds))
     return RunReport(run_id, decision, rounds, notes)
+
+
+def _run_dir(ari: Ariadne, run_id: str) -> Path:
+    return ari.state_dir / "runs" / run_id
+
+
+def restore_followup(ari: Ariadne, run_id: str, notify: Notify = _quiet) -> list[str]:
+    """Undo a follow-up round: put back the candidate that was acceptable when it started.
+    Identity is content, so its reviews hold again; checks are re-run (the latest evidence was
+    for the follow-up) and findings a delta review raised against the undone change are moot."""
+    state = ari._running(run_id)
+    cid = state.followup_from
+    if not cid or cid not in state.candidates:
+        raise DaedalusError("this run has no follow-up round to undo")
+    old = state.candidates[cid]["manifest"]
+    current = ari.capture(state)
+    if current.candidate_id == cid:
+        return [f"candidate {cid[:12]} is already in place"]
+    run_dir = _run_dir(ari, run_id)
+    # Keep what is being undone, outside the snapshots (which are pruned at the end of the run).
+    # The diff is for reading; the files (each hash-checked) are the exact content.
+    kept = run_dir / f"followup-undone-{current.short}.diff"
+    files = run_dir / f"followup-undone-{current.short}"
+    if not snapshot.copy_files(ari.root, files, current.manifest):
+        raise DaedalusError("the follow-up's files could not be kept byte-exact, so they were not undone")
+    try:
+        undone, _ = snapshot.inter_diff(ari.root, run_dir, cid, old, current.manifest)
+        kept.write_text(undone, encoding="utf-8")
+    except (snapshot.NoDelta, OSError) as exc:
+        raise DaedalusError(f"the follow-up's changes could not be saved, so they were not undone ({exc})") from exc
+    try:
+        restored = snapshot.restore(ari.root, run_dir, cid, old, current.manifest)
+    except snapshot.PartialRestore as exc:
+        raise DaedalusError(f"the candidate before the follow-up ({cid[:12]}) could not be restored and "
+                            f"the working tree may be partly rewritten: {', '.join(exc.paths)} "
+                            f"(the follow-up's files are in {files / 'files'}, its changes in {kept})") from exc
+    if not restored:
+        raise DaedalusError(f"the candidate before the follow-up ({cid[:12]}) could not be restored; "
+                            f"the working tree was left as it was (its changes are also in {kept})")
+    if ari.capture(ari.state(run_id)).candidate_id != cid:
+        raise DaedalusError(f"restoring {cid[:12]} did not reproduce it exactly; the undone changes are in {kept}")
+    ari.record_revert(run_id, cid)
+    ari.record_candidate(run_id, actor=SYSTEM, authored=False, label="restored after follow-up")
+    notify(f"the follow-up round did not end acceptable; restored candidate {cid[:12]}")
+    ari.verify(run_id)
+    rel = kept.relative_to(ari.root).as_posix() if ari.root in kept.parents else str(kept)
+    return [f"the follow-up round's changes were undone and candidate {cid[:12]} (acceptable before it) "
+            f"was restored; the undone changes are kept in {rel} (the files themselves beside it)"]
+
+
+def followup_feedback(findings: list[Any]) -> list[str]:
+    head = (
+        "The candidate is acceptable, but reviewers raised non-blocking findings. In this one follow-up "
+        "round, fix each one that is real and cheap; dispute one that is mistaken (with evidence). "
+        "Anything left open does not block acceptance."
+    )
+    return [head] + [
+        f"{f.finding_id} [{f.severity.value}] {f.title}. {f.required_change}".strip() for f in findings
+    ]
 
 
 def left_open_note(decision: Decision, rounds: int) -> str:

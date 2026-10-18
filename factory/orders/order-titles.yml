@@ -1,0 +1,11 @@
+objective: >-
+  Work orders may carry an optional `title:` (one line, at most 72 characters) that becomes the shipped
+  commit's subject and the board's label. Without one, the current first-sentence fallback stays. The
+  planner (Vitruvius) is asked for a title per order, and `daedalus factory add --title` sets it.
+acceptance_criteria:
+  - An order's `title` is the subject of its shipped commit and is shown by `daedalus factory status`
+  - A title longer than 72 characters or containing a newline is reported as an invalid order
+  - Orders without a title keep the existing first-sentence subject
+  - The planner prompt asks for a title, and planned orders keep it
+scope: ["src/daedalus/factory/**", "src/daedalus/cli.py", "src/daedalus/orchestration/prompts.py", "tests/integration/test_factory.py", "docs/factory.md"]
+priority: 8

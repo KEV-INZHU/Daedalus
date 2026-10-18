@@ -314,6 +314,7 @@ def test_automatic_hook_install_skips_a_symlinked_shared_hooks_dir(repo, tmp_pat
     hooks.symlink_to(shared)
     msg = provenance.install_git_hook(repo, only_if_absent=True)
     assert "outside this repository" in msg and not (shared / "prepare-commit-msg").exists()
+    assert not (shared / "pre-push").exists()
 
 
 @pytest.mark.parametrize("where", ["in-tree", "shared"])
@@ -322,6 +323,184 @@ def test_automatic_hook_install_only_writes_into_this_repositorys_git_dir(repo, 
     git(repo, "config", "core.hooksPath", str(hooks))
     msg = provenance.install_git_hook(repo, only_if_absent=True)
     assert "core.hooksPath" in msg and not hooks.exists()
+
+
+# ------------------------------------------------------------------ pre-push
+def test_pre_push_hook_is_installed_beside_the_commit_hook_and_respects_someone_elses(repo):
+    msg = provenance.install_git_hook(repo)
+    assert "prepare-commit-msg ->" in msg and "pre-push ->" in msg
+    assert provenance.PUSH_MARK in provenance.hook_path(repo, "pre-push").read_text()
+    assert "pre-push already installed" in provenance.install_git_hook(repo, only_if_absent=True)
+    hooks = repo / ".git" / "hooks"
+    (hooks / "prepare-commit-msg").unlink()
+    theirs = hooks / "pre-push"
+    theirs.write_text("#!/bin/sh\necho mine\n")
+    from daedalus.core.errors import DaedalusError
+
+    with pytest.raises(DaedalusError, match="pre-push already exists and is not Daedalus's"):
+        provenance.install_git_hook(repo)
+    assert theirs.read_text() == "#!/bin/sh\necho mine\n"
+    assert provenance.MARK in (hooks / "prepare-commit-msg").read_text()  # the other hook still went in
+
+
+def bare_remote(repo: Path, tmp_path: Path) -> Path:
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True, capture_output=True)
+    git(repo, "remote", "add", "origin", str(remote))
+    return remote
+
+
+def push(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", "-C", str(repo), "push", "origin", "main", *args],
+                          capture_output=True, text=True, check=False)
+
+
+def commit(repo: Path, content: str, msg: str) -> str:
+    (repo / "app.txt").write_text(content)
+    git(repo, "commit", "-qam", msg)
+    return out(repo, "rev-parse", "HEAD").strip()
+
+
+def test_push_of_a_commit_without_a_trailer_warns_and_proceeds(repo, tmp_path, daedalus_on_path):
+    remote = bare_remote(repo, tmp_path)
+    provenance.install_git_hook(repo)
+    sha = commit(repo, "ok\n", "unvetted change")
+    r = push(repo)
+    assert r.returncode == 0, r.stderr
+    assert sha[:12] in r.stderr and "unvetted change" in r.stderr and "without a Daedalus-Run trailer" in r.stderr
+    assert out(remote, "rev-parse", "main").strip() == sha
+
+
+def test_push_without_a_trailer_is_refused_when_provenance_is_required(tmp_path, daedalus_on_path):
+    repo = make_repo(tmp_path / "repo", {"harness": {"require_provenance_on_push": True}})
+    remote = bare_remote(repo, tmp_path)
+    provenance.install_git_hook(repo)
+    sha = commit(repo, "ok\n", "unvetted change")
+    r = push(repo)
+    assert r.returncode != 0
+    assert sha[:12] in r.stderr and "push refused" in r.stderr
+    assert subprocess.run(["git", "-C", str(remote), "rev-parse", "--verify", "-q", "main"],
+                          capture_output=True).returncode != 0
+
+
+def test_trailered_merge_and_already_pushed_commits_are_not_reported(tmp_path, daedalus_on_path):
+    repo = make_repo(tmp_path / "repo", {"harness": {"require_provenance_on_push": True}})
+    bare_remote(repo, tmp_path)
+    provenance.install_git_hook(repo)
+    base = out(repo, "rev-parse", "HEAD").strip()
+    assert push(repo, "--no-verify").returncode == 0  # the base, without a trailer, is now on the remote
+    git(repo, "checkout", "-qb", "side")
+    commit(repo, "ok\n", "accepted work\n\nDaedalus-Run: 75787c4300b4")
+    git(repo, "checkout", "-q", "main")
+    (repo / "src" / "lib.py").write_text("x = 2\n")
+    git(repo, "commit", "-qam", "more accepted work\n\nDaedalus-Run: 75787c4300b5")
+    git(repo, "merge", "-q", "--no-ff", "--no-edit", "side")  # a merge commit carries no trailer
+    assert len(out(repo, "rev-list", "--merges", "-1", "HEAD").split()) == 1
+    r = push(repo)
+    assert r.returncode == 0, r.stderr
+    assert "Daedalus-Run trailer" not in r.stderr and base[:12] not in r.stderr
+    # and the check itself, given what git passes on stdin
+    head = out(repo, "rev-parse", "HEAD").strip()
+    assert provenance.unprovenanced_commits(repo, "origin", f"refs/heads/main {head} refs/heads/main {base}\n") == []
+
+
+ZERO = "0" * 40
+
+
+def test_the_remote_sha_alone_excludes_what_the_remote_has_and_deletions_push_nothing(repo):
+    base = out(repo, "rev-parse", "HEAD").strip()
+    sha = commit(repo, "ok\n", "unvetted change")
+    # no remote name, no tracking refs: only the remote sha git passes says what the remote has
+    assert provenance.unprovenanced_commits(repo, "", f"refs/heads/main {sha} refs/heads/main {base}\n") == [
+        (sha, "unvetted change")]
+    assert provenance.unprovenanced_commits(repo, "origin", f"(delete) {ZERO} refs/heads/old {sha}\n") == []
+
+
+def test_pushing_to_the_url_of_a_configured_remote_skips_what_it_already_has(repo, tmp_path, daedalus_on_path):
+    remote = bare_remote(repo, tmp_path)
+    provenance.install_git_hook(repo)
+    base = out(repo, "rev-parse", "HEAD").strip()
+    assert push(repo, "--no-verify").returncode == 0
+    git(repo, "checkout", "-qb", "topic")
+    sha = commit(repo, "ok\n", "unvetted change")
+    r = subprocess.run(["git", "-C", str(repo), "push", str(remote), "topic"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert sha[:12] in r.stderr and base[:12] not in r.stderr  # a new branch: no remote sha to go by
+
+
+def test_a_failing_check_never_blocks_a_push(tmp_path, monkeypatch, capsys):
+    repo = make_repo(tmp_path / "repo", {"harness": {"require_provenance_on_push": True}})
+    monkeypatch.chdir(repo)
+    assert provenance.pre_push_hook(["origin", "x"], f"refs/heads/main {'f' * 40} refs/heads/main {ZERO}\n") == 0
+    assert "check skipped" in capsys.readouterr().err
+
+
+def test_only_a_refusal_blocks_a_push_through_the_installed_hook(repo, tmp_path, monkeypatch):
+    import os
+
+    remote = bare_remote(repo, tmp_path)
+    provenance.install_git_hook(repo)
+    bin_dir = tmp_path / "crashing"
+    bin_dir.mkdir()
+    (bin_dir / "daedalus").write_text("#!/bin/sh\nexit 1\n")
+    (bin_dir / "daedalus").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    sha = commit(repo, "ok\n", "unvetted change")
+    assert push(repo).returncode == 0
+    assert out(remote, "rev-parse", "main").strip() == sha
+
+
+def test_pre_push_is_silent_with_the_gate_off_or_without_daedalus(tmp_path, monkeypatch, capsys):
+    from daedalus.core.config import set_gate
+
+    repo = make_repo(tmp_path / "repo", {"harness": {"require_provenance_on_push": True}})
+    monkeypatch.chdir(repo)
+    base = out(repo, "rev-parse", "HEAD").strip()
+    sha = commit(repo, "ok\n", "unvetted change")
+    updates = f"refs/heads/main {sha} refs/heads/main {base}\n"
+    assert provenance.pre_push_hook(["origin", "x"], updates) == provenance.REFUSE
+    capsys.readouterr()
+    set_gate(repo, False)
+    assert provenance.pre_push_hook(["origin", "x"], updates) == 0
+    git(repo, "rm", "-q", ".daedalus.yml")
+    git(repo, "commit", "-qm", "no daedalus")
+    import shutil
+
+    shutil.rmtree(repo / ".daedalus")
+    assert provenance.pre_push_hook(["origin", "x"], updates) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_a_broken_config_warns_and_says_so(repo, monkeypatch, capsys):
+    monkeypatch.chdir(repo)
+    base = out(repo, "rev-parse", "HEAD").strip()
+    sha = commit(repo, "ok\n", "unvetted change")
+    (repo / ".daedalus.yml").write_text("harness: [unclosed\n")
+    assert provenance.pre_push_hook(["origin", "x"], f"refs/heads/main {sha} refs/heads/main {base}\n") == 0
+    err = capsys.readouterr().err
+    assert sha[:12] in err and "could not read the configuration" in err and "only a warning" in err
+
+
+def test_a_long_list_of_commits_is_cut_short(repo, monkeypatch, capsys):
+    monkeypatch.chdir(repo)
+    base = out(repo, "rev-parse", "HEAD").strip()
+    for i in range(provenance.MAX_LISTED + 5):
+        sha = commit(repo, f"{i}\n", f"change {i}")
+    assert provenance.pre_push_hook(["origin", "x"], f"refs/heads/main {sha} refs/heads/main {base}\n") == 0
+    err = capsys.readouterr().err
+    assert f"{provenance.MAX_LISTED + 5} outgoing commit(s)" in err and "… and 5 more" in err
+    assert err.count(" change ") == provenance.MAX_LISTED
+
+
+def test_a_dangling_symlinked_pre_push_hook_is_left_alone(repo, tmp_path):
+    from daedalus.core.errors import DaedalusError
+
+    link = repo / ".git" / "hooks" / "pre-push"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(tmp_path / "nowhere")
+    with pytest.raises(DaedalusError, match="pre-push already exists"):
+        provenance.install_git_hook(repo)
+    assert link.is_symlink() and not (tmp_path / "nowhere").exists()
 
 
 # ------------------------------------------------------------------ status line
@@ -476,3 +655,64 @@ def test_another_sessions_prompt_never_sets_the_base(ari, repo):
     state = ari.state(ari.active_run_id())
     assert state.contract.base_revision == out(repo, "rev-parse", "HEAD") != base
     assert state.contract.objective == "Changes made in a Claude Code session"
+
+
+@pytest.mark.parametrize("text", ["<task-notification> <task-id>x</task-id>", "  <system-reminder>hi",
+                                  "Stop hook feedback:\nDaedalus gate: ..."])
+def test_harness_turns_never_replace_the_users_request(ari, repo, text):
+    claude_code.prompt_hook(payload(repo, prompt="make the app say ok"), ari=ari)
+    before = (repo / ".daedalus" / "last_prompt.json").read_text()
+    (repo / "src" / "lib.py").write_text("x = 9\n")
+    git(repo, "commit", "-qam", "moves HEAD")
+    claude_code.prompt_hook(payload(repo, prompt=text), ari=ari)
+    assert (repo / ".daedalus" / "last_prompt.json").read_text() == before  # prompt, session, head, tree kept
+    claude_code.pre_edit_hook(payload(repo, tool_input={"file_path": "app.txt"}), ari=ari)
+    state = ari.state(ari.active_run_id())
+    assert state.contract.objective == "make the app say ok"
+    assert state.contract.base_revision == json.loads(before)["head"]
+
+
+def test_a_harness_turn_with_no_record_still_snapshots_with_no_objective(ari, repo):
+    claude_code.prompt_hook(payload(repo, prompt="<task-notification>done</task-notification>"), ari=ari)
+    rec = json.loads((repo / ".daedalus" / "last_prompt.json").read_text())
+    assert rec["prompt"] == "" and rec["head"] and rec["tree"]
+    claude_code.pre_edit_hook(payload(repo, tool_input={"file_path": "app.txt"}), ari=ari)
+    assert ari.state(ari.active_run_id()).contract.objective == "Changes made in a Claude Code session"
+
+
+def test_a_tag_a_user_typed_is_still_their_request(ari, repo):
+    claude_code.prompt_hook(payload(repo, prompt="<div> should be centred"), ari=ari)
+    claude_code.pre_edit_hook(payload(repo, tool_input={"file_path": "app.txt"}), ari=ari)
+    assert ari.state(ari.active_run_id()).contract.objective == "<div> should be centred"
+
+
+def test_committing_accepted_work_does_not_open_another_run_at_stop(ari, repo):
+    claude_code.prompt_hook(payload(repo, prompt="fix the app"), ari=ari)
+    claude_code.pre_edit_hook(payload(repo, tool_input={"file_path": "app.txt"}), ari=ari)
+    fix(repo)
+    assert "ACCEPTED" in claude_code.stop_hook(payload(repo), ari=ari)["systemMessage"]
+    assert claude_code.stop_hook(payload(repo), ari=ari) == {}  # accepted, not yet committed: nothing new
+    git(repo, "commit", "-qam", "commit the accepted work")  # HEAD moves after the prompt was recorded
+    runs = len(ari.store.run_ids())
+    assert claude_code.stop_hook(payload(repo), ari=ari) == {}
+    assert len(ari.store.run_ids()) == runs  # no re-review of work already accepted
+    (repo / "src" / "lib.py").write_text("x = 'new, unreviewed'\n")  # but new work is still caught
+    assert claude_code.stop_hook(payload(repo), ari=ari) != {} and len(ari.store.run_ids()) == runs + 1
+
+
+def test_an_accepted_run_whose_base_is_gone_never_disables_gating(ari, repo, monkeypatch):
+    import subprocess as sp
+
+    import daedalus.repository.candidate as cand
+    from daedalus.harness.claude_code import _is_accepted_state
+
+    rid = ari.start({"objective": "o"}, actor=HUMAN)
+    fix(repo)
+    ari.verify(rid)
+    assert ari.finish(rid).disposition.value == "ACCEPTED" and _is_accepted_state(ari)
+
+    def gone(*a, **k):  # what capture raises when the run's base revision no longer exists
+        raise sp.CalledProcessError(128, "git diff", b"", b"fatal: bad revision")
+
+    monkeypatch.setattr(cand, "capture", gone)
+    assert _is_accepted_state(ari) is False  # "not a match", never an exception that stops gating

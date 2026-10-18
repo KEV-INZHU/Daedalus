@@ -202,6 +202,8 @@ on:
 jobs:
   gate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read  # the PR's own check commands run with a read-only token
     steps:
       - uses: actions/checkout@v4
         with:

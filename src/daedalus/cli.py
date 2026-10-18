@@ -179,8 +179,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         workflow = render_workflow(args.ci_source or DEFAULT_SOURCE, args.ci_install, args.require_provenance)
     root = find_root(args.dir)
     cfg = root / CONFIG_FILE
-    if cfg.exists() and not args.force:
-        _print(f"{CONFIG_FILE} already exists (use --force to overwrite)")
+    if cfg.exists() and (args.ci or not args.force):  # with --ci, --force refreshes only the workflow
+        _print(f"{CONFIG_FILE} already exists" + (" (kept; --ci --force refreshes only the workflow)" if args.ci
+                                                  else " (use --force to overwrite)"))
     else:
         checks = detect_checks(root)
         cfg.write_text(render_config(checks, args.adapter), encoding="utf-8")
@@ -668,6 +669,10 @@ def cmd_metrics(args: argparse.Namespace) -> int:
             f"manual interventions {agg.manual_interventions} · recoveries {agg.recoveries} · "
             f"disputes {agg.disputes} · arbitrations {agg.arbitrations}"
         )
+        _print(
+            f"reviews {agg.reviews} ({agg.delta_reviews} delta) · reviews/accepted {num(agg.reviews_per_accepted)} · "
+            f"late findings {agg.late_findings} (raised by a re-review of code already reviewed)"
+        )
         if any(m.findings for m in runs):
             _print("findings: B=BLOCKER M=MAJOR m=MINOR A=ADVISORY")
         return 0 if not errors else 1
@@ -690,6 +695,10 @@ def cmd_policy(args: argparse.Namespace) -> int:
 
 
 def cmd_hook(args: argparse.Namespace) -> int:
+    if args.name == "pre-push":  # a git hook: exit status 3 (and only 3) refuses the push
+        from daedalus.harness.provenance import pre_push_hook
+
+        return pre_push_hook(list(args.args), sys.stdin.buffer.read().decode("utf-8", "replace"))
     from daedalus.harness.claude_code import run_hook
 
     stdin = "" if args.name == "commit-msg" else sys.stdin.buffer.read().decode("utf-8-sig", "replace")  # UTF-8 JSON
@@ -705,6 +714,32 @@ def cmd_ci(args: argparse.Namespace) -> int:
     report = run_ci(find_root(args.dir), args.base, require_provenance=args.require_provenance)
     _print(report.markdown())
     return 0 if report.ok else 1
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    from daedalus.orchestration.lifecycle import restore_followup
+
+    ari = _ari(args)
+    try:
+        rid = _run_id(ari, args)
+        for n in restore_followup(ari, rid, notify=lambda m: _print(f"· {m}")):
+            _print(n)
+        d = ari.evaluate(rid)
+        _print(f"Disposition: {d.disposition.value}")
+        for r in d.reasons:
+            _print(f"  [{r.fixable_by}] {r.message}")
+        return 0
+    finally:
+        ari.close()
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from daedalus.doctor import diagnose, render
+
+    findings = diagnose(find_root(args.dir))
+    for line in render(findings):
+        _print(line)
+    return 0 if all(f.ok for f in findings) else 1
 
 
 def cmd_statusline(args: argparse.Namespace) -> int:
@@ -753,7 +788,8 @@ def cmd_factory_add(args: argparse.Namespace) -> int:
 
     ari, cfg = _factory_ctx(args)
     try:
-        body: dict[str, Any] = {"objective": args.objective}
+        body: dict[str, Any] = {} if args.title is None else {"title": args.title}
+        body["objective"] = args.objective
         if args.criterion:
             body["acceptance_criteria"] = list(args.criterion)
         if args.scope:
@@ -844,6 +880,7 @@ def cmd_factory_run(args: argparse.Namespace) -> int:
 
 
 def cmd_factory_status(args: argparse.Namespace) -> int:
+    from daedalus.factory.escapes import escaped_orders
     from daedalus.factory.ledger import Ledger, summarize
     from daedalus.factory.line import blocked_by, ready_orders
     from daedalus.factory.orders import load_orders
@@ -855,6 +892,7 @@ def cmd_factory_status(args: argparse.Namespace) -> int:
         ids = [o.order_id for o in orders] + [oid for oid in recs if oid not in {o.order_id for o in orders}]
         summary = summarize(ids, recs)
         ready = ready_orders(orders, recs)
+        escaped = escaped_orders(ari.root, recs)
 
         def shown(o) -> str:
             st = recs[o.order_id].status if o.order_id in recs else "queued"
@@ -866,13 +904,18 @@ def cmd_factory_status(args: argparse.Namespace) -> int:
             _print(json.dumps({
                 "orders": [
                     {"id": o.order_id, "status": shown(o), "priority": o.priority, "depends_on": list(o.depends_on),
-                     "objective": o.title, **({k: v for k, v in vars(recs[o.order_id]).items() if k != "order_id"}
+                     "title": o.title, "objective": o.spec.get("objective"), "escaped": o.order_id in escaped, **({k: v for k, v in vars(recs[o.order_id]).items() if k != "order_id"}
                                               if o.order_id in recs else {})}
                     for o in orders
                 ],
                 "next": ready[0].order_id if ready else None,
                 "invalid": errors,
-                "summary": vars(summary),
+                "summary": {
+                    **vars(summary),
+                    "escaped": len(escaped),
+                    "escaped_orders": escaped,
+                    "escape_rate": len(escaped) / summary.shipped if summary.shipped else None,
+                },
             }, indent=2, default=str))
             return 0
         _print(f"Factory · {len(orders)} order(s) in {cfg.orders_dir}/")
@@ -909,6 +952,10 @@ def cmd_factory_status(args: argparse.Namespace) -> int:
             f"first-pass yield {pct(summary.first_pass_yield)} · cost {summary.cost_total:.2f} "
             f"({per} per shipped) · median cycle {cycle}"
         )
+        rate = pct(len(escaped) / summary.shipped) if summary.shipped else "n/a"
+        _print(f"escaped {len(escaped)} of {summary.shipped} shipped · escape rate {rate}")
+        if escaped:
+            _print(f"escaped orders: {', '.join(escaped)}")
         return 0
     finally:
         ari.close()
@@ -964,6 +1011,8 @@ def add_factory_parser(sub: Any) -> None:
     sp = add("add", cmd_factory_add, "write a new work order file")
     sp.add_argument("objective")
     sp.add_argument("--id", help="order id (default: a slug of the objective)")
+    sp.add_argument("--title", help="commit subject and board label, one line of at most 72 characters "
+                    "(default: the objective's first sentence)")
     sp.add_argument("-c", "--criterion", action="append", help="acceptance criterion, proved by a test (repeatable)")
     sp.add_argument("--scope", action="append", help="path glob the order may change (repeatable)")
     sp.add_argument("--depends-on", action="append", help="order that must ship first (repeatable)")
@@ -990,8 +1039,28 @@ def add_factory_parser(sub: Any) -> None:
 
 
 # -------------------------------------------------------------------- parser
+class _Parser(argparse.ArgumentParser):
+    """argparse swallows OSError while printing `--help`, so a closed pipe would exit 0
+    with the output silently lost; let a BrokenPipeError on stdout reach main() instead.
+    Errors on other streams (a usage message to a closed stderr) stay swallowed so the
+    usage-error status is kept. This overrides a private hook; tests/unit/test_cli_pipe.py pins it."""
+
+    def _print_message(self, message: str, file: Any = None) -> None:
+        if message:
+            file = file or sys.stderr
+            try:
+                file.write(message)
+            except BrokenPipeError:
+                if file is sys.stdout:
+                    global _stdout_failed
+                    _stdout_failed = True
+                    raise
+            except (AttributeError, OSError):
+                pass
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="daedalus", description="Run agent work under a deterministic acceptance gate.")
+    p = _Parser(prog="daedalus", description="Run agent work under a deterministic acceptance gate.")
     p.add_argument("--version", action="version", version=f"daedalus {__version__}")
     p.add_argument("-C", "--dir", default=".", help="repository directory (default: current)")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
@@ -1027,6 +1096,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--require-provenance", action="store_true",
                     help="the workflow fails pull requests whose commits were not accepted by the gate")
     sp.add_argument("--force", action="store_true")
+    add("doctor", cmd_doctor, "check this repository is set up for the gate and say how to fix what is not")
     add("on", cmd_toggle, "turn the gate on for this repository")
     add("off", cmd_toggle, "turn the gate off for this repository (human only)", human=True)
 
@@ -1097,9 +1167,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("policy", cmd_policy, "print the effective policy")
     sp.add_argument("--default", action="store_true", help="print the built-in default policy")
     sp = add("hook", cmd_hook, "harness hook entry point (reads the hook payload on stdin)")
-    sp.add_argument("name", choices=("stop", "session-start", "prompt", "pre-edit", "commit-msg"))
+    sp.add_argument("name", choices=("stop", "session-start", "prompt", "pre-edit", "commit-msg", "pre-push"))
     sp.add_argument("args", nargs="*", help="arguments a git hook passes through")
     add("statusline", cmd_statusline, "one status line for Claude Code (reads its JSON on stdin)")
+    add("restore", cmd_restore, "undo a follow-up round: put back the candidate that was acceptable before it", run=True)
     sp = add("ci", cmd_ci, "gate a branch in CI: fresh checks, risk for the whole diff, commit provenance")
     sp.add_argument("--base", default="origin/main", help="branch or commit to compare against (default origin/main)")
     sp.add_argument("--require-provenance", action="store_true",
@@ -1121,16 +1192,100 @@ def utf8_output() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _stdout_failed
+    _stdout_failed = False
     utf8_output()
-    args = build_parser().parse_args(argv)
     try:
-        return int(args.fn(args) or 0)
+        try:
+            args = build_parser().parse_args(argv)
+        except SystemExit as exc:
+            # `--help` and `--version` exit with their output still buffered; a usage
+            # error keeps its own status even when stdout has gone away.
+            if _flush_stdout() and not exc.code:
+                return 128 + SIGPIPE
+            raise
+        code = int(args.fn(args) or 0)
     except DaedalusError as exc:
-        print(f"daedalus: {exc}", file=sys.stderr)
-        return 2
+        _warn(f"daedalus: {exc}")
+        code = 2
     except KeyboardInterrupt:
-        print("daedalus: interrupted", file=sys.stderr)
-        return 130
+        _warn("daedalus: interrupted")
+        code = 130
+    except BrokenPipeError:
+        if not _stdout_broken():
+            raise  # some other pipe broke; that is a real failure
+        _silence_stdout()
+        return 128 + SIGPIPE
+    # Flush on every exit path so a reader that closed early surfaces here,
+    # not as an "Exception ignored" message at interpreter shutdown.
+    if _flush_stdout() and code == 0:
+        return 128 + SIGPIPE
+    return code
+
+
+_stdout_failed = False  # set by _Parser._print_message when a write to stdout breaks
+SIGPIPE = 13  # signal.SIGPIPE on POSIX; Windows lacks the constant but the convention holds.
+
+
+def _flush_stdout() -> bool:
+    """Flush stdout; if its reader has gone away, silence it and return True."""
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _silence_stdout()
+        return True
+    return False
+
+
+def _stdout_broken() -> bool:
+    """Whether stdout's reader has gone away, as opposed to some other pipe breaking."""
+    if _stdout_failed:
+        return True  # _Parser._print_message saw the write to stdout fail
+    try:
+        sys.stdout.flush()  # output that failed to reach the reader stays buffered
+    except BrokenPipeError:
+        return True
+    except (OSError, ValueError, AttributeError):
+        return False
+    try:
+        fd = sys.stdout.fileno()
+    except (OSError, ValueError, AttributeError):
+        return False  # no descriptor, so the pipe that broke was not stdout
+    import select
+
+    if not hasattr(select, "poll"):
+        # Windows has no poll() for pipes. Keep the old behaviour and treat the error as a
+        # closed reader: the flush above already catches the usual case, and a traceback
+        # for `daedalus ... | more` is the worse mistake there.
+        return True
+    try:
+        poller = select.poll()
+        poller.register(fd, select.POLLOUT)
+        events = poller.poll(0)
+    except (OSError, ValueError):
+        return False
+    # A pipe whose readers have all closed reports POLLERR on Linux and POLLHUP on macOS/BSD.
+    return any(mask & (select.POLLERR | select.POLLHUP) for _, mask in events)
+
+
+def _warn(message: str) -> None:
+    """Report on stderr; a closed stderr must not cost the exit status or the stdout flush."""
+    try:
+        print(message, file=sys.stderr)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _silence_stdout() -> None:
+    """The reader went away (`daedalus status | head`). Point stdout at devnull so the
+    final flush at exit cannot raise again; see the Python `signal` docs on SIGPIPE."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+    except (OSError, ValueError, AttributeError):
+        # stdout is not backed by a file descriptor (e.g. replaced in tests).
+        pass
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,0 +1,12 @@
+title: Accept common severity names from reviewers
+objective: 'A launched review is discarded when one finding has a severity outside BLOCKER/MAJOR/MINOR/ADVISORY,
+  which wastes a paid review. Map common synonyms case-insensitively, never downward: CRITICAL to BLOCKER, HIGH
+  to MAJOR, MEDIUM and LOW to MINOR, NIT, INFO, SUGGESTION and STYLE to ADVISORY. Anything else is still rejected.'
+acceptance_criteria:
+- Each listed synonym is recorded as its mapped severity, case-insensitively
+- An unknown severity still rejects the review
+- The mapping never lowers a severity that could block
+scope:
+- src/daedalus/orchestration/ariadne.py
+- tests/integration/test_review_efficiency.py
+priority: 9

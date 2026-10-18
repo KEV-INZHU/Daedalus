@@ -62,6 +62,9 @@ class RunMetrics:
     cash: float = 0.0  # part of `cost` actually billed; the rest is API-equivalent estimate
     sessions: int = 0  # launched sessions that reported usage
     unknown_cost_sessions: int = 0  # stopped (timed out, cancelled) before reporting a cost
+    delta_reviews: int = 0  # re-reviews scoped to the change since the last review
+    late_findings: int = 0  # every finding raised by a full re-review (after the perspective's first full one)
+    followup_rounds: int = 0  # one-time fix rounds offered for non-blocking findings
     input_tokens: int = 0  # uncached + cache read + cache creation, over those sessions
     output_tokens: int = 0
 
@@ -131,7 +134,26 @@ def run_metrics(events: Iterable[Event]) -> RunMetrics:
         ),
         output_tokens=sum(_tokens(x, "output_tokens") for x in state.sessions),
         unknown_cost_sessions=sum(1 for x in state.sessions if x.get("cost_unknown")),
+        delta_reviews=sum(1 for r in state.reviews if r.scope == "delta"),
+        late_findings=_late_findings(state),
+        followup_rounds=state.followup_rounds,
     )
+
+
+def _late_findings(state: Any) -> int:
+    """Every finding raised by a *full* review of a perspective after that perspective's first
+    full review in the run. A full re-review re-reads code an earlier one covered, so what it
+    finds is the cost of reviews that do not find everything at once. Delta reviews see only
+    new changes, so what they raise is not counted."""
+    first: set[str] = set()
+    late = 0
+    for r in state.reviews:
+        if r.scope == "delta":
+            continue
+        if r.perspective in first:
+            late += len(r.finding_ids)
+        first.add(r.perspective)
+    return late
 
 
 @dataclass(frozen=True)
@@ -152,6 +174,10 @@ class Aggregate:
     disputes: int = 0
     arbitrations: int = 0
     cash_total: float = 0.0  # billed money across every run; cost_total includes it
+    reviews: int = 0
+    delta_reviews: int = 0
+    late_findings: int = 0
+    reviews_per_accepted: float | None = None  # review sessions per accepted change (lower is cheaper)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -187,6 +213,10 @@ def aggregate(metrics: Iterable[RunMetrics]) -> Aggregate:
         disputes=sum(m.disputes for m in ms),
         arbitrations=sum(m.arbitrations for m in ms),
         cash_total=round(sum(m.cash for m in ms), 4),
+        reviews=sum(m.reviews for m in ms),
+        delta_reviews=sum(m.delta_reviews for m in ms),
+        late_findings=sum(m.late_findings for m in ms),
+        reviews_per_accepted=round(sum(m.reviews for m in accepted) / len(accepted), 4) if accepted else None,
     )
 
 

@@ -62,6 +62,9 @@ class AgentRequest:
     # Polled while the session runs; True means the run no longer wants it (cancelled or
     # finished elsewhere), and an adapter that owns the session stops it.
     should_stop: Callable[[], bool] | None = field(default=None, compare=False, repr=False)
+    # Shell command prefixes a Builder may run (the repository's trusted checks), so it can test its
+    # own work before handing it in. Never used for read-only launches.
+    run_commands: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

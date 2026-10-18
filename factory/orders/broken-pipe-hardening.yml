@@ -1,0 +1,23 @@
+# Findings that shipped unfixed in line 2 (the Builder could not run the tests).
+title: Make the broken-pipe handling exact
+objective: 'Fix the review findings that shipped unfixed in the CLI''s broken-pipe handling: BrokenPipeError handler
+  is not limited to stdout; it can hide non-stdout pipe errors and change the usage-error exit code (Only treat
+  the error as a closed reader when stdout is actually broken); DaedalusError and KeyboardInterrupt paths skip the
+  flush, so output buffered for a closed pipe still fails at shutdown (Flush stdout on every exit path (for example
+  in a `finally`, catching BrokenPipeError there and calling _silence_stdout()), or make the DaedalusError and KeyboardInterrupt
+  handlers flush and silence stdout before returning); No test exercises the _Parser._print_message override (Add
+  a test whose help output exceeds the buffer (for example a test parser built with _Parser and a very long description,
+  or a driver that adds one) and that pipes it into a closed pipe, asserting exit 141 and empty stderr); The override
+  depends on argparse''s private _print_message (Keep the override but pin it with the large-help test above, so
+  a CPython change shows up as a test failure)'
+acceptance_criteria:
+- BrokenPipeError handler is not limited to stdout; it can hide non-stdout pipe errors and change the usage-error
+  exit code
+- DaedalusError and KeyboardInterrupt paths skip the flush, so output buffered for a closed pipe still fails at
+  shutdown
+- No test exercises the _Parser._print_message override
+- The override depends on argparse's private _print_message
+scope:
+- src/daedalus/cli.py
+- tests/unit/test_cli_pipe.py
+priority: 5

@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -162,6 +163,30 @@ def auto_open(ari: Ariadne, session_id: str | None) -> str | None:
     return ari.start({"objective": _objective(prompt, session_id)}, actor=AUTO_ACTOR, base_revision=base)
 
 
+def _is_accepted_state(ari: Ariadne, recent: int = 5) -> bool:
+    """The working tree is exactly a candidate a recent run accepted (committed or not)."""
+    from daedalus.repository.candidate import capture
+
+    try:
+        exclude = load_config(ari.root).policy.candidate_exclude
+    except DaedalusError:
+        return False
+    for rid in reversed(ari.store.run_ids()[-recent:]):
+        try:
+            state = ari.state(rid)
+        except DaedalusError:
+            continue
+        base = state.contract.base_revision
+        if state.disposition is not Disposition.ACCEPTED or not state.accepted_candidate_id or not base:
+            continue
+        try:
+            if capture(ari.root, base, exclude).candidate_id == state.accepted_candidate_id:
+                return True
+        except (subprocess.CalledProcessError, OSError):
+            continue  # e.g. the base no longer exists after a rebase: not a match, keep gating
+    return False
+
+
 def opened_message(ari: Ariadne, rid: str) -> str:
     from daedalus.repository.candidate import git_head
 
@@ -175,6 +200,14 @@ def opened_message(ari: Ariadne, rid: str) -> str:
     return msg
 
 
+# Turns the harness submits that are not the user's words. They never name a run.
+HARNESS_PROMPTS = ("<task-notification>", "<system-reminder>", "Stop hook feedback:")
+
+
+def is_harness_prompt(text: str) -> bool:
+    return str(text or "").lstrip().startswith(HARNESS_PROMPTS)
+
+
 def prompt_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[str, Any]:
     if launched_by_daedalus():
         return {}
@@ -185,7 +218,11 @@ def prompt_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[
     ari = ari or Ariadne(root)
     try:
         if ari.active_run_id() is None:  # an open run keeps its own objective and base
-            record = {"prompt": payload.get("prompt", ""), "session_id": payload.get("session_id"), "at": time.time()}
+            harness = is_harness_prompt(payload.get("prompt", ""))
+            if harness and _read_prompt(root):
+                return {}  # keep the user's last request (and where it was given) exactly as recorded
+            record = {"prompt": "" if harness else payload.get("prompt", ""),
+                      "session_id": payload.get("session_id"), "at": time.time()}
             record.update(_snapshot(ari))
             p = _prompt_path(root)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -274,6 +311,16 @@ def settle(ari: Ariadne, run_id: str, *, reviews: bool = True, notify=lambda _m:
     return decision, notes, adapter is not None
 
 
+def _agent_items(decision: Decision) -> list[str]:
+    """What the agent itself can fix. A review is never the author's job: the gate launches it,
+    or a person arranges one."""
+    return [
+        f"[agent] {r.message}"
+        for r in decision.reasons
+        if r.fixable_by == "agent" and r.code != "not_finished" and not r.code.startswith("review:")
+    ]
+
+
 def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[str, Any]:
     if launched_by_daedalus():
         return {}
@@ -289,6 +336,8 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
             prompt = _read_prompt(root)
             if not prompt or not prompt.get("tree") or _snapshot(ari) == {"head": prompt.get("head"), "tree": prompt.get("tree")}:
                 return {}
+            if _is_accepted_state(ari):
+                return {}  # e.g. accepted work committed since: there is nothing new to gate
             run_id = auto_open(ari, payload.get("session_id"))
             if run_id is None:
                 return {}
@@ -297,6 +346,18 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
             return {}
         decision, notes, system_reviews = settle(ari, run_id)
         if decision.acceptable:
+            followup = ari.followup_candidates(run_id)
+            cand = ari.capture(ari.state(run_id)) if followup else None
+            from daedalus.repository import snapshot
+
+            if followup and snapshot.save(ari.root, ari.state_dir / "runs" / run_id, cand.candidate_id, cand.manifest):
+                # Once per run: non-blocking findings get one fix pass, then acceptance. The acceptable
+                # candidate is kept, so `daedalus restore` can always undo the pass.
+                from daedalus.orchestration.lifecycle import followup_feedback
+
+                ari.request_followup(run_id, [f.finding_id for f in followup], cand.candidate_id)
+                return {"decision": "block", "reason": "Daedalus gate:\n- " + "\n- ".join(followup_feedback(followup))
+                        + "\nThen stop again; the gate reviews only what you change."}
             final = ari.finish(run_id)
             return {"systemMessage": summary_line(final)}
 
@@ -304,13 +365,27 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
             final = ari.finish(run_id)
             return {"systemMessage": summary_line(final) + "\n" + "\n".join(render_reasons(final))}
         pending_reviews = [r.code.split(":", 1)[1] for r in decision.reasons if r.code.startswith("review:")]
-        agent = [
-            f"[agent] {r.message}"
-            for r in decision.reasons
-            # A review is never the author's job: the gate launches it, or a person arranges one.
-            if r.fixable_by == "agent" and r.code != "not_finished" and not r.code.startswith("review:")
-        ]
+        agent = _agent_items(decision)
         cap = int(_harness(root).get("max_stop_blocks", DEFAULT_MAX_STOP_BLOCKS))
+        if agent and state.followup_from:
+            agent.append(
+                "[agent] the candidate before your follow-up pass was acceptable: if these are not quick to fix, "
+                "run `daedalus restore` to undo the pass, then stop"
+            )
+        if state.followup_from and (not agent or state.stop_blocks >= cap):
+            # About to stop blocking with the follow-up worse off than where it began: undo it.
+            from daedalus.orchestration.lifecycle import restore_followup
+
+            try:
+                notes += restore_followup(ari, run_id)
+            except DaedalusError as exc:
+                notes.append(str(exc))
+            decision = ari.evaluate(run_id)
+            if decision.acceptable:
+                final = ari.finish(run_id)
+                return {"systemMessage": summary_line(final) + "\n" + "\n".join(notes)}
+            agent = _agent_items(decision)
+            pending_reviews = [r.code.split(":", 1)[1] for r in decision.reasons if r.code.startswith("review:")]
         if agent and state.stop_blocks < cap:
             ari.note_stop_blocked(run_id, agent)
             return {

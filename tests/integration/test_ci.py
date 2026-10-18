@@ -69,6 +69,7 @@ def test_workflow_template_is_valid_yaml():
     steps = doc["jobs"]["gate"]["steps"]
     assert doc[True] == {"pull_request": None}  # YAML 1.1 reads the `on:` key as True
     assert steps[0]["with"]["fetch-depth"] == 0
+    assert doc["jobs"]["gate"]["permissions"] == {"contents": "read"}  # a read-only token for the PR's checks
     assert any("daedalus ci" in s.get("run", "") and "--require-provenance" in s["run"] for s in steps)
     assert any(s.get("run") == 'pip install -e ".[dev]"' for s in steps)
 
@@ -85,6 +86,35 @@ def test_ci_cli_and_init_writes_the_workflow(tmp_path, capsys, monkeypatch):
     wf = yaml.safe_load((root / ".github" / "workflows" / "daedalus.yml").read_text())
     runs = [s.get("run", "") for s in wf["jobs"]["gate"]["steps"]]
     assert "pip install -e ." in runs and any(r.startswith("daedalus ci") for r in runs)
+
+
+def test_init_ci_force_refreshes_the_workflow_but_keeps_the_config(tmp_path):
+    from daedalus import cli
+
+    root = make_repo(tmp_path / "r")
+    cfg = root / ".daedalus.yml"
+    cfg.write_bytes(b"# hand-tuned\nchecks:\n  tests: {cmd: 'true'}\n")
+    before = cfg.read_bytes()
+    wf = root / ".github" / "workflows" / "daedalus.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("stale\n")
+    assert cli.main(["-C", str(root), "init", "--ci", "--force", "--no-hooks", "--ci-install", "make deps"]) == 0
+    assert cfg.read_bytes() == before
+    runs = [s.get("run", "") for s in yaml.safe_load(wf.read_text())["jobs"]["gate"]["steps"]]
+    assert "make deps" in runs
+    # without --ci, --force still regenerates the config
+    assert cli.main(["-C", str(root), "init", "--force", "--no-hooks"]) == 0
+    assert cfg.read_bytes() != before and "hand-tuned" not in cfg.read_text()
+
+
+def test_init_ci_writes_the_config_when_missing(tmp_path):
+    from daedalus import cli
+
+    root = make_repo(tmp_path / "r")
+    cfg = root / ".daedalus.yml"
+    cfg.unlink(missing_ok=True)
+    assert cli.main(["-C", str(root), "init", "--ci", "--force", "--no-hooks"]) == 0
+    assert cfg.exists() and (root / ".github" / "workflows" / "daedalus.yml").exists()
 
 
 def test_flag_criteria_add_to_contract_file_criteria(tmp_path, monkeypatch):

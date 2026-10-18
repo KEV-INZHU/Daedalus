@@ -68,7 +68,7 @@ Council and fan-out only after measured readiness.
 - [x] Live baseline: a real launched Builder and reviewer through `daedalus run` (Run 10, below)
 - [ ] Exercise the experimental `codex` / `aider` presets against the real CLIs
 
-Status: 406 passed, 2 skipped (`python -m pytest`).
+Status: 569 passed, 2 skipped (`python -m pytest`).
 
 ## Docs and schemas
 
@@ -130,6 +130,41 @@ without it; see the dogfooding log). Nothing in the loop may depend on someone r
   for criteria only a person can judge)
 - [x] `daedalus ci`: fresh checks, whole-diff risk, commit provenance, job summary; `daedalus init --ci`
   writes the workflow — `ci.py`
+
+## Phase 6 — One review round
+
+Baseline before this phase (`daedalus metrics` over this repository's runs): 19 reviews, 2.43 reviews per
+accepted change, 31 late findings (raised by fresh full re-reviews of code already reviewed). The first
+real factory line (3 orders, claude-code adapter) shipped all 3 for $1.33, leaving 6 MINOR findings
+unaddressed because only blocking findings went back to the Builder.
+
+- [x] Exhaustive first pass: a required edge-case sweep in every full review prompt — `prompts.FIRST_PASS`
+- [x] Delta re-reviews from hash-checked snapshots of reviewed content — `repository/snapshot.py`; a delta
+  satisfies a requirement only through a chain to a full review — `acceptance.review_satisfied`
+- [x] One follow-up round for non-blocking findings (lifecycle and Stop hook), never blocking acceptance
+- [x] Metrics: delta reviews, late findings, follow-up rounds, reviews per accepted change
+
+### Factory lines with real agents (claude-code adapter)
+
+| Line | Gate | Orders | Shipped | Cost | Reviews/order | Late findings | Findings found → fixed |
+|------|------|--------|---------|------|---------------|---------------|------------------------|
+| 1 | before Phase 6 | 3 small | 3 | $1.33 | 1 | 0 | 9 → 0 (only blockers went back to the Builder) |
+| 2 | Phase 6 | 5 features | 5 | $10.89 | 1–2 (second always a delta) | 0 | 53 → 19 (MAJOR+MINOR: 19/34 = 56%) |
+| 3 | + Builders run checks | 4, one retried | 4 (one parked, corrected, then shipped on retry) | $4.78 | 1–2 | 0 | 35 → 12 (MAJOR+MINOR: 12/17 = 71%) |
+
+Line 2: where the follow-up round worked, it fixed 5/9, 7/12 and 7/11 findings, including the only
+MAJOR. Where it failed, the Builder broke tests it could not run, the gate undid the round and shipped
+the accepted candidate, and 21 findings were lost. A quarter of all rounds failed the checks for the
+same reason: headless Builders were denied every shell command, so none ever ran the tests.
+
+- [x] Builders may run exactly the run's check commands (`--allowedTools Bash(<prefix>:*)`), and are told so
+
+Line 3 (Builders can test): candidates failing the checks went from 4 to 0, and the share of MAJOR+MINOR
+findings fixed from 56% to 71%; late findings stayed at 0. One order parked because its own criterion was
+wrong: the Builder, now able to test, found that and raised a blocker instead of editing outside its scope
+(the line now shows that blocker as the reason). The order was corrected and retried, then shipped. The
+$4.78 includes the parked attempt ($0.17) and its retry ($0.39): $1.20 per shipped order, against $2.18 in line 2.
+Severity synonyms (HIGH, NIT, ...) no longer discard a paid review.
 
 ## Deliberately out of scope until usage justifies it
 

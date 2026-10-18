@@ -33,4 +33,5 @@ extraPaths = ["src"]
 
 [tool.ruff]
 line-length = 110
+target-version = "py310"  # the oldest supported Python: newer-only syntax is a lint error
 src = ["src", "tests"]
