@@ -645,3 +645,53 @@ def test_a_failed_copy_leaves_no_partial_files_and_a_copy_can_be_redone(review_r
     (review_repo / "src" / "lib.py").write_text("changed since the capture\n")
     assert not snapshot.copy_files(review_repo, dest, c1.manifest)
     assert not (dest / "files").exists()  # no partial copy is left behind
+
+
+SYNONYMS = {"critical": "BLOCKER", "High": "MAJOR", "MEDIUM": "MINOR", "low": "MINOR",
+            "Nit": "ADVISORY", "info": "ADVISORY", "SUGGESTION": "ADVISORY", "style": "ADVISORY"}
+
+
+def test_severity_synonyms_are_recorded_as_their_mapped_severity(ari, repo):
+    rid = ari.start({"objective": "o"}, actor=HUMAN)
+    fix(repo)
+    findings = [dict(MINOR, title=f"finding {s}", severity=s) for s in SYNONYMS]
+    ari.submit_review(rid, reviewer="agent:r", perspective="aristotle", source="launched", findings=findings)
+    recorded = {f.title: f.severity.value for f in ari.state(rid).findings.values()}
+    assert recorded == {f"finding {s}": sev for s, sev in SYNONYMS.items()}
+
+
+def test_an_unknown_severity_still_rejects_the_review(ari, repo):
+    rid = ari.start({"objective": "o"}, actor=HUMAN)
+    fix(repo)
+    for bad in ("SEVERE", "urgent", "", "blocking"):
+        with pytest.raises(ContractError, match="severity must be one of"):
+            ari.submit_review(rid, reviewer="agent:r", perspective="aristotle", source="launched",
+                              findings=[MINOR, dict(MINOR, severity=bad)])
+    state = ari.state(rid)
+    assert not state.reviews and not state.findings
+
+
+def test_severity_synonyms_never_lower_a_severity_that_could_block():
+    from daedalus.core.state_machine import Severity
+    from daedalus.orchestration.ariadne import ADVISORY_SYNONYMS, SEVERITY_SYNONYMS
+
+    rank = {Severity.ADVISORY: 0, Severity.MINOR: 1, Severity.MAJOR: 2, Severity.BLOCKER: 3}
+    # The rule: any synonym outside the documented advisory-meaning set maps to MINOR or above.
+    for word, severity in SEVERITY_SYNONYMS.items():
+        if word not in ADVISORY_SYNONYMS:
+            assert rank[severity] >= rank[Severity.MINOR], word
+    # Deliberately pinned: words naming a blocking or major level keep at least that level.
+    assert rank[SEVERITY_SYNONYMS["CRITICAL"]] >= rank[Severity.BLOCKER]
+    assert rank[SEVERITY_SYNONYMS["HIGH"]] >= rank[Severity.MAJOR]
+    # No synonym shadows a canonical name, so canonical severities are never remapped.
+    assert not set(SEVERITY_SYNONYMS) & {s.value for s in Severity}
+
+
+def test_surrounding_whitespace_is_ignored_for_synonyms_and_canonical_severities(ari, repo):
+    rid = ari.start({"objective": "o"}, actor=HUMAN)
+    fix(repo)
+    cases = {" high ": "MAJOR", "BLOCKER\n": "BLOCKER", "\tnit": "ADVISORY", " minor": "MINOR"}
+    findings = [dict(MINOR, title=f"finding {i}", severity=s) for i, s in enumerate(cases)]
+    ari.submit_review(rid, reviewer="agent:r", perspective="aristotle", source="launched", findings=findings)
+    recorded = {f.title: f.severity.value for f in ari.state(rid).findings.values()}
+    assert recorded == {f"finding {i}": sev for i, sev in enumerate(cases.values())}

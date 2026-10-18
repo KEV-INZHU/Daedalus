@@ -63,6 +63,20 @@ from daedalus.repository.candidate import CandidateManifest, capture, file_sha25
 DEFAULT_VERIFIER = "daedalus-proof-gate@local"
 CLEANUP_ATTEMPTS = 3  # workspace removals tried before leaving it to a human
 SYSTEM = "system:ariadne"
+# Synonyms whose usual meaning is advisory; only these may map below MINOR.
+ADVISORY_SYNONYMS = frozenset({"NIT", "INFO", "SUGGESTION", "STYLE"})
+# Common reviewer synonyms, each mapped to a severity at least as strict as its usual meaning:
+# anything outside ADVISORY_SYNONYMS maps to MINOR or above, so no synonym can lower a blocking finding.
+SEVERITY_SYNONYMS = {
+    "CRITICAL": Severity.BLOCKER,
+    "HIGH": Severity.MAJOR,
+    "MEDIUM": Severity.MINOR,
+    "LOW": Severity.MINOR,
+    "NIT": Severity.ADVISORY,
+    "INFO": Severity.ADVISORY,
+    "SUGGESTION": Severity.ADVISORY,
+    "STYLE": Severity.ADVISORY,
+}
 
 
 def _uid(prefix: str) -> str:
@@ -425,8 +439,9 @@ class Ariadne:
             title, evidence = str(f.get("title", "")).strip(), str(f.get("evidence", "")).strip()
             if not title or not evidence:
                 raise ContractError(f"finding {i + 1} needs a title and evidence")
+            raw = str(f.get("severity", "")).strip().upper()
             try:
-                severity = Severity(str(f.get("severity", "")).upper())
+                severity = SEVERITY_SYNONYMS.get(raw) or Severity(raw)
             except ValueError as exc:
                 raise ContractError(
                     f"finding {i + 1} severity must be one of {[s.value for s in Severity]}"
