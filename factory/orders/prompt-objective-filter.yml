@@ -1,0 +1,13 @@
+title: Never name a run after an automated notification
+objective: >-
+  The UserPromptSubmit hook records the latest prompt as the next auto-opened run's objective, but harness
+  turns that are not the user's words (background-task notifications such as `<task-notification>...`,
+  system reminders, stop-hook feedback) are recorded too, so a run was named after a task notification.
+  Ignore prompts that begin with one of a named allowlist of harness tags (`<task-notification>`,
+  `<system-reminder>`), keeping the last real user prompt as the objective.
+acceptance_criteria:
+  - A prompt that begins with `<task-notification>` or `<system-reminder>` does not replace the recorded prompt
+  - A real user prompt after one still becomes the objective
+  - A user prompt that begins with any other tag (for example `<div>`) is still recorded
+scope: ["src/daedalus/harness/claude_code.py", "tests/integration/test_ambient.py"]
+priority: 8
