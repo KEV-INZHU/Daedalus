@@ -179,8 +179,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         workflow = render_workflow(args.ci_source or DEFAULT_SOURCE, args.ci_install, args.require_provenance)
     root = find_root(args.dir)
     cfg = root / CONFIG_FILE
-    if cfg.exists() and not args.force:
-        _print(f"{CONFIG_FILE} already exists (use --force to overwrite)")
+    if cfg.exists() and (args.ci or not args.force):  # with --ci, --force refreshes only the workflow
+        _print(f"{CONFIG_FILE} already exists" + (" (kept; --ci --force refreshes only the workflow)" if args.ci
+                                                  else " (use --force to overwrite)"))
     else:
         checks = detect_checks(root)
         cfg.write_text(render_config(checks, args.adapter), encoding="utf-8")
