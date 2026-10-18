@@ -1,0 +1,28 @@
+# Findings that shipped unfixed in line 2 (the Builder could not run the tests).
+title: Harden daedalus doctor against malformed setups
+objective: 'Fix the review findings that shipped unfixed in `daedalus doctor`: Non-numeric max_cash crashes doctor
+  with a traceback (Wrap the conversion in try/except (TypeError, ValueError) and return a failing Finding: ''max_cash
+  is not a number'', fix ''set `max_cash` to a positive amount in ); Infinite max_cash passes doctor, but every
+  run rejects it (Pass only `0 < max_cash < math); Wrongly shaped hook entries in settings.json raise TypeError
+  (Check that the values are lists (`isinstance(); Missing git binary crashes in the git-hooks check (In `_git_hooks`,
+  catch FileNotFoundError around `hook_path` and return Finding(''git hooks installed'', False, ''git is not on
+  PATH'', ''install git''), or check `shutil); Git hook that is not executable is reported as installed (On POSIX,
+  also require `os); Outside a git repository, the config check suggests an impossible fix (Have `_committed` tell
+  ''not a repository'' apart from ''not committed'' (e); Loose hint strings make some C1 cases pass trivially (Use
+  distinctive hints (e); C3 tests do not reliably detect an index refresh (Add a C3 case that makes the index stale
+  on stat only: touch a tracked file (e); Failure paths without tests (Add PROBLEMS entries for invalid JSON settings,
+  an unknown adapter (`adapter: nope`), YAML that does not parse, and a directory that is not a git repository)'
+acceptance_criteria:
+- Non-numeric max_cash crashes doctor with a traceback
+- Infinite max_cash passes doctor, but every run rejects it
+- Wrongly shaped hook entries in settings.json raise TypeError
+- Missing git binary crashes in the git-hooks check
+- Git hook that is not executable is reported as installed
+- Outside a git repository, the config check suggests an impossible fix
+- Loose hint strings make some C1 cases pass trivially
+- C3 tests do not reliably detect an index refresh
+- Failure paths without tests
+scope:
+- src/daedalus/doctor.py
+- tests/integration/test_doctor.py
+priority: 6
