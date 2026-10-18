@@ -68,7 +68,7 @@ Council and fan-out only after measured readiness.
 - [x] Live baseline: a real launched Builder and reviewer through `daedalus run` (Run 10, below)
 - [ ] Exercise the experimental `codex` / `aider` presets against the real CLIs
 
-Status: 275 passed, 1 skipped (`python -m pytest`).
+Status: 406 passed, 2 skipped (`python -m pytest`).
 
 ## Docs and schemas
 
@@ -90,6 +90,46 @@ Status: 275 passed, 1 skipped (`python -m pytest`).
 - [x] `daedalus metrics`: acceptance, first-pass, rework, cost and latency per accepted change, manual interventions
 - [ ] Escaped-defect and regression tracking (needs a way to link later fixes back to accepted runs)
 - [ ] Parallelism savings vs integration overhead
+
+## Phase 4 — Lightweight factory
+
+A line around the single-run station: committed work orders in, gated commits out. See
+[factory.md](factory.md).
+
+- [x] Work orders: contract + routing (`depends_on`, `priority`, `mode`, `rounds`), validated by the
+  contract builder; text criteria bound to the required checks — `factory/orders.py`
+- [x] Ledger: order status as a fold over an append-only event file — `factory/ledger.py`
+- [x] Line: branch per order, drive the run, ship exactly the accepted candidate (fast-forward only),
+  park with work kept, halt on human gates, resume after interruption, andon, stop/limit/budget,
+  one line at a time — `factory/line.py`
+- [x] Planner (Vitruvius): read-only decomposition of a goal into draft orders — `factory/planner.py`
+- [x] CLI: `factory add | plan | run | status | retry | park | stop`
+- [x] Core fixes found while building it: a reused task id no longer overwrites a recorded worker
+  outcome (`Ariadne.plan` rejects it; a resumed run's Builder round picks a fresh id)
+- [ ] Live line run with the `claude-code` adapter on a multi-order backlog (exercised so far with
+  scripted agents and a stand-in command agent)
+- [ ] Holdout checks: criteria verified by checks the Builder never sees
+- [ ] Escaped defects: `Fixes-Order:` trailers on later commits link regressions back to shipped orders
+- [ ] Optional ship step (push the integration branch / open a pull request)
+
+## Phase 5 — Frictionless by default
+
+The gate has to be the path of least resistance, or it gets skipped (the factory itself was first built
+without it; see the dogfooding log). Nothing in the loop may depend on someone remembering a command.
+
+- [x] Runs open themselves: the first edit (or, for shell-only changes, the stop) opens a run named after
+  the prompt, based on the commit the prompt was given on — `harness/claude_code.py`
+- [x] Reviews launch themselves: the Stop hook and `daedalus verify` launch every required review once
+  checks pass; a missing review is never put to the agent as its job
+- [x] Billed launches the cash budget cannot cover are refused up front with the fix, not charged and
+  then rejected — `lifecycle.refuse_unaffordable`, `Adapter.expected_cost_basis`
+- [x] Portable hook commands, safe to commit; `harness.bootstrap` installs Daedalus in fresh containers
+- [x] `.claude/settings.json` and the gate skill are part of the candidate and raise the tier to critical
+- [x] Accepted commits carry `Daedalus-Run` trailers via a `prepare-commit-msg` hook — `harness/provenance.py`
+- [x] Status line; `daedalus init` installs everything; `-c` criteria are proved by the checks (`--attest`
+  for criteria only a person can judge)
+- [x] `daedalus ci`: fresh checks, whole-diff risk, commit provenance, job summary; `daedalus init --ci`
+  writes the workflow — `ci.py`
 
 ## Deliberately out of scope until usage justifies it
 
@@ -156,6 +196,10 @@ independent reviewer through the `claude-code` adapter).
 | f318fc00189d | Phase 2: isolated worktrees for non-in-place workers | 4 candidates | ACCEPTED ($1.65) | Reviewer caught 2 MAJORs: committed worker changes dropped from proposals; a shared /tmp hooks path I introduced. F15/F16 fixed in 8ea5 |
 | 8ea56a7320bc | Phase 2: bounded fan-out (plan → parallel worktrees → ordered integration) | 4 candidates | ACCEPTED ($1.65) | Default cap stays 1. Reviewer caught 2 MAJORs (unsanitized package ids as paths; aborted rounds leaking sessions) and a flaky test as a BLOCKER |
 | 09eb250a50f2 | Phase 2: disputes and Plato arbitration | 2 candidates | ACCEPTED | Overrules advisory unless policy opts in |
+| 75787c4300b4 | Phase 4: the factory, gated after the fact | 2 candidates | REJECTED ($1.31) | The factory was first written without the gate. Gating it found a MAJOR (accepted work shipping unreviewed edits) and a BLOCKER (retries shipping unreviewed WIP); then the run was rejected: reviewers here bill cash and `max_cash` was 0, which the gate only found out after paying. Owner raised `max_cash` to 5 |
+| bb2af06702cb | Phase 4: the factory | 2 candidates | ACCEPTED ($1.29) | A fresh reviewer found 5 more, incl. a MAJOR (Builder-staged paths outside the candidate shipping). 10 findings in all, 8 fixed |
+| 9f00ef5992ac | Phase 5: ambient gate (auto-open runs, self-launching reviews, trailers, budget pre-flight) | 4 candidates | ACCEPTED | 25 findings over 4 rounds, 21 fixed. MAJOR: `-c` binding silently changed contract-file criteria. This run's own friction (reviews needing a typed command, `-c` needing attestation, the $0 cash trap) became its features |
+| ce56ac76b585 | Phase 5: `daedalus ci`; deferred F22-F25 | 5 candidates | ACCEPTED ($0.6) | First run whose reviews `daedalus verify` launched itself (5 rounds, nobody typed `daedalus review`). MAJOR: CI read the policy from the PR head, so a PR could weaken its own gate; now the base tip's policy judges. 17 findings, 15 fixed; F16-F17 queued as factory orders |
 
 Follow-ups: run f318 F17 (filter drivers during proposal), F18 (tests use the real temp dir). Run 64c6 F6 (utf8_output only from the console entry point). Run 27c6: F7 (`--adapter claude-code` when
 config omits `name`), F8 (aider's `--yes-always` sits in the shared argv), F9 (dedupe preset-lock tests).

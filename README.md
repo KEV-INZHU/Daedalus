@@ -1,7 +1,7 @@
 # Daedalus
 
-**An acceptance gate for AI coding agents.** Run your agent normally, or run it
-under the gate: the agent still does the work, but "done" is decided by a
+**An acceptance gate for AI coding agents, and a small software factory built on it.**
+Run your agent normally, or run it under the gate: the agent still does the work, but "done" is decided by a
 deterministic predicate over trusted, revision-bound evidence. The agent can't
 make that decision for itself.
 
@@ -11,29 +11,47 @@ Daedalus is harness-agnostic. The core owns contracts, lifecycle state, risk
 policy, evidence, authorization and the acceptance decision. Thin adapters
 connect it to Claude Code, Codex, other CLIs, or a plain terminal.
 
-## Quickstart
+## Quickstart: set it up once, then just work
 
 ```bash
-pip install -e .                       # from this repository
+pip install "git+https://github.com/KEV-INZHU/Daedalus"
 cd your-repo
-daedalus init --claude-code            # writes .daedalus.yml (detected test command) + Claude Code hooks
-git add .daedalus.yml && git commit -m "Add Daedalus gate"   # runs only trust committed policy
-
-daedalus start "add rate limiting to the API"   # open a run (a contract)
-# ... work with your agent as usual ...
-daedalus status                                  # what blocks acceptance, and who can fix it
+daedalus init          # .daedalus.yml (detected test command), Claude Code hooks, git hook
+git add .daedalus.yml .claude .gitignore && git commit -m "Gate this repository with Daedalus"
 ```
 
-With the Claude Code hooks installed, an agent that tries to stop while
-agent-fixable blockers remain is sent back with the exact reasons. When only
-human decisions remain, it is allowed to stop and you're told which command to
-run. When the predicate holds, the run is recorded **ACCEPTED**.
+That's all the setup there is. Everyone who opens the repository in Claude Code now works under the
+gate, with nothing to remember:
 
-To have Daedalus drive the agent itself (Builder → verify → review → finish):
+1. **You ask for something.** Questions open nothing. The agent's first file edit opens a run, and
+   the run's objective is your request.
+2. **The agent works as usual.** The status line shows the run and what it's waiting on.
+3. **The agent tries to stop.** Daedalus runs the trusted checks on the exact working tree. Once
+   they pass, it launches every independent review the risk tier or mode requires (read-only, and
+   never by the agent that wrote the code). Anything the agent can fix goes back to it with exact
+   reasons. Anything only you can decide (an approval, a sign-off, a budget) is put to you. When the
+   predicate holds, the run is recorded **ACCEPTED**.
+4. **You commit.** A commit that is exactly the accepted work gets `Daedalus-Run` trailers, so the
+   log and the PR show what passed the gate.
+
+Without Claude Code, the same loop is three commands: `daedalus start "goal"`, then work, then
+`daedalus verify` (runs the checks and launches the required reviews). `daedalus status` always says
+what blocks acceptance and who can fix it. To have Daedalus drive the agent itself:
 
 ```bash
 daedalus run "fix the flaky retry in the uploader" --mode review
 ```
+
+In CI, `daedalus ci` re-runs the committed checks on every pull request (see below).
+
+For fresh containers (cloud sessions), set `harness: {bootstrap: "pip install ..."}` in `.daedalus.yml`
+and rerun `daedalus install claude-code`. The SessionStart hook runs that command whenever Daedalus
+is missing, unprompted, on every machine that opens the repository. It's committed configuration
+like the rest of `.daedalus.yml`, so changing it raises the run's tier to critical.
+
+An auto-opened run's objective is your prompt (up to 600 characters). It is stored with the run in
+`.daedalus/` (local, never committed) and appears in `daedalus status`, so keep secrets out of prompts
+as you would out of commit messages. Set `harness: {auto_start: false}` to open runs only by hand.
 
 ## The three things you touch
 
@@ -49,7 +67,7 @@ acceptance rate, rework, cost and latency across runs, plus a few human-only dec
 
 ```bash
 daedalus approve merge          # scoped to this candidate + contract version, expiring, single-use
-daedalus attest C2 pass --evidence "checked the UI manually"
+daedalus attest C2 pass --evidence "checked the UI manually"   # only for --attest criteria
 daedalus amend --set scope='["src/api/**"]' --rationale "narrowed"
 daedalus risk-exception low --rationale "docs-only change under auth/"
 ```
@@ -60,6 +78,46 @@ If a review finding looks wrong, dispute it rather than arguing in circles:
 `daedalus dispute F2 --reason "..."`, then `daedalus arbitrate F2` has Plato rule on it.
 By default the ruling is advice for a human. Set `arbitration_resolves_findings: true` under
 `policy:` to let an overrule resolve the finding.
+
+## In CI: the gate on every pull request
+
+```bash
+daedalus init --ci --ci-install 'pip install -e ".[dev]"'   # writes .github/workflows/daedalus.yml
+```
+
+On each pull request, `daedalus ci` uses only what is committed, so no contributor's machine has to be
+trusted:
+
+- **Checks.** It re-runs every mandatory check in the committed policy on the head. That's fresh
+  evidence, not anyone's local claim.
+- **Risk.** It classifies the whole diff with the same floors a run uses, and lists the reviews and
+  approvals that tier requires.
+- **Provenance.** It reports which commits carry `Daedalus-Run` trailers (were accepted by the gate where
+  they were written). `--require-provenance` makes a missing trailer fail the job.
+
+Pin what the workflow installs with `--ci-source 'git+https://github.com/KEV-INZHU/Daedalus@<tag>'`,
+so the tool judging pull requests doesn't change under them. It writes the report to the job summary
+and fails when a check fails. Trailers are claims anyone can
+type, which is why the checks are always re-run.
+
+## The factory: a queue of orders through the gate
+
+One run turns one goal into one accepted change. The factory puts a line around that station: a
+backlog of committed **work orders** goes in, and each one is built on its own branch under the gate.
+Accepted work ships as one commit on your branch, and anything that doesn't pass is parked with its
+work kept.
+
+```bash
+daedalus factory plan "rate limiting for the public API"   # a planner drafts orders (optional)
+daedalus factory add "Return 429 after 100 requests a minute" -c "the 101st request gets HTTP 429"
+git add factory/orders && git commit -m "Factory orders"   # the line builds committed orders only
+daedalus factory run                                       # build, verify, review, ship; repeat
+daedalus factory status                                    # board, yield, cost per shipped order
+```
+
+Orders can depend on each other and carry priorities. The line halts when an order needs a human
+decision, and stops itself (the andon cord) when several orders in a row fail. See
+[docs/factory.md](docs/factory.md).
 
 ## Modes
 
@@ -121,6 +179,7 @@ is what declines a paid route before it is called.
 ## Documentation
 
 - [docs/PLAN.md](docs/PLAN.md): build plan and progress
+- [docs/factory.md](docs/factory.md): the factory line, work orders and what it guarantees
 - [docs/architecture.md](docs/architecture.md): layers and responsibilities
 - [docs/state-machine.md](docs/state-machine.md): states, transitions, disposition precedence
 - [docs/adapter-contract.md](docs/adapter-contract.md): writing a harness adapter

@@ -5,10 +5,25 @@ enabled: true
 # Risk floors in the default policy can require more reviews and approvals.
 mode: review
 
-# Agent harness used by `daedalus run` and `daedalus review`.
+# Agent harness used by `daedalus run` and `daedalus review`, and to launch reviews automatically.
 adapter: claude-code
+
+# Fresh containers (Claude Code on the web) start without Daedalus; the committed SessionStart
+# hook runs this when it is missing, so every session here is gated from the first prompt.
+harness:
+  bootstrap: python -m pip install -q -e .
 
 checks:
   tests:
     command: [python, -m, pytest, -q, -p, "no:cacheprovider"]
     timeout_s: 1800
+
+# Approved by the repository owner: launched reviewer sessions here are billed in cash,
+# so each run may spend up to $5 of real money (max_cost still caps total spend).
+policy:
+  default_budget:
+    max_attempts: 20
+    max_wall_seconds: 86400
+    max_cost: 50.0
+    max_workers: 1
+    max_cash: 5.0

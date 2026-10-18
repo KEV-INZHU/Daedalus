@@ -66,6 +66,10 @@ change_floors:
   - name: verification_policy
     patterns: [".daedalus.yml", "daedalus-policy.yaml", "policies/**", ".daedalus/**"]
     tier: critical
+  # Committed harness hooks decide whether a session runs under the gate at all.
+  - name: gate_hooks
+    patterns: [".claude/settings.json", ".claude/hooks/**", ".claude/skills/daedalus-gate/**"]
+    tier: critical
 
 # Project-specific critical workflows and data assets. Empty by default;
 # repositories add their own (crypto, PII, scheduling, recovery...).
@@ -132,5 +136,6 @@ default_budget:
   max_workers: 1
 
 candidate:
-  exclude: [".daedalus/**", ".claude/**", ".git/**", "**/__pycache__/**", "**/.pytest_cache/**",
+  # Committed .claude/ files (hooks, skills) are part of the candidate; only local state is not.
+  exclude: [".daedalus/**", ".claude/settings.local.json", ".git/**", "**/__pycache__/**", "**/.pytest_cache/**",
             "**/.mypy_cache/**", "**/.ruff_cache/**"]
