@@ -68,7 +68,7 @@ Council and fan-out only after measured readiness.
 - [x] Live baseline: a real launched Builder and reviewer through `daedalus run` (Run 10, below)
 - [ ] Exercise the experimental `codex` / `aider` presets against the real CLIs
 
-Status: 567 passed, 2 skipped (`python -m pytest`).
+Status: 569 passed, 2 skipped (`python -m pytest`).
 
 ## Docs and schemas
 
@@ -149,8 +149,8 @@ unaddressed because only blocking findings went back to the Builder.
 | Line | Gate | Orders | Shipped | Cost | Reviews/order | Late findings | Findings found → fixed |
 |------|------|--------|---------|------|---------------|---------------|------------------------|
 | 1 | before Phase 6 | 3 small | 3 | $1.33 | 1 | 0 | 9 → 0 (only blockers went back to the Builder) |
-| 2 | Phase 6 | 5 features | 5 | $10.89 | 1–2 (second always a delta) | 0 | 53 → 19 (MAJOR+MINOR: 56%) |
-| 3 | + Builders run checks | 5 (4 + 1 retried) | 5 | $4.78 | 1–2 | 0 | 35 → 12 (MAJOR+MINOR: 71%) |
+| 2 | Phase 6 | 5 features | 5 | $10.89 | 1–2 (second always a delta) | 0 | 53 → 19 (MAJOR+MINOR: 19/34 = 56%) |
+| 3 | + Builders run checks | 4, one retried | 4 (one parked, corrected, then shipped on retry) | $4.78 | 1–2 | 0 | 35 → 12 (MAJOR+MINOR: 12/17 = 71%) |
 
 Line 2: where the follow-up round worked, it fixed 5/9, 7/12 and 7/11 findings, including the only
 MAJOR. Where it failed, the Builder broke tests it could not run, the gate undid the round and shipped
@@ -159,10 +159,11 @@ same reason: headless Builders were denied every shell command, so none ever ran
 
 - [x] Builders may run exactly the run's check commands (`--allowedTools Bash(<prefix>:*)`), and are told so
 
-Line 3 (Builders can test): candidates failing the checks went from 4 to 0, cost per order from $2.18 to
-$0.96, and the share of follow-up-eligible findings fixed from 56% to 71%; late findings stayed at 0. One
-order parked because its own criterion was wrong; the Builder, now able to test, found that and raised a
-blocker instead of editing outside its scope, and the line now shows that blocker as the reason.
+Line 3 (Builders can test): candidates failing the checks went from 4 to 0, and the share of MAJOR+MINOR
+findings fixed from 56% to 71%; late findings stayed at 0. One order parked because its own criterion was
+wrong: the Builder, now able to test, found that and raised a blocker instead of editing outside its scope
+(the line now shows that blocker as the reason). The order was corrected and retried, then shipped. The
+$4.78 includes the parked attempt ($0.17) and its retry ($0.39): $1.20 per shipped order, against $2.18 in line 2.
 Severity synonyms (HIGH, NIT, ...) no longer discard a paid review.
 
 ## Deliberately out of scope until usage justifies it
