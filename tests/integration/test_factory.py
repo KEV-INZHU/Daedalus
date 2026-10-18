@@ -113,6 +113,8 @@ def test_failing_order_is_parked_with_its_work_kept_and_the_line_moves_on(ari, r
     assert rec.status == "parked" and any("tests" in r for r in rec.reasons)
     assert out(repo, "show", "factory/a-broken:app.txt") == "still nope"  # work in progress kept
     assert ari.state(rec.run_id).disposition.value == "CANCELLED"
+    cancel = next(e for e in ari.store.events(rec.run_id) if e.type == "cancel.requested")
+    assert "ran out of rounds" in cancel.payload["reason"] and "blocker" not in cancel.payload["reason"]
     assert (repo / "app.txt").read_text() == "ok\n"
 
 
@@ -709,3 +711,20 @@ def test_ledger_skips_valid_json_that_is_not_a_record(repo):
     led.append("order.requeued", order="b")
     assert [e["order"] for e in led.events()] == ["a", "b"] and led.skipped == 2
     assert led.records()["b"].status == "queued"
+
+
+def test_a_builder_blocker_is_the_reason_a_parked_order_shows(ari, repo):
+    add_orders(repo, {"wrong-spec": {"objective": "x", "rounds": 2}})
+
+    def refuses(req):
+        return AgentResult("COMPLETED", structured={"status": "blocked", "summary": "s",
+                                                    "blocker": "the criterion contradicts the code; widen the scope"})
+
+    report = line(ari, SimulatedAdapter({"brunel": [refuses]})).run()
+    rec = Ledger(repo).records()["wrong-spec"]
+    assert report.parked == ["wrong-spec"]
+    assert "contradicts the code" in rec.reasons[0]  # first, not buried under "tests has not run"
+    state = ari.state(rec.run_id)
+    cancel = next(e for e in ari.store.events(rec.run_id) if e.type == "cancel.requested")
+    assert "a blocker was raised" in cancel.payload["reason"] and "retry wrong-spec" in cancel.payload["reason"]
+    assert state.disposition.value == "CANCELLED"
