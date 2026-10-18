@@ -88,6 +88,35 @@ def test_ci_cli_and_init_writes_the_workflow(tmp_path, capsys, monkeypatch):
     assert "pip install -e ." in runs and any(r.startswith("daedalus ci") for r in runs)
 
 
+def test_init_ci_force_refreshes_the_workflow_but_keeps_the_config(tmp_path):
+    from daedalus import cli
+
+    root = make_repo(tmp_path / "r")
+    cfg = root / ".daedalus.yml"
+    cfg.write_bytes(b"# hand-tuned\nchecks:\n  tests: {cmd: 'true'}\n")
+    before = cfg.read_bytes()
+    wf = root / ".github" / "workflows" / "daedalus.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("stale\n")
+    assert cli.main(["-C", str(root), "init", "--ci", "--force", "--no-hooks", "--ci-install", "make deps"]) == 0
+    assert cfg.read_bytes() == before
+    runs = [s.get("run", "") for s in yaml.safe_load(wf.read_text())["jobs"]["gate"]["steps"]]
+    assert "make deps" in runs
+    # without --ci, --force still regenerates the config
+    assert cli.main(["-C", str(root), "init", "--force", "--no-hooks"]) == 0
+    assert cfg.read_bytes() != before and "hand-tuned" not in cfg.read_text()
+
+
+def test_init_ci_writes_the_config_when_missing(tmp_path):
+    from daedalus import cli
+
+    root = make_repo(tmp_path / "r")
+    cfg = root / ".daedalus.yml"
+    cfg.unlink(missing_ok=True)
+    assert cli.main(["-C", str(root), "init", "--ci", "--force", "--no-hooks"]) == 0
+    assert cfg.exists() and (root / ".github" / "workflows" / "daedalus.yml").exists()
+
+
 def test_flag_criteria_add_to_contract_file_criteria(tmp_path, monkeypatch):
     from daedalus import cli
     from daedalus.orchestration.ariadne import Ariadne
