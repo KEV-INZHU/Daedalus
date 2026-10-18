@@ -390,7 +390,9 @@ class Line:
             except IllegalTransition:
                 decision = self.ari.evaluate(rid)
         disp = decision.disposition
-        reasons = [f"[{r.fixable_by}] {r.message}" for r in decision.reasons]
+        # An open blocker is why the work stopped; everything else follows from that.
+        ordered = sorted(decision.reasons, key=lambda r: not r.code.startswith("blocker:"))
+        reasons = [f"[{r.fixable_by}] {r.message}" for r in ordered]
         if disp is Disposition.ACCEPTED:
             return self._ship(oid, rid, decision, rounds)
         if disp is Disposition.BLOCKED:
@@ -400,7 +402,10 @@ class Line:
                 self.notify(f"{oid}: waiting for a human (run {rid}); the line halts here")
                 return "waiting"
             try:
-                self.ari.cancel(rid, actor=self.actor, reason="parked by the factory: the agents ran out of rounds")
+                blocked = any(r.code.startswith("blocker:") for r in decision.reasons)
+                why = (f"a blocker was raised; fix the order or decide, then `daedalus factory retry {oid}`"
+                       if blocked else "the agents ran out of rounds")
+                self.ari.cancel(rid, actor=self.actor, reason=f"parked by the factory: {why}")
             except IllegalTransition:
                 pass
             return self._park(oid, rid, reasons)
