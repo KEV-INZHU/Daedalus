@@ -107,6 +107,10 @@ class Policy:
     # Whether a Plato ruling that overrules a disputed finding resolves it. Off by
     # default: the ruling is advisory and a human resolves the finding.
     arbitration_resolves_findings: bool = False
+    # Re-reviews: `delta` (only the change since the last review) or `full` (the whole candidate).
+    rereview: str = "delta"
+    # Non-blocking findings offered for one fix round before acceptance.
+    followup_severities: frozenset[str] = frozenset({"MAJOR", "MINOR"})
     raw: dict[str, Any] = field(repr=False, compare=False, default_factory=dict)
 
     # ------------------------------------------------------------------ hashing
@@ -242,6 +246,13 @@ def policy_from_dict(raw: dict[str, Any]) -> Policy:
     severities = frozenset(str(s) for s in raw.get("blocking_severities", ["BLOCKER"]))
     if "BLOCKER" not in severities:
         raise PolicyError("blocking_severities must include BLOCKER")
+    rereview = str(raw.get("rereview", "delta"))
+    if rereview not in ("delta", "full"):
+        raise PolicyError("rereview must be `delta` or `full`")
+    severities_known = ("BLOCKER", "MAJOR", "MINOR", "ADVISORY")
+    followups = raw.get("followup_severities", ["MAJOR", "MINOR"])
+    if not isinstance(followups, list) or any(str(s) not in severities_known for s in followups):
+        raise PolicyError(f"followup_severities must be a list drawn from {list(severities_known)}")
 
     candidate = raw.get("candidate") or {}
     lockfiles = ()
@@ -269,6 +280,8 @@ def policy_from_dict(raw: dict[str, Any]) -> Policy:
         approval_ttl_seconds=float(raw.get("approval_ttl_seconds", 86400)),
         allowed_degradations=frozenset(raw.get("allowed_degradations", ())),
         arbitration_resolves_findings=_strict_bool(raw, "arbitration_resolves_findings"),
+        rereview=rereview,
+        followup_severities=frozenset(str(s) for s in followups),
         raw=raw,
     )
 

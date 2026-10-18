@@ -669,6 +669,10 @@ def cmd_metrics(args: argparse.Namespace) -> int:
             f"manual interventions {agg.manual_interventions} · recoveries {agg.recoveries} · "
             f"disputes {agg.disputes} · arbitrations {agg.arbitrations}"
         )
+        _print(
+            f"reviews {agg.reviews} ({agg.delta_reviews} delta) · reviews/accepted {num(agg.reviews_per_accepted)} · "
+            f"late findings {agg.late_findings} (raised by a re-review of code already reviewed)"
+        )
         if any(m.findings for m in runs):
             _print("findings: B=BLOCKER M=MAJOR m=MINOR A=ADVISORY")
         return 0 if not errors else 1
@@ -706,6 +710,23 @@ def cmd_ci(args: argparse.Namespace) -> int:
     report = run_ci(find_root(args.dir), args.base, require_provenance=args.require_provenance)
     _print(report.markdown())
     return 0 if report.ok else 1
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    from daedalus.orchestration.lifecycle import restore_followup
+
+    ari = _ari(args)
+    try:
+        rid = _run_id(ari, args)
+        for n in restore_followup(ari, rid, notify=lambda m: _print(f"· {m}")):
+            _print(n)
+        d = ari.evaluate(rid)
+        _print(f"Disposition: {d.disposition.value}")
+        for r in d.reasons:
+            _print(f"  [{r.fixable_by}] {r.message}")
+        return 0
+    finally:
+        ari.close()
 
 
 def cmd_statusline(args: argparse.Namespace) -> int:
@@ -1112,6 +1133,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("name", choices=("stop", "session-start", "prompt", "pre-edit", "commit-msg"))
     sp.add_argument("args", nargs="*", help="arguments a git hook passes through")
     add("statusline", cmd_statusline, "one status line for Claude Code (reads its JSON on stdin)")
+    add("restore", cmd_restore, "undo a follow-up round: put back the candidate that was acceptable before it", run=True)
     sp = add("ci", cmd_ci, "gate a branch in CI: fresh checks, risk for the whole diff, commit provenance")
     sp.add_argument("--base", default="origin/main", help="branch or commit to compare against (default origin/main)")
     sp.add_argument("--require-provenance", action="store_true",

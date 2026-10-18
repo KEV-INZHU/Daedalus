@@ -131,6 +131,19 @@ without it; see the dogfooding log). Nothing in the loop may depend on someone r
 - [x] `daedalus ci`: fresh checks, whole-diff risk, commit provenance, job summary; `daedalus init --ci`
   writes the workflow — `ci.py`
 
+## Phase 6 — One review round
+
+Baseline before this phase (`daedalus metrics` over this repository's runs): 19 reviews, 2.43 reviews per
+accepted change, 31 late findings (raised by fresh full re-reviews of code already reviewed). The first
+real factory line (3 orders, claude-code adapter) shipped all 3 for $1.33, leaving 6 MINOR findings
+unaddressed because only blocking findings went back to the Builder.
+
+- [x] Exhaustive first pass: a required edge-case sweep in every full review prompt — `prompts.FIRST_PASS`
+- [x] Delta re-reviews from hash-checked snapshots of reviewed content — `repository/snapshot.py`; a delta
+  satisfies a requirement only through a chain to a full review — `acceptance.review_satisfied`
+- [x] One follow-up round for non-blocking findings (lifecycle and Stop hook), never blocking acceptance
+- [x] Metrics: delta reviews, late findings, follow-up rounds, reviews per accepted change
+
 ## Deliberately out of scope until usage justifies it
 
 Server, multi-user control plane, plugin marketplace, distributed scheduler,
