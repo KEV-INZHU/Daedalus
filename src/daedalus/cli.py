@@ -844,6 +844,7 @@ def cmd_factory_run(args: argparse.Namespace) -> int:
 
 
 def cmd_factory_status(args: argparse.Namespace) -> int:
+    from daedalus.factory.escapes import escaped_orders
     from daedalus.factory.ledger import Ledger, summarize
     from daedalus.factory.line import blocked_by, ready_orders
     from daedalus.factory.orders import load_orders
@@ -855,6 +856,7 @@ def cmd_factory_status(args: argparse.Namespace) -> int:
         ids = [o.order_id for o in orders] + [oid for oid in recs if oid not in {o.order_id for o in orders}]
         summary = summarize(ids, recs)
         ready = ready_orders(orders, recs)
+        escaped = escaped_orders(ari.root, recs)
 
         def shown(o) -> str:
             st = recs[o.order_id].status if o.order_id in recs else "queued"
@@ -866,13 +868,18 @@ def cmd_factory_status(args: argparse.Namespace) -> int:
             _print(json.dumps({
                 "orders": [
                     {"id": o.order_id, "status": shown(o), "priority": o.priority, "depends_on": list(o.depends_on),
-                     "objective": o.title, **({k: v for k, v in vars(recs[o.order_id]).items() if k != "order_id"}
+                     "objective": o.title, "escaped": o.order_id in escaped, **({k: v for k, v in vars(recs[o.order_id]).items() if k != "order_id"}
                                               if o.order_id in recs else {})}
                     for o in orders
                 ],
                 "next": ready[0].order_id if ready else None,
                 "invalid": errors,
-                "summary": vars(summary),
+                "summary": {
+                    **vars(summary),
+                    "escaped": len(escaped),
+                    "escaped_orders": escaped,
+                    "escape_rate": len(escaped) / summary.shipped if summary.shipped else None,
+                },
             }, indent=2, default=str))
             return 0
         _print(f"Factory · {len(orders)} order(s) in {cfg.orders_dir}/")
@@ -909,6 +916,10 @@ def cmd_factory_status(args: argparse.Namespace) -> int:
             f"first-pass yield {pct(summary.first_pass_yield)} · cost {summary.cost_total:.2f} "
             f"({per} per shipped) · median cycle {cycle}"
         )
+        rate = pct(len(escaped) / summary.shipped) if summary.shipped else "n/a"
+        _print(f"escaped {len(escaped)} of {summary.shipped} shipped · escape rate {rate}")
+        if escaped:
+            _print(f"escaped orders: {', '.join(escaped)}")
         return 0
     finally:
         ari.close()
