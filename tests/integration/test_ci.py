@@ -69,6 +69,7 @@ def test_workflow_template_is_valid_yaml():
     steps = doc["jobs"]["gate"]["steps"]
     assert doc[True] == {"pull_request": None}  # YAML 1.1 reads the `on:` key as True
     assert steps[0]["with"]["fetch-depth"] == 0
+    assert doc["jobs"]["gate"]["permissions"] == {"contents": "read"}  # a read-only token for the PR's checks
     assert any("daedalus ci" in s.get("run", "") and "--require-provenance" in s["run"] for s in steps)
     assert any(s.get("run") == 'pip install -e ".[dev]"' for s in steps)
 
