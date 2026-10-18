@@ -4,6 +4,7 @@ An order is a Daedalus contract plus routing. It lives as a YAML file in the
 orders directory (default `factory/orders/`), and the file name is its id:
 
     # factory/orders/rate-limit.yml
+    title: Rate-limit the public API   # optional: commit subject and board label (one line, <= 72)
     objective: Add rate limiting to the public API
     acceptance_criteria:
       - Requests over 100/min from one key get HTTP 429
@@ -31,6 +32,7 @@ committed, so every spec it builds has been seen by a person.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,7 +44,8 @@ from daedalus.core.errors import ContractError, DaedalusError
 from daedalus.core.policy import Policy
 
 ORDER_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-ROUTING = ("depends_on", "priority", "mode", "rounds")
+ROUTING = ("title", "depends_on", "priority", "mode", "rounds")
+TITLE_MAX = 72
 SUFFIXES = (".yml", ".yaml")
 
 DEFAULT_VERIFICATION = (
@@ -64,10 +67,14 @@ class WorkOrder:
     mode: str | None = None
     rounds: int | None = None
     raw: dict[str, Any] = field(default_factory=dict, compare=False)
+    subject: str | None = None  # the order's own `title:`, if it has one
 
     @property
     def title(self) -> str:
-        """A commit subject: the objective's first sentence, at most 72 characters, cut at a word."""
+        """A commit subject: the order's `title:`, else the objective's first sentence, at most
+        72 characters, cut at a word."""
+        if self.subject:
+            return self.subject
         text = " ".join(str(self.spec.get("objective", "")).split())
         first = text.split(". ", 1)[0].rstrip(".")
         if len(first) <= 72:
@@ -108,8 +115,19 @@ def parse_order(order_id: str, raw: Any, path: str, policy: Policy) -> WorkOrder
         raise ContractError(f"{path}: priority and rounds must be integers") from exc
     if rounds is not None and not 1 <= rounds <= 20:
         raise ContractError(f"{path}: rounds must be between 1 and 20")
+    title = raw.get("title")
+    if title is not None:
+        if not isinstance(title, str) or not title.strip():
+            raise ContractError(f"{path}: title must be a non-empty string")
+        if any(len(f"a{c}b".splitlines()) > 1 for c in title):
+            raise ContractError(f"{path}: title must be one line")
+        if any(c != "\t" and unicodedata.category(c).startswith("C") for c in title):
+            raise ContractError(f"{path}: title must not contain control characters")
+        title = title.replace("\t", " ").strip()
+        if len(title) > TITLE_MAX:
+            raise ContractError(f"{path}: title must be at most {TITLE_MAX} characters (it has {len(title)})")
     spec = {k: v for k, v in raw.items() if k not in ROUTING}
-    order = WorkOrder(order_id, path, spec, tuple(deps), priority, mode, rounds, raw)
+    order = WorkOrder(order_id, path, spec, tuple(deps), priority, mode, rounds, raw, title)
     try:
         build_contract("validate", order.contract_spec(policy), policy, None)
     except ContractError as exc:

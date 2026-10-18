@@ -775,7 +775,8 @@ def cmd_factory_add(args: argparse.Namespace) -> int:
 
     ari, cfg = _factory_ctx(args)
     try:
-        body: dict[str, Any] = {"objective": args.objective}
+        body: dict[str, Any] = {} if args.title is None else {"title": args.title}
+        body["objective"] = args.objective
         if args.criterion:
             body["acceptance_criteria"] = list(args.criterion)
         if args.scope:
@@ -890,7 +891,7 @@ def cmd_factory_status(args: argparse.Namespace) -> int:
             _print(json.dumps({
                 "orders": [
                     {"id": o.order_id, "status": shown(o), "priority": o.priority, "depends_on": list(o.depends_on),
-                     "objective": o.title, "escaped": o.order_id in escaped, **({k: v for k, v in vars(recs[o.order_id]).items() if k != "order_id"}
+                     "title": o.title, "objective": o.spec.get("objective"), "escaped": o.order_id in escaped, **({k: v for k, v in vars(recs[o.order_id]).items() if k != "order_id"}
                                               if o.order_id in recs else {})}
                     for o in orders
                 ],
@@ -997,6 +998,8 @@ def add_factory_parser(sub: Any) -> None:
     sp = add("add", cmd_factory_add, "write a new work order file")
     sp.add_argument("objective")
     sp.add_argument("--id", help="order id (default: a slug of the objective)")
+    sp.add_argument("--title", help="commit subject and board label, one line of at most 72 characters "
+                    "(default: the objective's first sentence)")
     sp.add_argument("-c", "--criterion", action="append", help="acceptance criterion, proved by a test (repeatable)")
     sp.add_argument("--scope", action="append", help="path glob the order may change (repeatable)")
     sp.add_argument("--depends-on", action="append", help="order that must ship first (repeatable)")

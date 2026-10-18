@@ -285,14 +285,17 @@ FACTORY_PLAN_OUTPUT = """## Your task: plan work orders, do not implement
 
 Plan at most {max_orders} orders. Order ids are lowercase slugs (letters, digits, `-`); they name git
 branches. `depends_on` may name orders in this plan or the existing orders listed below. Higher
-`priority` runs first among orders that are ready. Do not edit any files.
+`priority` runs first among orders that are ready. Give every order a `title`: one line of at most
+72 characters, written as a commit subject; it becomes the shipped commit's subject and the board's
+label. Do not edit any files.
 
 End your reply with exactly one fenced JSON block:
 
 ```json
 {{"summary": "how the plan breaks the goal down, and anything left out",
   "orders": [
-    {{"id": "api-keys", "objective": "what to build, in one or two sentences",
+    {{"id": "api-keys", "title": "Issue API keys",
+      "objective": "what to build, in one or two sentences",
       "acceptance_criteria": ["a behaviour a test can decide"],
       "scope": ["src/api/**", "tests/api/**"],
       "depends_on": [], "priority": 0}}
@@ -306,5 +309,5 @@ def factory_plan_prompt(goal: str, existing: list[dict[str, Any]], checks: list[
     parts += [goal.strip(), "", "## Checks every order must pass", ""]
     parts += [f"- {c}" for c in checks] or ["- none configured"]
     parts += ["", "## Existing orders", ""]
-    parts += [f"- {o['id']} ({o['status']}): {o['objective']}" for o in existing] or ["- none"]
+    parts += [f"- {o['id']} ({o['status']}): {o['title']}" for o in existing] or ["- none"]
     return "\n".join(parts)
