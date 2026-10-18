@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -162,6 +163,30 @@ def auto_open(ari: Ariadne, session_id: str | None) -> str | None:
     return ari.start({"objective": _objective(prompt, session_id)}, actor=AUTO_ACTOR, base_revision=base)
 
 
+def _is_accepted_state(ari: Ariadne, recent: int = 5) -> bool:
+    """The working tree is exactly a candidate a recent run accepted (committed or not)."""
+    from daedalus.repository.candidate import capture
+
+    try:
+        exclude = load_config(ari.root).policy.candidate_exclude
+    except DaedalusError:
+        return False
+    for rid in reversed(ari.store.run_ids()[-recent:]):
+        try:
+            state = ari.state(rid)
+        except DaedalusError:
+            continue
+        base = state.contract.base_revision
+        if state.disposition is not Disposition.ACCEPTED or not state.accepted_candidate_id or not base:
+            continue
+        try:
+            if capture(ari.root, base, exclude).candidate_id == state.accepted_candidate_id:
+                return True
+        except (subprocess.CalledProcessError, OSError):
+            continue  # e.g. the base no longer exists after a rebase: not a match, keep gating
+    return False
+
+
 def opened_message(ari: Ariadne, rid: str) -> str:
     from daedalus.repository.candidate import git_head
 
@@ -175,6 +200,14 @@ def opened_message(ari: Ariadne, rid: str) -> str:
     return msg
 
 
+# Turns the harness submits that are not the user's words. They never name a run.
+HARNESS_PROMPTS = ("<task-notification>", "<system-reminder>", "Stop hook feedback:")
+
+
+def is_harness_prompt(text: str) -> bool:
+    return str(text or "").lstrip().startswith(HARNESS_PROMPTS)
+
+
 def prompt_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[str, Any]:
     if launched_by_daedalus():
         return {}
@@ -185,7 +218,11 @@ def prompt_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[
     ari = ari or Ariadne(root)
     try:
         if ari.active_run_id() is None:  # an open run keeps its own objective and base
-            record = {"prompt": payload.get("prompt", ""), "session_id": payload.get("session_id"), "at": time.time()}
+            harness = is_harness_prompt(payload.get("prompt", ""))
+            if harness and _read_prompt(root):
+                return {}  # keep the user's last request (and where it was given) exactly as recorded
+            record = {"prompt": "" if harness else payload.get("prompt", ""),
+                      "session_id": payload.get("session_id"), "at": time.time()}
             record.update(_snapshot(ari))
             p = _prompt_path(root)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -299,6 +336,8 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
             prompt = _read_prompt(root)
             if not prompt or not prompt.get("tree") or _snapshot(ari) == {"head": prompt.get("head"), "tree": prompt.get("tree")}:
                 return {}
+            if _is_accepted_state(ari):
+                return {}  # e.g. accepted work committed since: there is nothing new to gate
             run_id = auto_open(ari, payload.get("session_id"))
             if run_id is None:
                 return {}

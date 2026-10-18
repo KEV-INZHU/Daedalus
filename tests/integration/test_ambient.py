@@ -655,3 +655,64 @@ def test_another_sessions_prompt_never_sets_the_base(ari, repo):
     state = ari.state(ari.active_run_id())
     assert state.contract.base_revision == out(repo, "rev-parse", "HEAD") != base
     assert state.contract.objective == "Changes made in a Claude Code session"
+
+
+@pytest.mark.parametrize("text", ["<task-notification> <task-id>x</task-id>", "  <system-reminder>hi",
+                                  "Stop hook feedback:\nDaedalus gate: ..."])
+def test_harness_turns_never_replace_the_users_request(ari, repo, text):
+    claude_code.prompt_hook(payload(repo, prompt="make the app say ok"), ari=ari)
+    before = (repo / ".daedalus" / "last_prompt.json").read_text()
+    (repo / "src" / "lib.py").write_text("x = 9\n")
+    git(repo, "commit", "-qam", "moves HEAD")
+    claude_code.prompt_hook(payload(repo, prompt=text), ari=ari)
+    assert (repo / ".daedalus" / "last_prompt.json").read_text() == before  # prompt, session, head, tree kept
+    claude_code.pre_edit_hook(payload(repo, tool_input={"file_path": "app.txt"}), ari=ari)
+    state = ari.state(ari.active_run_id())
+    assert state.contract.objective == "make the app say ok"
+    assert state.contract.base_revision == json.loads(before)["head"]
+
+
+def test_a_harness_turn_with_no_record_still_snapshots_with_no_objective(ari, repo):
+    claude_code.prompt_hook(payload(repo, prompt="<task-notification>done</task-notification>"), ari=ari)
+    rec = json.loads((repo / ".daedalus" / "last_prompt.json").read_text())
+    assert rec["prompt"] == "" and rec["head"] and rec["tree"]
+    claude_code.pre_edit_hook(payload(repo, tool_input={"file_path": "app.txt"}), ari=ari)
+    assert ari.state(ari.active_run_id()).contract.objective == "Changes made in a Claude Code session"
+
+
+def test_a_tag_a_user_typed_is_still_their_request(ari, repo):
+    claude_code.prompt_hook(payload(repo, prompt="<div> should be centred"), ari=ari)
+    claude_code.pre_edit_hook(payload(repo, tool_input={"file_path": "app.txt"}), ari=ari)
+    assert ari.state(ari.active_run_id()).contract.objective == "<div> should be centred"
+
+
+def test_committing_accepted_work_does_not_open_another_run_at_stop(ari, repo):
+    claude_code.prompt_hook(payload(repo, prompt="fix the app"), ari=ari)
+    claude_code.pre_edit_hook(payload(repo, tool_input={"file_path": "app.txt"}), ari=ari)
+    fix(repo)
+    assert "ACCEPTED" in claude_code.stop_hook(payload(repo), ari=ari)["systemMessage"]
+    assert claude_code.stop_hook(payload(repo), ari=ari) == {}  # accepted, not yet committed: nothing new
+    git(repo, "commit", "-qam", "commit the accepted work")  # HEAD moves after the prompt was recorded
+    runs = len(ari.store.run_ids())
+    assert claude_code.stop_hook(payload(repo), ari=ari) == {}
+    assert len(ari.store.run_ids()) == runs  # no re-review of work already accepted
+    (repo / "src" / "lib.py").write_text("x = 'new, unreviewed'\n")  # but new work is still caught
+    assert claude_code.stop_hook(payload(repo), ari=ari) != {} and len(ari.store.run_ids()) == runs + 1
+
+
+def test_an_accepted_run_whose_base_is_gone_never_disables_gating(ari, repo, monkeypatch):
+    import subprocess as sp
+
+    import daedalus.repository.candidate as cand
+    from daedalus.harness.claude_code import _is_accepted_state
+
+    rid = ari.start({"objective": "o"}, actor=HUMAN)
+    fix(repo)
+    ari.verify(rid)
+    assert ari.finish(rid).disposition.value == "ACCEPTED" and _is_accepted_state(ari)
+
+    def gone(*a, **k):  # what capture raises when the run's base revision no longer exists
+        raise sp.CalledProcessError(128, "git diff", b"", b"fatal: bad revision")
+
+    monkeypatch.setattr(cand, "capture", gone)
+    assert _is_accepted_state(ari) is False  # "not a match", never an exception that stops gating
