@@ -66,6 +66,8 @@ CANCEL_REQUESTED = "cancel.requested"
 UNRESOLVABLE = "run.unresolvable"
 DISPOSITION = "disposition.recorded"
 HARNESS_STOP_BLOCKED = "harness.stop_blocked"
+FOLLOWUP_REQUESTED = "followup.requested"  # non-blocking findings offered for one fix round
+FOLLOWUP_REVERTED = "followup.reverted"  # the follow-up's candidates were undone; an earlier one restored
 RECOVERY = "recovery.performed"
 
 
@@ -83,6 +85,7 @@ class Finding:
     verification: str
     resolved_by: str | None = None
     resolution: str | None = None
+    resolved_in: str | None = None  # candidate of the review that resolved it, if a review did
     disputes: list[dict[str, Any]] = field(default_factory=list)
     ruling: dict[str, Any] | None = None  # latest Plato ruling: decision, rationale, ...
 
@@ -99,6 +102,8 @@ class Review:
     summary: str
     finding_ids: tuple[str, ...]
     resolves: tuple[str, ...]
+    scope: str = "full"  # full | delta (only the change since `delta_from` was reviewed)
+    delta_from: str | None = None  # candidate id of the review this one extends
 
 
 @dataclass
@@ -164,6 +169,11 @@ class RunState:
     disposition_reasons: list[dict[str, Any]] = field(default_factory=list)
     accepted_candidate_id: str | None = None
     stop_blocks: int = 0
+    followups: set[str] = field(default_factory=set)  # finding ids offered for the one follow-up round
+    followup_rounds: int = 0
+    followup_from: str | None = None  # the acceptable candidate the follow-up started from
+    followup_reviews_before: int = 0
+    reverted_candidates: set[str] = field(default_factory=set)  # follow-up candidates that were undone
     last_seq: int = 0
 
     # ----------------------------------------------------------- derived views
@@ -253,6 +263,8 @@ def _apply(s: RunState, ev: Event) -> None:
             summary=r.get("summary", ""),
             finding_ids=tuple(f["finding_id"] for f in r.get("findings", ())),
             resolves=tuple(r.get("resolves", ())),
+            scope=r.get("scope", "full"),
+            delta_from=r.get("delta_from"),
         )
         s.reviews.append(review)
         for f in r.get("findings", ()):
@@ -272,6 +284,7 @@ def _apply(s: RunState, ev: Event) -> None:
             if fid in s.findings and s.findings[fid].resolved_by is None:
                 s.findings[fid].resolved_by = ev.actor
                 s.findings[fid].resolution = f"resolved by {review.perspective} review {review.review_id}"
+                s.findings[fid].resolved_in = review.candidate_id
     elif t == REVIEW_FAILED:
         s.failed_reviews.append({**p, "at": ev.ts})
     elif t == FINDING_DISPUTED:
@@ -369,6 +382,16 @@ def _apply(s: RunState, ev: Event) -> None:
         s.disposition_reasons = list(p.get("reasons", ()))
         if s.disposition is Disposition.ACCEPTED:
             s.accepted_candidate_id = p["candidate_id"]
+    elif t == FOLLOWUP_REQUESTED:
+        s.followups |= set(p.get("findings", ()))
+        s.followup_rounds += 1
+        s.followup_from = p.get("candidate_id")
+        s.followup_reviews_before = int(p.get("reviews_before", len(s.reviews)))
+    elif t == FOLLOWUP_REVERTED:
+        s.reverted_candidates |= set(p.get("candidates", ()))
+        for f in s.findings.values():  # the fix that resolved it was undone: the finding is open again
+            if f.resolved_in and f.resolved_in in s.reverted_candidates:
+                f.resolved_by = f.resolution = f.resolved_in = None
     elif t == HARNESS_STOP_BLOCKED:
         s.stop_blocks += 1
     elif t == RECOVERY:

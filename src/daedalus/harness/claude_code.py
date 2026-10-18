@@ -274,6 +274,16 @@ def settle(ari: Ariadne, run_id: str, *, reviews: bool = True, notify=lambda _m:
     return decision, notes, adapter is not None
 
 
+def _agent_items(decision: Decision) -> list[str]:
+    """What the agent itself can fix. A review is never the author's job: the gate launches it,
+    or a person arranges one."""
+    return [
+        f"[agent] {r.message}"
+        for r in decision.reasons
+        if r.fixable_by == "agent" and r.code != "not_finished" and not r.code.startswith("review:")
+    ]
+
+
 def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[str, Any]:
     if launched_by_daedalus():
         return {}
@@ -297,6 +307,18 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
             return {}
         decision, notes, system_reviews = settle(ari, run_id)
         if decision.acceptable:
+            followup = ari.followup_candidates(run_id)
+            cand = ari.capture(ari.state(run_id)) if followup else None
+            from daedalus.repository import snapshot
+
+            if followup and snapshot.save(ari.root, ari.state_dir / "runs" / run_id, cand.candidate_id, cand.manifest):
+                # Once per run: non-blocking findings get one fix pass, then acceptance. The acceptable
+                # candidate is kept, so `daedalus restore` can always undo the pass.
+                from daedalus.orchestration.lifecycle import followup_feedback
+
+                ari.request_followup(run_id, [f.finding_id for f in followup], cand.candidate_id)
+                return {"decision": "block", "reason": "Daedalus gate:\n- " + "\n- ".join(followup_feedback(followup))
+                        + "\nThen stop again; the gate reviews only what you change."}
             final = ari.finish(run_id)
             return {"systemMessage": summary_line(final)}
 
@@ -304,13 +326,27 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
             final = ari.finish(run_id)
             return {"systemMessage": summary_line(final) + "\n" + "\n".join(render_reasons(final))}
         pending_reviews = [r.code.split(":", 1)[1] for r in decision.reasons if r.code.startswith("review:")]
-        agent = [
-            f"[agent] {r.message}"
-            for r in decision.reasons
-            # A review is never the author's job: the gate launches it, or a person arranges one.
-            if r.fixable_by == "agent" and r.code != "not_finished" and not r.code.startswith("review:")
-        ]
+        agent = _agent_items(decision)
         cap = int(_harness(root).get("max_stop_blocks", DEFAULT_MAX_STOP_BLOCKS))
+        if agent and state.followup_from:
+            agent.append(
+                "[agent] the candidate before your follow-up pass was acceptable: if these are not quick to fix, "
+                "run `daedalus restore` to undo the pass, then stop"
+            )
+        if state.followup_from and (not agent or state.stop_blocks >= cap):
+            # About to stop blocking with the follow-up worse off than where it began: undo it.
+            from daedalus.orchestration.lifecycle import restore_followup
+
+            try:
+                notes += restore_followup(ari, run_id)
+            except DaedalusError as exc:
+                notes.append(str(exc))
+            decision = ari.evaluate(run_id)
+            if decision.acceptable:
+                final = ari.finish(run_id)
+                return {"systemMessage": summary_line(final) + "\n" + "\n".join(notes)}
+            agent = _agent_items(decision)
+            pending_reviews = [r.code.split(":", 1)[1] for r in decision.reasons if r.code.startswith("review:")]
         if agent and state.stop_blocks < cap:
             ari.note_stop_blocked(run_id, agent)
             return {

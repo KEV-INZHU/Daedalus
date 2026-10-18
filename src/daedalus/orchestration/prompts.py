@@ -195,19 +195,89 @@ def arbitration_prompt(
     return "\n".join(parts)
 
 
+FIRST_PASS_INTRO = """## This is the only full review this candidate gets
+
+Later rounds review only what changes after this one, so anything you leave out now is unlikely to be
+looked at again. Report **every** issue you find in this pass, MINOR edge cases included, rather than
+only the most important few."""
+
+REREVIEW_INTRO = """## Full re-review
+
+An earlier review of this run could not be extended to just the change, so this one covers the whole
+candidate again. Report every issue you find, MINOR edge cases included."""
+
+SWEEP = """Work through the sweep below for each changed function or file before you write the result; skip an
+item only when it cannot apply.
+
+1. **Inputs at the edges**: empty, None or missing, zero and negative, very large, duplicates, unicode,
+   paths with `..`, absolute paths or symlinks, malformed files.
+2. **Failure paths**: every error, exception, timeout and non-zero exit. What is left behind (partial
+   writes, open handles, half-applied state), and is the error message accurate and actionable?
+3. **State and ordering**: re-entry, retries, crashes between two steps, concurrent callers, stale or
+   cached data, operations that are not idempotent.
+4. **Contract and interfaces**: every acceptance criterion and invariant, callers of changed functions,
+   changed defaults, backward compatibility of files and formats already on disk.
+5. **Trust and security**: injection (shell, YAML, Markdown), path traversal, secrets, privilege, and
+   anything a user, a commit or an agent controls that the code treats as trusted.
+6. **Tests**: does each criterion and each failure path above have a test that would fail without the
+   change? A test that can pass trivially is a finding.
+
+Before the JSON block, list the areas you swept in one line each, so coverage is visible.
+"""
+
+
+def _review_frame(perspective: str, task: str, c: TaskContract, checks: dict[str, Any],
+                  prior_findings: list[dict[str, str]]) -> list[str]:
+    """The parts every review prompt shares: role, output format, task, contract, evidence, prior findings."""
+    parts = [skill_body(perspective), "", REVIEW_OUTPUT, "", task, "", contract_block(c), "",
+             "## Verification evidence", ""]
+    parts += [f"- {cid}: {st} — {detail}" for cid, (st, detail) in checks.items()] or ["- none"]
+    if prior_findings:
+        parts += ["", "## Your earlier open findings", ""]
+        parts += [f"- {f['id']} [{f['severity']}] {f['title']}: {f['required_change']}" for f in prior_findings]
+    return parts
+
+
+DELTA_OUTPUT = """## Your task: review what changed since your last review
+
+You already reviewed this run's candidate {old}. The diff below is **only** what changed since then.
+Review it with the same care and the same checklist as a full review, including how it interacts with
+code it touches: you may read any file in the repository. Report findings caused by this change, and
+confirm which of your earlier open findings it resolves (list their ids in `resolves`). Do not re-review
+unchanged code for new issues; the earlier review covered it. Do not edit any files.
+"""
+
+
+
+
 def review_prompt(
     perspective: str,
     c: TaskContract,
     diff: str,
     checks: dict[str, Any],
     prior_findings: list[dict[str, str]],
+    first_pass: bool = True,
 ) -> str:
-    parts = [skill_body(perspective), "", REVIEW_OUTPUT, "", contract_block(c), "", "## Verification evidence", ""]
-    parts += [f"- {cid}: {st} — {detail}" for cid, (st, detail) in checks.items()] or ["- none"]
-    if prior_findings:
-        parts += ["", "## Your earlier open findings", ""]
-        parts += [f"- {f['id']} [{f['severity']}] {f['title']}: {f['required_change']}" for f in prior_findings]
+    """A full review. `first_pass` is False for a full re-review (one that could not be a delta)."""
+    task = (FIRST_PASS_INTRO if first_pass else REREVIEW_INTRO) + "\n\n" + SWEEP
+    parts = _review_frame(perspective, task, c, checks, prior_findings)
     parts += ["", "## Candidate diff", "", "```diff", diff or "(no changes)", "```"]
+    return "\n".join(parts)
+
+
+def delta_review_prompt(
+    perspective: str,
+    c: TaskContract,
+    inter_diff: str,
+    touched: list[str],
+    old_candidate: str,
+    checks: dict[str, Any],
+    prior_findings: list[dict[str, str]],
+) -> str:
+    task = DELTA_OUTPUT.format(old=old_candidate[:12]) + "\n" + SWEEP
+    parts = _review_frame(perspective, task, c, checks, prior_findings)
+    parts += ["", f"## Changed since your last review ({len(touched)} file(s))", "", "```diff",
+              inter_diff or "(no textual changes)", "```"]
     return "\n".join(parts)
 
 
