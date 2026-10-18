@@ -40,6 +40,9 @@ PYTEST = {"tests": {"command": ["python", "-m", "pytest", "-q"], "timeout_s": 60
         (["/opt/py/bin/python3.11", "-m", "pytest"], "/opt/py/bin/python3.11 -m pytest"),
         (["python.exe", "-c", "x"], ""),  # only the name normalisation rejects these two
         (["node.exe"], ""),
+        (["npm.cmd"], ""),  # Windows `.cmd` launchers: likewise only the name normalisation
+        (["npm.cmd", "exec"], ""),
+        (["npx.cmd", "pytest"], "npx.cmd pytest"),  # a launcher naming its program is granted
         (["/usr/bin/python3.12", "-c", "x"], ""),
     ],
 )
