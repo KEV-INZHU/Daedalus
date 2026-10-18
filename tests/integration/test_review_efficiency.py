@@ -350,6 +350,9 @@ def test_restore_command_undoes_a_follow_up_at_the_stop_hook(review_repo, clock,
     assert cli.main(["-C", str(review_repo), "restore"]) == 0
     assert (review_repo / "src" / "lib.py").read_text() == "x = 1\n"
     a = Ariadne(review_repo)
+    kept = [p for p in a.state_dir.glob("runs/*/followup-undone-*") if p.is_dir()]
+    assert len(kept) == 1  # the manual undo keeps the exact files too
+    assert (kept[0] / "files" / "src" / "lib.py").read_bytes() == b"x = 'made it worse'\n"
     assert "ACCEPTED" in claude_code.stop_hook(payload, ari=a)["systemMessage"]
     a.close()
 
@@ -434,6 +437,15 @@ def test_undone_follow_up_work_is_kept_as_a_patch_and_its_resolutions_reopen(rev
     assert report.decision.disposition.value == "ACCEPTED"
     kept = list((a.state_dir / "runs" / report.run_id).glob("followup-undone-*.diff"))
     assert len(kept) == 1 and "handles empty input" in kept[0].read_text()  # the work is recoverable
+    from daedalus.repository.candidate import file_sha256
+
+    files = kept[0].with_suffix("") / "files"  # and byte-exact, each file proven by its hash
+    undone = next(c["manifest"] for c in a.state(report.run_id).candidates.values()
+                  if c["manifest"]["files"].get("src/lib.py") is not None)
+    assert (files / "src" / "lib.py").read_bytes() == b"x = 1  # handles empty input\n"
+    for rel, digest in undone["files"].items():
+        if digest is not None:
+            assert file_sha256(files / rel) == digest
     f1 = a.state(report.run_id).findings["F1"]
     assert f1.resolved_by is None  # its fix was undone, so the finding is open again
     assert any(str(kept[0].name) in n for n in report.notes)
@@ -481,3 +493,155 @@ def test_a_failed_restore_command_exits_non_zero(review_repo, monkeypatch):
     monkeypatch.setattr(snap, "restore", lambda *x, **k: False)
     assert cli.main(["-C", str(review_repo), "restore"]) == 2
     assert (review_repo / "app.txt").read_text() == "ok later\n"
+
+
+def test_a_rollback_that_cannot_put_paths_back_names_them(review_repo, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from daedalus.repository.candidate import capture, git_head
+
+    base = git_head(review_repo)
+    run_dir = tmp_path / "run"
+    fix(review_repo)
+    (review_repo / "src" / "lib.py").write_text("x = 2\n")
+    c1 = capture(review_repo, base)
+    assert snapshot.save(review_repo, run_dir, c1.candidate_id, c1.manifest)
+    (review_repo / "app.txt").write_text("ok later\n")
+    (review_repo / "src" / "lib.py").write_text("x = 3\n")
+    c2 = capture(review_repo, base)
+    real, writes = Path.write_bytes, {"app.txt": 0}
+
+    def flaky(self, data):
+        if self.name == "lib.py":
+            raise OSError("disk full")  # the restore fails here, after app.txt was rewritten
+        if self.name == "app.txt":
+            writes["app.txt"] += 1
+            if writes["app.txt"] > 1:
+                raise OSError("disk full")  # and app.txt cannot be put back
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", flaky)
+    with pytest.raises(snapshot.PartialRestore) as exc:
+        snapshot.restore(review_repo, run_dir, c1.candidate_id, c1.manifest, c2.manifest)
+    assert exc.value.paths == ["app.txt", "src/lib.py"]
+
+
+def test_a_partly_rewritten_tree_is_reported_with_its_paths(review_repo, monkeypatch):
+    from daedalus.core.errors import DaedalusError
+    from daedalus.orchestration.lifecycle import restore_followup
+
+    a = Ariadne(review_repo)
+    rid = a.start({"objective": "o"}, actor=HUMAN)
+    fix(review_repo)
+    cand = a.record_candidate(rid, actor=HUMAN)
+    snapshot.save(review_repo, a.state_dir / "runs" / rid, cand.candidate_id, cand.manifest)
+    a.request_followup(rid, [], cand.candidate_id)
+    (review_repo / "app.txt").write_text("ok later\n")
+
+    def partial(*_a, **_k):
+        raise snapshot.PartialRestore(["app.txt"])
+
+    monkeypatch.setattr(snapshot, "restore", partial)
+    with pytest.raises(DaedalusError) as exc:
+        restore_followup(a, rid)
+    msg = str(exc.value)
+    assert "the working tree may be partly rewritten: app.txt" in msg and "left as it was" not in msg
+    kept = next(p for p in (a.state_dir / "runs" / rid).glob("followup-undone-*") if p.is_dir())
+    assert (kept / "files" / "app.txt").read_bytes() == b"ok later\n"
+    a.close()
+
+
+def test_a_huge_base_file_makes_the_review_full_without_reading_it(tmp_path, clock, monkeypatch):
+    from conftest import git
+    from daedalus.repository.candidate import MAX_DIFF_BYTES
+
+    root = make_repo(tmp_path / "r", {"mode": "review"})
+    small = b"small now\n"
+    # One byte over the whole budget together with the new side, which is all a stat-only count sees.
+    (root / "big.txt").write_bytes(b"y" * (2 * MAX_DIFF_BYTES - len(small) + 1))
+    git(root, "add", "big.txt")
+    git(root, "commit", "-qm", "a big file")
+    a = Ariadne(root, clock=clock)
+    rid = a.start({"objective": "o"}, actor=HUMAN)
+    fix(root)
+    a.verify(rid)
+    rev = reviewer(CLEAN, CLEAN)
+    launch_review(a, rid, "aristotle", rev)
+    (root / "big.txt").write_bytes(small)  # the base side is the huge one
+    monkeypatch.setattr(snapshot, "_base_text", lambda *_: pytest.fail("the base file was read"))
+    state = a.state(rid)
+    old = state.reviews[0].candidate_id
+    with pytest.raises(snapshot.NoDelta, match="too large"):
+        snapshot.inter_diff(root, a.state_dir / "runs" / rid, old, state.candidates[old]["manifest"],
+                            a.capture(state).manifest)
+    launch_review(a, rid, "aristotle", rev)
+    assert [r.scope for r in a.state(rid).reviews] == ["full", "full"]
+    a.close()
+
+
+def test_a_rollback_puts_back_modes_and_only_what_it_touched(review_repo, tmp_path, monkeypatch):
+    import stat
+    from pathlib import Path
+
+    from daedalus.repository.candidate import capture, git_head
+
+    base = git_head(review_repo)
+    run_dir = tmp_path / "run"
+    fix(review_repo)
+    (review_repo / "src" / "lib.py").write_text("x = 2\n")
+    c1 = capture(review_repo, base)
+    assert snapshot.save(review_repo, run_dir, c1.candidate_id, c1.manifest)
+    (review_repo / "app.txt").write_text("later\n")
+    (review_repo / "app.txt").chmod(0o755)
+    (review_repo / "src" / "lib.py").write_text("x = 3\n")
+    (review_repo / "zz.txt").write_text("added later\n")  # after the failing path: never touched
+    c2 = capture(review_repo, base)
+    real, seen = Path.write_bytes, []
+
+    def flaky(self, data):
+        seen.append(self.name)
+        if self.name == "lib.py" and seen.count("lib.py") == 1:
+            raise OSError("disk full")  # the restore fails here; the rollback can write it
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", flaky)
+    assert not snapshot.restore(review_repo, run_dir, c1.candidate_id, c1.manifest, c2.manifest)
+    assert (review_repo / "app.txt").read_text() == "later\n"
+    assert stat.S_IMODE((review_repo / "app.txt").stat().st_mode) == 0o755  # the mode is put back too
+    assert (review_repo / "zz.txt").read_text() == "added later\n" and "zz.txt" not in seen
+    assert capture(review_repo, base).candidate_id == c2.candidate_id
+
+
+def test_a_restore_over_a_symlink_is_refused_before_writing(review_repo, tmp_path):
+    from daedalus.repository.candidate import capture, git_head
+
+    base = git_head(review_repo)
+    run_dir = tmp_path / "run"
+    fix(review_repo)
+    c1 = capture(review_repo, base)
+    assert snapshot.save(review_repo, run_dir, c1.candidate_id, c1.manifest)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not ours\n")
+    (review_repo / "src" / "lib.py").write_text("x = 3\n")
+    (review_repo / "app.txt").unlink()
+    (review_repo / "app.txt").symlink_to(outside)
+    c2 = capture(review_repo, base)
+    assert not snapshot.restore(review_repo, run_dir, c1.candidate_id, c1.manifest, c2.manifest)
+    assert outside.read_text() == "not ours\n" and (review_repo / "app.txt").is_symlink()
+    assert (review_repo / "src" / "lib.py").read_text() == "x = 3\n"  # nothing was written
+
+
+def test_a_failed_copy_leaves_no_partial_files_and_a_copy_can_be_redone(review_repo, tmp_path):
+    from daedalus.repository.candidate import capture, git_head
+
+    base = git_head(review_repo)
+    fix(review_repo)
+    (review_repo / "src" / "lib.py").write_text("x = 2\n")
+    (review_repo / "app.txt").chmod(0o444)  # a read-only source is copied read-only
+    c1 = capture(review_repo, base)
+    dest = tmp_path / "kept"
+    assert snapshot.copy_files(review_repo, dest, c1.manifest)
+    assert snapshot.copy_files(review_repo, dest, c1.manifest)  # and can be copied again over it
+    (review_repo / "src" / "lib.py").write_text("changed since the capture\n")
+    assert not snapshot.copy_files(review_repo, dest, c1.manifest)
+    assert not (dest / "files").exists()  # no partial copy is left behind

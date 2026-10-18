@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import difflib
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,26 @@ def save(root: Path, run_dir: Path, candidate_id: str, manifest: dict[str, Any])
     dest = snapshot_dir(run_dir, candidate_id)
     if (dest / ".complete").exists():
         return True
+    if not copy_files(root, dest, manifest):
+        return False
+    try:
+        (dest / ".complete").write_text("", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def copy_files(root: Path, dest: Path, manifest: dict[str, Any]) -> bool:
+    """Copy the manifest's changed files (as they are now) under `dest/files`. True only when
+    every plain file was copied and the copy matches its recorded hash; otherwise the partial
+    `files` directory is removed."""
+    if _copy_files(root, dest, manifest):
+        return True
+    shutil.rmtree(dest / "files", ignore_errors=True)
+    return False
+
+
+def _copy_files(root: Path, dest: Path, manifest: dict[str, Any]) -> bool:
     try:
         for rel, digest in manifest.get("files", {}).items():
             if digest is None:
@@ -49,19 +70,29 @@ def save(root: Path, run_dir: Path, candidate_id: str, manifest: dict[str, Any])
                 return False  # a symlink, submodule or unreadable entry cannot be proven later
             target = dest / "files" / rel
             target.parent.mkdir(parents=True, exist_ok=True)
+            target.unlink(missing_ok=True)  # an earlier copy may be read-only
             shutil.copy2(root / rel, target)  # keeps the mode (an executable stays executable)
             if file_sha256(target) != digest:
                 return False  # changed between capture and copy
         dest.mkdir(parents=True, exist_ok=True)
-        (dest / ".complete").write_text("", encoding="utf-8")
         return True
     except OSError:
         return False
 
 
+class PartialRestore(Exception):
+    """A restore failed mid-way and its rollback could not put these paths back either."""
+
+    def __init__(self, paths: list[str]):
+        super().__init__(", ".join(paths))
+        self.paths = paths
+
+
 def restore(root: Path, run_dir: Path, candidate_id: str, manifest: dict[str, Any], current: dict[str, Any]) -> bool:
     """Put the working tree back to a snapshotted candidate: its changed files from the
-    snapshot, everything else as on the base. True when every path could be restored."""
+    snapshot, everything else as on the base. True when every path could be restored; False
+    when nothing was written or a failed write was fully rolled back. Raises PartialRestore,
+    naming the paths, when the rollback could not put some of them back."""
     if not (snapshot_dir(run_dir, candidate_id) / ".complete").exists():
         return False
     base = manifest.get("base_revision")
@@ -96,13 +127,24 @@ def restore(root: Path, run_dir: Path, candidate_id: str, manifest: dict[str, An
             tree = subprocess.run(["git", "-C", str(root), "ls-tree", base, "--", rel],
                                   capture_output=True, text=True, check=False).stdout.split()
             modes[rel] = 0o755 if tree and tree[0] == "100755" else 0o644
-    backup: dict[str, bytes | None] = {}
+    # A symlink is refused before anything is written: writing through it would change its target.
+    if any((root / rel).is_symlink() for rel in plan):
+        return False
+    backup: dict[str, tuple[bytes, int] | None] = {}  # the content and mode each path had, or absent
+    other: set[str] = set()  # present but not a regular file (a directory): the write fails on it
+    written: set[str] = set()  # paths the write loop has modified, or tried to
     try:
         for rel in plan:
             p = root / rel
-            backup[rel] = p.read_bytes() if p.is_file() else None
+            if p.is_file():
+                backup[rel] = (p.read_bytes(), stat.S_IMODE(p.stat().st_mode))
+            elif p.exists():
+                other.add(rel)
+            else:
+                backup[rel] = None
         for rel, data in plan.items():
             p = root / rel
+            written.add(rel)
             if data is None:
                 p.unlink(missing_ok=True)
             else:
@@ -111,15 +153,24 @@ def restore(root: Path, run_dir: Path, candidate_id: str, manifest: dict[str, An
                 if rel in modes:
                     p.chmod(modes[rel])
     except OSError:
-        for rel, data in backup.items():  # put the tree back the way it was
+        lost: list[str] = []
+        for rel in written:  # put back, content and mode, only what the restore touched
+            p = root / rel
+            if rel in other:
+                if not p.exists():
+                    lost.append(rel)
+                continue
             try:
-                p = root / rel
-                if data is None:
+                kept = backup[rel]
+                if kept is None:
                     p.unlink(missing_ok=True)
                 else:
-                    p.write_bytes(data)
+                    p.write_bytes(kept[0])
+                    p.chmod(kept[1])
             except OSError:
-                pass
+                lost.append(rel)
+        if lost:
+            raise PartialRestore(sorted(lost))
         return False
     return True
 
@@ -164,9 +215,23 @@ def _side(root: Path, run_dir: Path, old_id: str, base: str | None, rel: str, h:
     return text.splitlines(keepends=True)
 
 
-def _side_size(root: Path, run_dir: Path, old_id: str, rel: str, a_hash: Any, b_hash: Any) -> int:
-    """Bytes on both sides of a file's diff, from stat alone: a huge file is refused before it is read."""
-    total = 0
+def _base_size(root: Path, base: str | None, rel: str) -> int:
+    if not base:
+        return 0
+    r = subprocess.run(["git", "-C", str(root), "cat-file", "-s", f"{base}:{rel}"],
+                       capture_output=True, text=True, check=False)
+    try:
+        return int(r.stdout.strip()) if r.returncode == 0 else 0
+    except ValueError:
+        return 0
+
+
+def _side_size(
+    root: Path, run_dir: Path, old_id: str, base: str | None, rel: str, a_hash: Any, b_hash: Any
+) -> int:
+    """Bytes on both sides of a file's diff, from stat or the base blob's size alone: a huge
+    file is refused before it is read."""
+    total = sum(_base_size(root, base, rel) for h in (a_hash, b_hash) if h == "base")
     for p, h in ((snapshot_dir(run_dir, old_id) / "files" / rel, a_hash), (root / rel, b_hash)):
         if _plain(h):
             try:
@@ -199,7 +264,7 @@ def inter_diff(
             continue
         touched.append(rel)
 
-        if size + _side_size(root, run_dir, old_id, rel, a_hash, b_hash) > 2 * MAX_DIFF_BYTES:
+        if size + _side_size(root, run_dir, old_id, base, rel, a_hash, b_hash) > 2 * MAX_DIFF_BYTES:
             raise NoDelta("the change since the last review is too large for a delta review")
         chunk = list(difflib.unified_diff(
             _side(root, run_dir, old_id, base, rel, a_hash, reviewed=True),
