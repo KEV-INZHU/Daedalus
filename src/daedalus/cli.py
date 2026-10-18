@@ -1041,14 +1041,20 @@ def add_factory_parser(sub: Any) -> None:
 # -------------------------------------------------------------------- parser
 class _Parser(argparse.ArgumentParser):
     """argparse swallows OSError while printing `--help`, so a closed pipe would exit 0
-    with the output silently lost; let BrokenPipeError reach main() instead."""
+    with the output silently lost; let a BrokenPipeError on stdout reach main() instead.
+    Errors on other streams (a usage message to a closed stderr) stay swallowed so the
+    usage-error status is kept. This overrides a private hook; tests/unit/test_cli_pipe.py pins it."""
 
     def _print_message(self, message: str, file: Any = None) -> None:
         if message:
+            file = file or sys.stderr
             try:
-                (file or sys.stderr).write(message)
+                file.write(message)
             except BrokenPipeError:
-                raise
+                if file is sys.stdout:
+                    global _stdout_failed
+                    _stdout_failed = True
+                    raise
             except (AttributeError, OSError):
                 pass
 
@@ -1186,30 +1192,88 @@ def utf8_output() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _stdout_failed
+    _stdout_failed = False
     utf8_output()
     try:
         try:
             args = build_parser().parse_args(argv)
-        except SystemExit:
-            sys.stdout.flush()  # `--help` and `--version` exit with their output still buffered
+        except SystemExit as exc:
+            # `--help` and `--version` exit with their output still buffered; a usage
+            # error keeps its own status even when stdout has gone away.
+            if _flush_stdout() and not exc.code:
+                return 128 + SIGPIPE
             raise
         code = int(args.fn(args) or 0)
-        # Flush here so a reader that closed early surfaces in the handler below,
-        # not as an "Exception ignored" message at interpreter shutdown.
-        sys.stdout.flush()
-        return code
     except DaedalusError as exc:
-        print(f"daedalus: {exc}", file=sys.stderr)
-        return 2
+        _warn(f"daedalus: {exc}")
+        code = 2
     except KeyboardInterrupt:
-        print("daedalus: interrupted", file=sys.stderr)
-        return 130
+        _warn("daedalus: interrupted")
+        code = 130
     except BrokenPipeError:
+        if not _stdout_broken():
+            raise  # some other pipe broke; that is a real failure
         _silence_stdout()
         return 128 + SIGPIPE
+    # Flush on every exit path so a reader that closed early surfaces here,
+    # not as an "Exception ignored" message at interpreter shutdown.
+    if _flush_stdout() and code == 0:
+        return 128 + SIGPIPE
+    return code
 
 
+_stdout_failed = False  # set by _Parser._print_message when a write to stdout breaks
 SIGPIPE = 13  # signal.SIGPIPE on POSIX; Windows lacks the constant but the convention holds.
+
+
+def _flush_stdout() -> bool:
+    """Flush stdout; if its reader has gone away, silence it and return True."""
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _silence_stdout()
+        return True
+    return False
+
+
+def _stdout_broken() -> bool:
+    """Whether stdout's reader has gone away, as opposed to some other pipe breaking."""
+    if _stdout_failed:
+        return True  # _Parser._print_message saw the write to stdout fail
+    try:
+        sys.stdout.flush()  # output that failed to reach the reader stays buffered
+    except BrokenPipeError:
+        return True
+    except (OSError, ValueError, AttributeError):
+        return False
+    try:
+        fd = sys.stdout.fileno()
+    except (OSError, ValueError, AttributeError):
+        return False  # no descriptor, so the pipe that broke was not stdout
+    import select
+
+    if not hasattr(select, "poll"):
+        # Windows has no poll() for pipes. Keep the old behaviour and treat the error as a
+        # closed reader: the flush above already catches the usual case, and a traceback
+        # for `daedalus ... | more` is the worse mistake there.
+        return True
+    try:
+        poller = select.poll()
+        poller.register(fd, select.POLLOUT)
+        events = poller.poll(0)
+    except (OSError, ValueError):
+        return False
+    # A pipe whose readers have all closed reports POLLERR on Linux and POLLHUP on macOS/BSD.
+    return any(mask & (select.POLLERR | select.POLLHUP) for _, mask in events)
+
+
+def _warn(message: str) -> None:
+    """Report on stderr; a closed stderr must not cost the exit status or the stdout flush."""
+    try:
+        print(message, file=sys.stderr)
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 def _silence_stdout() -> None:
