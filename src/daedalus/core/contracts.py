@@ -279,3 +279,20 @@ def amend_contract(
 
 def removed_hard_constraints(old: TaskContract, new: TaskContract) -> list[str]:
     return [c for c in old.hard_constraints if c not in new.hard_constraints]
+
+
+def bind_text_criteria(spec: dict[str, Any], policy: Policy) -> dict[str, Any]:
+    """Text criteria become criteria proved by the run's required checks.
+
+    A bare string criterion otherwise needs a human attestation, which no automated flow
+    can give. Front ends that collect criteria as text (`daedalus start -c`, factory orders)
+    bind them; a criterion that genuinely needs a person is written as a mapping with
+    `checks: []` (or passed with `--attest`)."""
+    crits = spec.get("acceptance_criteria")
+    if not isinstance(crits, list) or not any(isinstance(c, str) for c in crits):
+        return spec
+    requested = [str(c) for c in spec.get("required_checks") or []]
+    checks = list(dict.fromkeys(policy.mandatory_checks() + tuple(requested)))
+    out = dict(spec)
+    out["acceptance_criteria"] = [{"description": c, "checks": checks} if isinstance(c, str) else c for c in crits]
+    return out

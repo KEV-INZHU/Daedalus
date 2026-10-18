@@ -98,6 +98,12 @@ class Adapter(ABC):
         """Report a session's outcome after a restart; None when unknowable."""
         return None
 
+    def expected_cost_basis(self) -> str | None:
+        """How a session launched now will most likely be billed (`cash` or `api_equivalent`),
+        or None when the adapter cannot tell before launching. Used to refuse a billed
+        launch that the cash budget cannot cover, instead of paying and then rejecting."""
+        return None
+
 
 def require(capabilities: Capabilities, needs: dict[str, Any], allowed_degradations: frozenset[str]) -> None:
     """Fail closed when the adapter cannot guarantee what the run needs."""

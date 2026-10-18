@@ -329,8 +329,11 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
             reasons.append(
                 Reason(
                     f"review:{p}",
-                    f"{why} requires {kind} {p} review of candidate {cid[:12]}. Run `daedalus review {p}`.",
-                    AGENT,
+                    f"{why} requires {kind} {p} review of candidate {cid[:12]}. With a launching adapter "
+                    "(`adapter:` in .daedalus.yml), Daedalus launches it once the checks pass (`daedalus "
+                    f"verify`, or when the agent stops); otherwise `daedalus review {p}`. The author never "
+                    "reviews its own work.",
+                    SYSTEM,
                 )
             )
 

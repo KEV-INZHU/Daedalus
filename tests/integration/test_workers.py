@@ -144,3 +144,13 @@ def test_concurrency_limit_is_enforced(ari):
     with pytest.raises(DaedalusError, match="concurrency limit"):
         ari.dispatch(rid, "b")
     ari.worker_finished(rid, "a", status="FAILED")  # releases a's workspace
+
+
+def test_a_task_id_cannot_be_planned_twice(ari):
+    rid = ari.start({"objective": "o"}, actor=HUMAN)
+    ari.plan(rid, [{"task_id": "t1", "owned_paths": ["src/a/**"]}], actor=HUMAN)
+    ari.dispatch(rid, "t1")
+    ari.worker_finished(rid, "t1", status="FAILED", note="crashed")
+    with pytest.raises(IntegrationError, match="already used"):
+        ari.plan(rid, [{"task_id": "t1", "owned_paths": ["src/b/**"]}], actor=HUMAN)
+    assert ari.state(rid).workers["t1"].state is WorkerState.FAILED  # the recorded outcome survives
