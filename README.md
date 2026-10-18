@@ -32,7 +32,11 @@ gate, with nothing to remember:
    reasons. Anything only you can decide (an approval, a sign-off, a budget) is put to you. When the
    predicate holds, the run is recorded **ACCEPTED**.
 4. **You commit.** A commit that is exactly the accepted work gets `Daedalus-Run` trailers, so the
-   log and the PR show what passed the gate.
+   log and the PR show what passed the gate. When you push, a `pre-push` hook lists outgoing commits
+   without a trailer (merge commits and commits the remote already has are skipped). By default it
+   only warns; `harness: {require_provenance_on_push: true}` in `.daedalus.yml` makes it refuse the
+   push (a failure of the check itself never does). It is silent with the gate off. Like the commit
+   hook, it never replaces a hook you already have.
 
 Without Claude Code, the same loop is three commands: `daedalus start "goal"`, then work, then
 `daedalus verify` (runs the checks and launches the required reviews). `daedalus status` always says
