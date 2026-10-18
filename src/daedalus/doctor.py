@@ -8,9 +8,12 @@ reads: no config is loaded through anything that writes state, git is asked with
 from __future__ import annotations
 
 import json
+import math
+import os
+import shlex
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from daedalus.core.config import CONFIG_FILE, RepoConfig, load_config
@@ -36,11 +39,47 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
         return None
 
 
-def _committed(root: Path, path: str) -> bool:
-    """Tracked, and identical to HEAD in the index and the working tree."""
+NO_GIT = "git is not on PATH"
+NO_REPO = "not a git repository"
+INIT_FIX = "run `git init`, then `daedalus install claude-code`"
+
+
+NOT_COMMITTED = "not committed"
+
+
+def _repo(root: Path) -> str:
+    """"" inside a work tree; otherwise why not: NO_GIT, NO_REPO or git's own error."""
+    inside = _git(root, "rev-parse", "--is-inside-work-tree")
+    if inside is None:
+        return NO_GIT
+    if inside.returncode == 0:
+        return "" if inside.stdout.strip() == "true" else NO_REPO
+    err = inside.stderr.strip()
+    if not err or NO_REPO in err:
+        return NO_REPO
+    return f"git failed: {err.splitlines()[0]}"
+
+
+def _committed(root: Path, path: str) -> str:
+    """"" when tracked and identical to HEAD in the index and the working tree; otherwise
+    why not: whatever `_repo` reports, or NOT_COMMITTED."""
+    why = _repo(root)
+    if why:
+        return why
     tracked = _git(root, "ls-files", "--error-unmatch", "--", path)
     status = _git(root, "status", "--porcelain", "--", path)
-    return bool(tracked and status and tracked.returncode == 0 and status.returncode == 0 and not status.stdout.strip())
+    ok = tracked and status and tracked.returncode == 0 and status.returncode == 0 and not status.stdout.strip()
+    return "" if ok else NOT_COMMITTED
+
+
+def _not_committed(name: str, why: str, detail: str, fix: str) -> Finding:
+    if why == NO_GIT:
+        return Finding(name, False, NO_GIT, "install git")
+    if why == NO_REPO:
+        return Finding(name, False, NO_REPO, INIT_FIX)
+    if why != NOT_COMMITTED:
+        return Finding(name, False, why, "fix the git error, then run `daedalus doctor` again")
+    return Finding(name, False, detail, fix)
 
 
 def _config(root: Path) -> tuple[Finding, RepoConfig | None]:
@@ -51,9 +90,10 @@ def _config(root: Path) -> tuple[Finding, RepoConfig | None]:
         cfg = load_config(root)
     except DaedalusError as exc:
         return Finding(name, False, f"invalid: {exc}", f"correct {CONFIG_FILE} (see `daedalus policy --default`)"), None
-    if not _committed(root, CONFIG_FILE):
-        return Finding(name, False, "valid but not committed",
-                       f"git add {CONFIG_FILE} && git commit -m 'Configure Daedalus'"), cfg
+    why = _committed(root, CONFIG_FILE)
+    if why:
+        return _not_committed(name, why, "valid but not committed",
+                              f"git add {CONFIG_FILE} && git commit -m 'Configure Daedalus'"), cfg
     return Finding(name, True, "valid and committed"), cfg
 
 
@@ -83,14 +123,19 @@ def _claude_hooks(root: Path) -> Finding:
                        f"repair {CLAUDE_SETTINGS}, then run `daedalus install claude-code`")
     hooks = settings.get("hooks") if isinstance(settings, dict) else None
     hooks = hooks if isinstance(hooks, dict) else {}
+
+    def lst(v: object) -> list:
+        return v if isinstance(v, list) else []
+
     missing = [ev for ev in HOOK_EVENTS
-               if not any(isinstance(h, dict) and _ours(h)
-                          for g in hooks.get(ev) or [] if isinstance(g, dict) for h in g.get("hooks") or [])]
+               if not any(isinstance(h, dict) and isinstance(h.get("command"), str) and _ours(h)
+                          for g in lst(hooks.get(ev)) if isinstance(g, dict) for h in lst(g.get("hooks")))]
     if missing:
         return Finding(name, False, f"missing hooks: {', '.join(missing)}", fix)
-    if not _committed(root, CLAUDE_SETTINGS):
-        return Finding(name, False, f"{CLAUDE_SETTINGS} is not committed",
-                       "git add .claude/ && git commit -m 'Install Daedalus hooks'")
+    why = _committed(root, CLAUDE_SETTINGS)
+    if why:
+        return _not_committed(name, why, f"{CLAUDE_SETTINGS} is not committed",
+                              "git add .claude/ && git commit -m 'Install Daedalus hooks'")
     return Finding(name, True, ", ".join(HOOK_EVENTS))
 
 
@@ -99,19 +144,28 @@ def _git_hooks(root: Path) -> Finding:
 
     name = "git hooks installed"
     fix = "run `daedalus install claude-code`"
-    missing = []
+    missing: list[str] = []
+    not_exec: list[Path] = []
     for hook, mark, _script, _hint in GIT_HOOKS:
-        p = hook_path(root, hook)
+        try:
+            p = hook_path(root, hook)
+        except FileNotFoundError:
+            return Finding(name, False, NO_GIT, "install git")
         if p is None:
-            return Finding(name, False, "not a git repository", "run `git init`, then `daedalus install claude-code`")
+            return Finding(name, False, NO_REPO, INIT_FIX)
         try:
             ours = mark in p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             ours = False
         if not ours:
             missing.append(hook)
+        elif os.name == "posix" and not os.access(p, os.X_OK):
+            not_exec.append(p)
     if missing:
         return Finding(name, False, f"missing: {', '.join(missing)}", fix)
+    if not_exec:
+        return Finding(name, False, f"not executable, so git skips them: {', '.join(p.name for p in not_exec)}",
+                       shlex.join(["chmod", "+x", *map(str, not_exec)]))
     return Finding(name, True, ", ".join(h for h, *_ in GIT_HOOKS))
 
 
@@ -153,16 +207,28 @@ def _cash(cfg: RepoConfig, adapter: object) -> Finding | None:
     if expected is None or expected() != "cash":
         return None
     name = "cash budget for billed reviews"
-    max_cash = float((cfg.policy.default_budget or {}).get("max_cash", 0) or 0)
+    fix = f"set `max_cash` to a positive amount in {CONFIG_FILE}, e.g. `policy: {{default_budget: {{max_cash: 5}}}}`"
+    try:
+        max_cash = float((cfg.policy.default_budget or {}).get("max_cash", 0) or 0)
+    except (TypeError, ValueError):
+        return Finding(name, False, "max_cash is not a number", fix)
+    if not max_cash < math.inf:  # NaN fails this too; every run rejects a cap that is not finite
+        return Finding(name, False, "max_cash is not a finite amount, so every run rejects it", fix)
+    if max_cash < 0:
+        return Finding(name, False, f"max_cash is negative ({max_cash:g}), so every run rejects it", fix)
     if not max_cash > 0:
         return Finding(name, False, "reviews would be billed in cash and max_cash is 0, so every review is refused",
-                       f"set `policy: {{default_budget: {{max_cash: 5}}}}` in {CONFIG_FILE}")
+                       fix)
     return Finding(name, True, f"max_cash {max_cash:.2f}")
 
 
 def diagnose(root: Path) -> list[Finding]:
     config, cfg = _config(root)
     found = [config, _mandatory(cfg), _claude_hooks(root), _git_hooks(root), _on_path()]
+    repo = _repo(root)
+    if repo in (NO_GIT, NO_REPO):  # a fix that ends in a commit needs a repository first
+        first = "install git" if repo == NO_GIT else "run `git init`"
+        found = [replace(f, fix=f"{first}, then {f.fix}") if not f.ok and "commit" in f.fix else f for f in found]
     adapter_findings, adapter = _adapter(cfg)
     found += adapter_findings
     if cfg is not None and adapter is not None:
@@ -175,7 +241,8 @@ def diagnose(root: Path) -> list[Finding]:
 def render(findings: list[Finding]) -> list[str]:
     lines = []
     for f in findings:
-        lines.append(f"{'ok  ' if f.ok else 'FAIL'}  {f.name}: {f.detail}")
+        detail = " ".join(f.detail.split())  # parser errors span lines; keep one line per finding
+        lines.append(f"{'ok  ' if f.ok else 'FAIL'}  {f.name}: {detail}")
         if not f.ok:
             lines.append(f"      fix: {f.fix}")
     bad = sum(not f.ok for f in findings)

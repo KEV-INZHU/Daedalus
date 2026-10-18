@@ -159,32 +159,170 @@ def _cash_without_budget(root, bindir, mp):
     mp.setenv("ANTHROPIC_API_KEY", "sk-test")
 
 
+def _cash_not_a_number(root, bindir, mp):
+    mp.setenv("ANTHROPIC_API_KEY", "sk-test")
+    edit_config(root, policy={"default_budget": {"max_cash": "lots"}})
+
+
+def _cash_infinite(root, bindir, mp):
+    mp.setenv("ANTHROPIC_API_KEY", "sk-test")
+    edit_config(root, policy={"default_budget": {"max_cash": float("inf")}})
+
+
+def _write_settings(root, text):
+    (root / ".claude" / "settings.json").write_text(text, encoding="utf-8")
+    git(root, "commit", "-qam", "edit settings")
+
+
+def _hook_event_not_a_list(root, bindir, mp):
+    _write_settings(root, json.dumps({"hooks": {ev: 5 for ev in ("Stop", "SessionStart")}}))
+
+
+def _hook_group_hooks_not_a_list(root, bindir, mp):
+    _write_settings(root, json.dumps({"hooks": {"Stop": [{"hooks": 3}], "SessionStart": [{"hooks": True}]}}))
+
+
+def _hook_command_not_a_string(root, bindir, mp):
+    group = [{"hooks": [{"type": "command", "command": 5}]}]
+    _write_settings(root, json.dumps({"hooks": {"Stop": group, "SessionStart": group}}))
+
+
+def _cash_negative(root, bindir, mp):
+    mp.setenv("ANTHROPIC_API_KEY", "sk-test")
+    edit_config(root, policy={"default_budget": {"max_cash": -3}})
+
+
+def _settings_not_json(root, bindir, mp):
+    _write_settings(root, "{not json")
+
+
+def _no_git(root, bindir, mp):
+    mp.setenv("PATH", str(bindir))
+
+
+def _git_hook_not_executable(root, bindir, mp):
+    provenance.hook_path(root, "pre-push").chmod(0o644)
+
+
+def _unknown_adapter(root, bindir, mp):
+    edit_config(root, adapter="nope")
+
+
+def _yaml_does_not_parse(root, bindir, mp):
+    (root / ".daedalus.yml").write_text("checks: [unclosed\n  mode: : :\n", encoding="utf-8")
+    git(root, "commit", "-qam", "break yaml")
+
+
+CONFIG = ".daedalus.yml committed and valid"
+CLAUDE = "Claude Code hooks installed and committed"
+GIT_HOOKS = "git hooks installed"
+ADAPTER = "launching adapter for reviews"
+CASH = "cash budget for billed reviews"
+
+# problem: (breaker, failing check, text in its detail, text in its fix)
 PROBLEMS = {
-    "no config": (_no_config, ".daedalus.yml committed and valid", "daedalus init"),
-    "invalid config": (_invalid_config, ".daedalus.yml committed and valid", ".daedalus.yml"),
-    "uncommitted config": (_uncommitted_config, ".daedalus.yml committed and valid", "git add .daedalus.yml"),
-    "no mandatory check": (_no_mandatory_check, "a mandatory check", "checks:"),
-    "no claude hooks": (_no_claude_hooks, "Claude Code hooks installed and committed", "daedalus install claude-code"),
-    "claude hook missing": (_claude_hooks_incomplete, "Claude Code hooks installed and committed",
-                            "daedalus install claude-code"),
-    "claude hooks uncommitted": (_claude_hooks_uncommitted, "Claude Code hooks installed and committed", "git add .claude/"),
-    "no git hook": (_no_git_hook, "git hooks installed", "daedalus install claude-code"),
-    "daedalus not on PATH": (_no_daedalus_on_path, "daedalus on PATH", "pip install"),
-    "adapter cannot launch": (_inline_adapter, "launching adapter for reviews", "adapter: claude-code"),
-    "adapter not installed": (_adapter_unavailable, "launching adapter for reviews", "claude"),
-    "cash with no budget": (_cash_without_budget, "cash budget for billed reviews", "max_cash"),
+    "no config": (_no_config, CONFIG, "no .daedalus.yml", "run `daedalus init`, then commit"),
+    "invalid config": (_invalid_config, CONFIG, "invalid:", "see `daedalus policy --default`"),
+    "uncommitted config": (_uncommitted_config, CONFIG, "valid but not committed", "git add .daedalus.yml && git commit"),
+    "no mandatory check": (_no_mandatory_check, "a mandatory check", "no mandatory check",
+                           "add one under `checks:`"),
+    "no claude hooks": (_no_claude_hooks, CLAUDE, "no .claude/settings.json", "run `daedalus install claude-code`"),
+    "claude hook missing": (_claude_hooks_incomplete, CLAUDE, "missing hooks: Stop",
+                            "run `daedalus install claude-code`"),
+    "claude hooks uncommitted": (_claude_hooks_uncommitted, CLAUDE, "is not committed", "git add .claude/ && git commit"),
+    "no git hook": (_no_git_hook, GIT_HOOKS, "missing: pre-push", "run `daedalus install claude-code`"),
+    "daedalus not on PATH": (_no_daedalus_on_path, "daedalus on PATH", "find nothing", claude_code.INSTALL_HINT),
+    "adapter cannot launch": (_inline_adapter, ADAPTER, "cannot launch reviewers", "set `adapter: claude-code`"),
+    "adapter not installed": (_adapter_unavailable, ADAPTER, "`claude` is not on PATH", "install `claude`"),
+    "cash with no budget": (_cash_without_budget, CASH, "max_cash is 0", "set `max_cash` to a positive amount"),
+    "cash not a number": (_cash_not_a_number, CASH, "max_cash is not a number", "set `max_cash` to a positive amount"),
+    "cash infinite": (_cash_infinite, CASH, "not a finite amount", "set `max_cash` to a positive amount"),
+    "cash negative": (_cash_negative, CASH, "max_cash is negative (-3)", "set `max_cash` to a positive amount"),
+    "hook command not a string": (_hook_command_not_a_string, CLAUDE, "missing hooks: Stop, SessionStart",
+                                  "run `daedalus install claude-code`"),
+    "hook event not a list": (_hook_event_not_a_list, CLAUDE, "missing hooks: Stop, SessionStart",
+                              "run `daedalus install claude-code`"),
+    "hook group not a list": (_hook_group_hooks_not_a_list, CLAUDE, "missing hooks: Stop, SessionStart",
+                              "run `daedalus install claude-code`"),
+    "settings not json": (_settings_not_json, CLAUDE, "is unreadable", "repair .claude/settings.json"),
+    "no git": (_no_git, GIT_HOOKS, "git is not on PATH", "install git"),
+    "git hook not executable": (_git_hook_not_executable, GIT_HOOKS, "not executable", "chmod +x"),
+    "unknown adapter": (_unknown_adapter, ADAPTER, "invalid adapter", "correct `adapter:` in .daedalus.yml"),
+    "yaml does not parse": (_yaml_does_not_parse, CONFIG, "is not valid YAML", "see `daedalus policy --default`"),
 }
+POSIX_ONLY = {"git hook not executable"}
 
 
 @pytest.mark.parametrize("problem", PROBLEMS)
 def test_each_problem_is_reported_with_a_fix(problem, ready, bindir, capsys, monkeypatch):
-    breaker, name, hint = PROBLEMS[problem]
+    if problem in POSIX_ONLY and os.name != "posix":
+        pytest.skip("executable bits are POSIX only")
+    breaker, name, detail, hint = PROBLEMS[problem]
     breaker(ready, bindir, monkeypatch)
     code, out = doctor(ready, capsys)
     assert code != 0, out
     bad = failed(out)
     assert name in bad, out
+    assert detail in bad[name][0], out
     assert hint in bad[name][1], out
+
+
+def test_outside_a_git_repository_the_fix_is_git_init(tmp_path, bindir, capsys, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    root = tmp_path / "plain"
+    root.mkdir()
+    (root / ".daedalus.yml").write_text(yaml.safe_dump(
+        {"enabled": True, "mode": "gate", "checks": {"tests": {"command": ["true"]}}}), encoding="utf-8")
+    claude_code.install(root)
+    code, out = doctor(root, capsys)
+    assert code == 1, out
+    bad = failed(out)
+    for name in (CONFIG, CLAUDE, GIT_HOOKS):
+        assert bad[name] == ("not a git repository", "run `git init`, then `daedalus install claude-code`"), out
+    assert "git add" not in out
+
+
+def test_a_yaml_parse_error_stays_on_one_line(ready, bindir, capsys, monkeypatch):
+    _yaml_does_not_parse(ready, bindir, monkeypatch)
+    _, out = doctor(ready, capsys)
+    line = next(ln for ln in out.splitlines() if ln.startswith("FAIL") and CONFIG in ln)
+    assert "is not valid YAML" in line and "line" in line, out  # the scanner's position survives collapsing
+    assert out.splitlines()[out.splitlines().index(line) + 1].strip().startswith("fix: "), out
+
+
+def test_without_git_every_git_check_says_install_git(ready, bindir, capsys, monkeypatch):
+    monkeypatch.setenv("PATH", str(bindir))
+    code, out = doctor(ready, capsys)
+    assert code == 1, out
+    bad = failed(out)
+    for name in (CONFIG, CLAUDE, GIT_HOOKS):
+        assert bad[name] == ("git is not on PATH", "install git"), out
+    assert "git add" not in out
+
+
+def test_outside_a_git_repository_commit_fixes_start_with_git_init(tmp_path, bindir, capsys, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    root = tmp_path / "nothing"
+    root.mkdir()
+    code, out = doctor(root, capsys)
+    assert code == 1, out
+    bad = failed(out)
+    assert bad[CONFIG] == ("no .daedalus.yml", "run `git init`, then run `daedalus init`, then commit .daedalus.yml")
+    assert bad[CLAUDE][1].startswith("run `git init`, then run `daedalus install claude-code`"), out
+    assert bad[GIT_HOOKS] == ("not a git repository", "run `git init`, then `daedalus install claude-code`"), out
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the stand-in git is a shell script")
+def test_another_git_error_is_shown_instead_of_not_a_repository(ready, bindir, capsys, monkeypatch):
+    (bindir / "git").write_text("#!/bin/sh\necho 'fatal: index file corrupt' >&2\necho more >&2\nexit 128\n",
+                                encoding="utf-8")
+    (bindir / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    _, out = doctor(ready, capsys)
+    bad = failed(out)
+    for name in (CONFIG, CLAUDE):
+        assert bad[name][0] == "git failed: fatal: index file corrupt", out
+        assert "git init" not in bad[name][1], out
 
 
 def test_an_unset_repository_lists_every_problem(tmp_path, bindir, capsys):
@@ -209,6 +347,21 @@ def test_doctor_changes_nothing(problem, ready, bindir, capsys, monkeypatch):
     before = tree_state(ready)
     doctor(ready, capsys)
     assert tree_state(ready) == before
+
+
+def test_doctor_does_not_refresh_a_stat_stale_index(ready, bindir, capsys):
+    """Touching a tracked file leaves its content alone but makes the index stale on stat:
+    a plain `git status` would rewrite .git/index, and doctor must not."""
+    index = ready / ".git" / "index"
+    old = index.stat().st_mtime - 100
+    os.utime(index, (old, old))
+    for tracked in (ready / ".daedalus.yml", ready / ".claude" / "settings.json", ready / "app.txt"):
+        os.utime(tracked, None)
+    before = tree_state(ready)
+    before_mtime = index.stat().st_mtime_ns
+    doctor(ready, capsys)
+    assert tree_state(ready) == before
+    assert index.stat().st_mtime_ns == before_mtime
 
 
 def test_doctor_creates_nothing_in_an_empty_directory(tmp_path, bindir, capsys):
