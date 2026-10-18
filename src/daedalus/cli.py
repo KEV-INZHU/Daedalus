@@ -1023,8 +1023,22 @@ def add_factory_parser(sub: Any) -> None:
 
 
 # -------------------------------------------------------------------- parser
+class _Parser(argparse.ArgumentParser):
+    """argparse swallows OSError while printing `--help`, so a closed pipe would exit 0
+    with the output silently lost; let BrokenPipeError reach main() instead."""
+
+    def _print_message(self, message: str, file: Any = None) -> None:
+        if message:
+            try:
+                (file or sys.stderr).write(message)
+            except BrokenPipeError:
+                raise
+            except (AttributeError, OSError):
+                pass
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="daedalus", description="Run agent work under a deterministic acceptance gate.")
+    p = _Parser(prog="daedalus", description="Run agent work under a deterministic acceptance gate.")
     p.add_argument("--version", action="version", version=f"daedalus {__version__}")
     p.add_argument("-C", "--dir", default=".", help="repository directory (default: current)")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
@@ -1156,15 +1170,41 @@ def utf8_output() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     utf8_output()
-    args = build_parser().parse_args(argv)
     try:
-        return int(args.fn(args) or 0)
+        try:
+            args = build_parser().parse_args(argv)
+        except SystemExit:
+            sys.stdout.flush()  # `--help` and `--version` exit with their output still buffered
+            raise
+        code = int(args.fn(args) or 0)
+        # Flush here so a reader that closed early surfaces in the handler below,
+        # not as an "Exception ignored" message at interpreter shutdown.
+        sys.stdout.flush()
+        return code
     except DaedalusError as exc:
         print(f"daedalus: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         print("daedalus: interrupted", file=sys.stderr)
         return 130
+    except BrokenPipeError:
+        _silence_stdout()
+        return 128 + SIGPIPE
+
+
+SIGPIPE = 13  # signal.SIGPIPE on POSIX; Windows lacks the constant but the convention holds.
+
+
+def _silence_stdout() -> None:
+    """The reader went away (`daedalus status | head`). Point stdout at devnull so the
+    final flush at exit cannot raise again; see the Python `signal` docs on SIGPIPE."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+    except (OSError, ValueError, AttributeError):
+        # stdout is not backed by a file descriptor (e.g. replaced in tests).
+        pass
 
 
 if __name__ == "__main__":  # pragma: no cover
