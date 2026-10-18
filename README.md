@@ -18,7 +18,14 @@ pip install "git+https://github.com/KEV-INZHU/Daedalus"
 cd your-repo
 daedalus init          # .daedalus.yml (detected test command), Claude Code hooks, git hook
 git add .daedalus.yml .claude .gitignore && git commit -m "Gate this repository with Daedalus"
+daedalus doctor        # checks the setup; each problem comes with a one-line fix
 ```
+
+`daedalus doctor` checks that `.daedalus.yml` is committed and valid with at least one mandatory
+check, the Claude Code hooks and git hooks are installed (and `.claude/settings.json` committed),
+`daedalus` is on PATH where the hooks run, a launching adapter is configured and installed for
+reviews, and, when reviews would be billed in cash, `max_cash` is above zero. It changes nothing
+and exits non-zero when any check fails.
 
 That's all the setup there is. Everyone who opens the repository in Claude Code now works under the
 gate, with nothing to remember:

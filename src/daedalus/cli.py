@@ -733,6 +733,15 @@ def cmd_restore(args: argparse.Namespace) -> int:
         ari.close()
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from daedalus.doctor import diagnose, render
+
+    findings = diagnose(find_root(args.dir))
+    for line in render(findings):
+        _print(line)
+    return 0 if all(f.ok for f in findings) else 1
+
+
 def cmd_statusline(args: argparse.Namespace) -> int:
     from daedalus.harness.claude_code import statusline
 
@@ -1081,6 +1090,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--require-provenance", action="store_true",
                     help="the workflow fails pull requests whose commits were not accepted by the gate")
     sp.add_argument("--force", action="store_true")
+    add("doctor", cmd_doctor, "check this repository is set up for the gate and say how to fix what is not")
     add("on", cmd_toggle, "turn the gate on for this repository")
     add("off", cmd_toggle, "turn the gate off for this repository (human only)", human=True)
 
