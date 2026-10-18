@@ -1,0 +1,8 @@
+# Deferred from run ce56ac76b585 (finding F16).
+objective: >-
+  The GitHub Actions workflow written by `daedalus init --ci` grants its job only read access to the
+  repository: add `permissions: {contents: read}` so the PR's own check commands run with a read-only token.
+acceptance_criteria:
+  - The rendered workflow sets permissions to contents read
+scope: ["src/daedalus/ci.py", "tests/integration/test_ci.py"]
+priority: 5

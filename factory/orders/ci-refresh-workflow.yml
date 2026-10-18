@@ -1,0 +1,9 @@
+# Deferred from run ce56ac76b585 (finding F17).
+objective: >-
+  Let `daedalus init --ci --force` refresh .github/workflows/daedalus.yml without rewriting an existing
+  .daedalus.yml: the config is regenerated only when it is missing or when --force is given without --ci.
+acceptance_criteria:
+  - With an existing .daedalus.yml, `daedalus init --ci --force` rewrites the workflow and leaves the config byte-for-byte unchanged
+  - Without --ci, `daedalus init --force` still regenerates the config
+scope: ["src/daedalus/cli.py", "tests/integration/test_ci.py"]
+priority: 1
