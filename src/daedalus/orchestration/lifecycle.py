@@ -667,13 +667,23 @@ def restore_followup(ari: Ariadne, run_id: str, notify: Notify = _quiet) -> list
         return [f"candidate {cid[:12]} is already in place"]
     run_dir = _run_dir(ari, run_id)
     # Keep what is being undone, outside the snapshots (which are pruned at the end of the run).
+    # The diff is for reading; the files (each hash-checked) are the exact content.
     kept = run_dir / f"followup-undone-{current.short}.diff"
+    files = run_dir / f"followup-undone-{current.short}"
+    if not snapshot.copy_files(ari.root, files, current.manifest):
+        raise DaedalusError("the follow-up's files could not be kept byte-exact, so they were not undone")
     try:
         undone, _ = snapshot.inter_diff(ari.root, run_dir, cid, old, current.manifest)
         kept.write_text(undone, encoding="utf-8")
     except (snapshot.NoDelta, OSError) as exc:
         raise DaedalusError(f"the follow-up's changes could not be saved, so they were not undone ({exc})") from exc
-    if not snapshot.restore(ari.root, run_dir, cid, old, current.manifest):
+    try:
+        restored = snapshot.restore(ari.root, run_dir, cid, old, current.manifest)
+    except snapshot.PartialRestore as exc:
+        raise DaedalusError(f"the candidate before the follow-up ({cid[:12]}) could not be restored and "
+                            f"the working tree may be partly rewritten: {', '.join(exc.paths)} "
+                            f"(the follow-up's files are in {files / 'files'}, its changes in {kept})") from exc
+    if not restored:
         raise DaedalusError(f"the candidate before the follow-up ({cid[:12]}) could not be restored; "
                             f"the working tree was left as it was (its changes are also in {kept})")
     if ari.capture(ari.state(run_id)).candidate_id != cid:
@@ -684,7 +694,7 @@ def restore_followup(ari: Ariadne, run_id: str, notify: Notify = _quiet) -> list
     ari.verify(run_id)
     rel = kept.relative_to(ari.root).as_posix() if ari.root in kept.parents else str(kept)
     return [f"the follow-up round's changes were undone and candidate {cid[:12]} (acceptable before it) "
-            f"was restored; the undone changes are kept in {rel}"]
+            f"was restored; the undone changes are kept in {rel} (the files themselves beside it)"]
 
 
 def followup_feedback(findings: list[Any]) -> list[str]:
