@@ -19,11 +19,11 @@ checks:
     timeout_s: 1800
 
 # Approved by the repository owner: launched reviewer sessions here are billed in cash,
-# so each run may spend up to $5 of real money (max_cost still caps total spend).
+# so each run may spend up to $10 of real money (max_cost still caps total spend).
 policy:
   default_budget:
     max_attempts: 20
     max_wall_seconds: 86400
     max_cost: 50.0
     max_workers: 1
-    max_cash: 5.0
+    max_cash: 10.0
