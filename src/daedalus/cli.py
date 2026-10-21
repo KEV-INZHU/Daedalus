@@ -172,6 +172,8 @@ def render_decision(d: Decision, *, verbose: bool = True) -> list[str]:
 def cmd_init(args: argparse.Namespace) -> int:
     if (args.ci_install or args.require_provenance or args.ci_source) and not args.ci:
         raise DaedalusError("--ci-install, --ci-source and --require-provenance configure the workflow: add --ci")
+    if args.harness and args.no_hooks:
+        raise DaedalusError("--harness installs harness integrations, which --no-hooks forbids: drop one of them")
     workflow = None
     if args.ci:  # render (and so validate) before writing anything
         from daedalus.ci import DEFAULT_SOURCE, render_workflow
@@ -188,17 +190,20 @@ def cmd_init(args: argparse.Namespace) -> int:
         _print(f"wrote {CONFIG_FILE} with checks: {', '.join(checks) or 'NONE — add one before starting a run'}")
     if _ensure_ignored(root, f"{STATE_DIR}/"):
         _print(f"added {STATE_DIR}/ to .gitignore")
+    chosen: list[str] = []
     if not args.no_hooks:
-        from daedalus.harness.claude_code import install
         from daedalus.harness.provenance import install_git_hook
 
-        for line in install(root):
-            _print(line)
+        chosen = _init_harnesses(root, args.harness)
+        for name in chosen:
+            for line in _install_harness(name, root):
+                _print(line)
         try:
             _print(install_git_hook(root))
         except DaedalusError as exc:
             _print(f"note: {exc}")
-        _ensure_ignored(root, ".claude/settings.local.json")
+        if "claude-code" in chosen:
+            _ensure_ignored(root, ".claude/settings.local.json")
     if workflow is not None:
         wf = root / ".github" / "workflows" / "daedalus.yml"
         if wf.exists() and not args.force:
@@ -207,9 +212,12 @@ def cmd_init(args: argparse.Namespace) -> int:
             wf.parent.mkdir(parents=True, exist_ok=True)
             wf.write_text(workflow, encoding="utf-8")
             _print(f"wrote {wf.relative_to(root).as_posix()}: pull requests now run `daedalus ci`")
-    _print(f"Next: review and commit {CONFIG_FILE}" + ("" if args.no_hooks else " and .claude/")
+    _print(f"Next: review and commit {CONFIG_FILE}" + ("" if args.no_hooks else " and " + _commit_what(chosen))
            + (" and .github/workflows/daedalus.yml" if args.ci else "") + ".")
-    _print("Then just work: in Claude Code the first edit opens a run and the gate decides when it is done.")
+    if not chosen or "claude-code" in chosen:
+        _print("Then just work: in Claude Code the first edit opens a run and the gate decides when it is done.")
+    else:
+        _print("Then just work: the first edit in your agent opens a run and the gate decides when it is done.")
     return 0
 
 
@@ -252,6 +260,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     from daedalus.orchestration.lifecycle import run_task
 
     ari = _ari(args, adapter=True)
+    ari.no_cache = args.no_cache
     try:
         report = run_task(
             ari,
@@ -322,9 +331,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
     ari = _ari(args)
     try:
         rid = _run_id(ari, args)
+        ari.no_cache = args.no_cache
         recs = ari.verify(rid, only=args.only or None)
+        reused = {e.payload["record"]["evidence_id"]: e.payload["reused_from"]
+                  for e in ari.store.events(rid) if e.type == "evidence.recorded" and e.payload.get("reused_from")}
         for r in recs:
             extra = f" ({r.error})" if r.error else (f" exit {r.exit_code}" if r.result == "FAIL" else "")
+            src = reused.get(r.evidence_id)
+            if src:
+                extra += f" (reused from run {src['run_id']} event {src['seq']})"
             _print(f"{r.check_id}: {r.result} on {r.candidate_id[:12]}{extra}")
         passed = all(r.result == "PASS" for r in recs if r.mandatory)
         from daedalus.harness.claude_code import launched_by_daedalus
@@ -332,7 +347,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if passed and not args.no_review and not args.only and not launched_by_daedalus():
             from daedalus.harness.claude_code import settle
 
-            d, notes, _ = settle(ari, rid, notify=lambda m: _print(f"· {m}"))
+            d, notes, _ = settle(ari, rid, cache=not args.no_cache, notify=lambda m: _print(f"· {m}"))
             for n in notes:
                 _print(f"note: {n}")
             for f in ari.state(rid).open_findings:
@@ -361,6 +376,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     from daedalus.orchestration.lifecycle import launch_required_reviews, launch_review
 
     ari = _ari(args, adapter=True)
+    ari.no_cache = args.no_cache
     try:
         rid = _run_id(ari, args)
         note = lambda m: _print(f"· {m}")
@@ -673,6 +689,11 @@ def cmd_metrics(args: argparse.Namespace) -> int:
             f"reviews {agg.reviews} ({agg.delta_reviews} delta) · reviews/accepted {num(agg.reviews_per_accepted)} · "
             f"late findings {agg.late_findings} (raised by a re-review of code already reviewed)"
         )
+        _print(
+            f"evidence cache: {agg.cache_hits} hit(s) ({agg.cache_check_hits} check, {agg.cache_review_hits} review) "
+            f"· saved {agg.cache_seconds_saved / 60:.1f}m and {agg.cache_cost_saved:.2f} "
+            f"(cash {agg.cache_cash_saved:.2f}; the rest is API-equivalent estimate)"
+        )
         if any(m.findings for m in runs):
             _print("findings: B=BLOCKER M=MAJOR m=MINOR A=ADVISORY")
         return 0 if not errors else 1
@@ -757,21 +778,100 @@ def cmd_statusline(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_install(args: argparse.Namespace) -> int:
-    from daedalus.harness.claude_code import install
+def _install_harness(name: str, root: Path, roles: tuple[str, ...] | None = None) -> list[str]:
+    """Install one registered harness integration; the lines say what was done."""
+    from daedalus import plugins
 
-    root = find_root(args.dir)
+    try:
+        integration = plugins.get_harness(name)
+    except plugins.PluginError as exc:
+        raise DaedalusError(str(exc)) from exc
+    if name == "claude-code" and roles is not None:  # integrations with role skills to choose
+        from daedalus.harness.claude_code import install
+
+        return install(root, skills=roles)
+    if name == "pi" and roles is not None:
+        from daedalus.harness.pi import install as pi_install
+
+        return [f"pi: {line}" for line in pi_install(root, skills=roles)]
+    return [f"{name}: {line}" if name != "claude-code" else line for line in integration.install(root)]
+
+
+SKILL_HARNESSES = ("claude-code", "pi")  # the integrations whose role skills `--all-skills` can choose
+# What each harness's install writes, for the "commit this" advice.
+HARNESS_FILES = {
+    "claude-code": ".claude/", "codex": ".codex/ and AGENTS.md", "opencode": ".opencode/",
+    "pi": ".pi/", "hermes": ".hermes/",
+}
+
+
+def _commit_what(names: list[str]) -> str:
+    """The paths to commit after installing `names`; harnesses we do not know are 'the files listed above'."""
+    paths = [HARNESS_FILES[n] for n in names if n in HARNESS_FILES]
+    if any(n not in HARNESS_FILES for n in names) or not paths:
+        paths.append("the files listed above")
+    return ", ".join(paths)
+
+
+def _init_harnesses(root: Path, explicit: list[str] | None) -> list[str]:
+    """Harnesses `init` installs: those named with --harness, else claude-code plus every detected one."""
+    from daedalus import plugins
+
+    if explicit:
+        unknown = [n for n in explicit if n not in plugins.harness_names()]
+        if unknown:
+            raise DaedalusError(f"unknown harness {unknown[0]!r}: use one of {plugins.harness_names()}")
+        return list(dict.fromkeys(explicit))
+    return ["claude-code"] + [h.name for h in plugins.detected_harnesses(root) if h.name != "claude-code"]
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    from daedalus import plugins
     from daedalus.harness.provenance import install_git_hook
 
+    root = find_root(args.dir)
+    if bool(args.harness) == bool(args.all_detected):
+        raise DaedalusError(f"name a harness or pass --all-detected (registered: {plugins.harness_names()})")
+    names = args.harness and [args.harness] or [h.name for h in plugins.detected_harnesses(root)]
+    if args.all_skills and (bad := [n for n in names if n not in SKILL_HARNESSES]):
+        raise DaedalusError(
+            f"--all-skills is supported only for {', '.join(SKILL_HARNESSES)}, not {', '.join(bad)}; "
+            "drop --all-skills or name one of those"
+        )
+    if not names:
+        _print("no harness detected in this repository or on PATH; name one: daedalus install <harness>")
+        return 0
     roles = ("gate",) + (("brunel", "socrates", "mozi", "aristotle", "james", "plato", "vitruvius") if args.all_skills else ())
-    for line in install(root, skills=roles):
-        _print(line)
+    for name in names:
+        for line in _install_harness(name, root, roles):
+            _print(line)
     try:
         _print(install_git_hook(root))
     except DaedalusError as exc:
         _print(f"note: {exc}")
-    _print("Commit .claude/ so every session works under the gate: the first edit opens a run, and the")
-    _print("gate verifies, reviews and decides when the agent stops.")
+    if names == ["claude-code"]:
+        _print("Commit .claude/ so every session works under the gate: the first edit opens a run, and the")
+        _print("gate verifies, reviews and decides when the agent stops.")
+    else:
+        _print(f"Commit {_commit_what(names)} so every session works under the gate.")
+    return 0
+
+
+def cmd_plugins(args: argparse.Namespace) -> int:
+    from daedalus import plugins
+
+    root = find_root(args.dir)
+    detected = {h.name for h in plugins.detected_harnesses(root)}
+    _print("Harness integrations (daedalus install <name>)")
+    for info in plugins.list_harnesses():
+        state = "available" if info.available else "unavailable"
+        seen = ("detected" if info.name in detected else "not detected") if info.available else "-"
+        _print(f"  {info.name:<14} {info.source:<12} {state:<12} {seen:<13} {info.detail}")
+    _print()
+    _print("Adapters (adapter.name in .daedalus.yml)")
+    for info in plugins.list_adapters():
+        state = "available" if info.available else "unavailable"
+        _print(f"  {info.name:<14} {info.source:<12} {state:<12} read-only reviews: {info.read_only:<16} {info.detail}")
     return 0
 
 
@@ -1088,7 +1188,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("init", cmd_init, "write .daedalus.yml with detected checks")
     sp.add_argument("--adapter", help="agent harness for `daedalus run` (e.g. claude-code)")
     sp.add_argument("--claude-code", action="store_true", help=argparse.SUPPRESS)  # the default now
-    sp.add_argument("--no-hooks", action="store_true", help="do not install the Claude Code hooks and git hook")
+    sp.add_argument("--no-hooks", action="store_true", help="do not install the harness hooks and git hook")
+    sp.add_argument("--harness", action="append", metavar="NAME",
+                    help="harness to install (repeatable; default: claude-code plus every detected harness)")
     sp.add_argument("--ci", action="store_true", help="also write .github/workflows/daedalus.yml")
     sp.add_argument("--ci-install", metavar="CMD", help="command the workflow runs to install what your checks need")
     sp.add_argument("--ci-source", metavar="SPEC",
@@ -1105,6 +1207,8 @@ def build_parser() -> argparse.ArgumentParser:
     contract_args(sp)
     sp.add_argument("--rounds", type=int, default=3, help="max build/verify/review rounds (default 3)")
     sp.add_argument("--adapter", help="override the adapter from .daedalus.yml")
+    sp.add_argument("--no-cache", action="store_true",
+                    help="verify and review for real; do not reuse results verified in earlier runs")
 
     sp = add("status", cmd_status, "show the gate, the run and what blocks acceptance", run=True)
     sp.add_argument("--json", action="store_true")
@@ -1113,10 +1217,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--only", action="append", help="run only this check (repeatable)")
     sp.add_argument("--no-review", action="store_true",
                     help="do not launch the reviews the run requires once checks pass")
+    sp.add_argument("--no-cache", action="store_true",
+                    help="run checks and reviews for real; do not reuse results verified in earlier runs")
     add("finish", cmd_finish, "derive and record the final disposition if it is decided", run=True)
     sp = add("review", cmd_review, "launch an independent review through the adapter", run=True)
     sp.add_argument("perspective", choices=("required", "socrates", "mozi", "aristotle", "james"))
     sp.add_argument("--adapter", help="override the adapter from .daedalus.yml")
+    sp.add_argument("--no-cache", action="store_true", help="launch the review even if an identical one is on record")
     sp = add("cancel", cmd_cancel, "cancel the run", run=True)
     sp.add_argument("--reason")
     sp = add("abandon", cmd_abandon, "declare the run unresolvable: REJECTED (human only)", run=True, human=True)
@@ -1176,8 +1283,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--require-provenance", action="store_true",
                     help="fail when a commit lacks a Daedalus-Run trailer (it was not accepted by the gate)")
     sp = add("install", cmd_install, "install harness integration")
-    sp.add_argument("harness", choices=("claude-code",))
+    sp.add_argument("harness", nargs="?", help="a registered harness (see `daedalus plugins`)")
+    sp.add_argument("--all-detected", action="store_true", help="install every harness detected here")
     sp.add_argument("--all-skills", action="store_true", help="also install the role skills")
+    sp = add("plugins", cmd_plugins, "list harness integrations and adapters, built in or from entry points")
+    sp.add_argument("action", nargs="?", choices=("list",), default="list")
     add_factory_parser(sub)
     return p
 

@@ -125,6 +125,15 @@
           },
           "retry_on_timeout": {
             "type": "boolean"
+          },
+          "cache": {
+            "type": "boolean"
+          },
+          "cache_inputs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }

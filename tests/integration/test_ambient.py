@@ -658,7 +658,8 @@ def test_another_sessions_prompt_never_sets_the_base(ari, repo):
 
 
 @pytest.mark.parametrize("text", ["<task-notification> <task-id>x</task-id>", "  <system-reminder>hi",
-                                  "Stop hook feedback:\nDaedalus gate: ..."])
+                                  "Stop hook feedback:\nDaedalus gate: ...",
+                                  '<agent-message from="a1">\n[Subagent hand-back] done</agent-message>'])
 def test_harness_turns_never_replace_the_users_request(ari, repo, text):
     claude_code.prompt_hook(payload(repo, prompt="make the app say ok"), ari=ari)
     before = (repo / ".daedalus" / "last_prompt.json").read_text()

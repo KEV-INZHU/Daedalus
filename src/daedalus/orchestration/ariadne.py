@@ -59,6 +59,7 @@ from daedalus.orchestration.lock import OrchestratorLock
 from daedalus.orchestration.scheduler import WorkPackage, dispatch_blockers, live_packages, validate_plan
 from daedalus.repository import worktree
 from daedalus.repository.candidate import CandidateManifest, capture, file_sha256, git_head
+from daedalus.verification.evidence_cache import EvidenceCache
 
 DEFAULT_VERIFIER = "daedalus-proof-gate@local"
 CLEANUP_ATTEMPTS = 3  # workspace removals tried before leaving it to a human
@@ -96,6 +97,7 @@ class Ariadne:
         clock: Callable[[], float] = time.time,
         verifier_id: str = DEFAULT_VERIFIER,
         adapter: Adapter | None = None,
+        no_cache: bool = False,
     ):
         self.root = Path(root).resolve()
         self.state_dir = self.root / STATE_DIR
@@ -104,6 +106,7 @@ class Ariadne:
         self.clock = clock
         self.verifier_id = verifier_id
         self.adapter = adapter
+        self.no_cache = no_cache  # `--no-cache`: never reuse evidence from earlier runs
         self.lock = OrchestratorLock(self.state_dir / "orchestrator.lock")
 
     @classmethod
@@ -144,6 +147,21 @@ class Ariadne:
             return file_sha256(p)
         except OSError:
             return None
+
+    def evidence_cache(self, kind: str) -> EvidenceCache | None:
+        """The cross-run evidence cache for `checks` or `reviews`, or None when it is switched off
+        (`--no-cache`, `cache:` in .daedalus.yml) or the audit chain does not verify. None always
+        means "run it for real"."""
+        if self.no_cache:
+            return None
+        try:
+            cfg = self.config()
+        except (DaedalusError, yaml.YAMLError, OSError):
+            return None
+        if not (cfg.cache_checks if kind == "checks" else cfg.cache_reviews):
+            return None
+        cache = EvidenceCache(self.store, max_age_s=cfg.cache_max_age_s, clock=self.clock)
+        return cache if cache.trusted() else None
 
     def capture(self, state: RunState) -> CandidateManifest:
         return capture(self.root, state.contract.base_revision, state.policy.candidate_exclude)
@@ -413,6 +431,7 @@ class Ariadne:
         candidate_id: str | None = None,
         scope: str = "full",
         delta_from: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> str:
         """Record a review. `source="launched"` is reserved for reviews Daedalus
         itself launched through an adapter (orchestration.lifecycle). A `delta` review
@@ -472,6 +491,7 @@ class Ariadne:
             reviewer,
             {
                 "review": {
+                    **(extra or {}),  # Daedalus's own bookkeeping (cache key, cost, `reused_from`); never overrides
                     "review_id": review_id,
                     "perspective": perspective,
                     "candidate_id": cid,

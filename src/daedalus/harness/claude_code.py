@@ -47,6 +47,7 @@ from daedalus.core.errors import DaedalusError
 from daedalus.core.state_machine import CheckState, Disposition, ExecutionState
 from daedalus.orchestration.ariadne import Ariadne
 from daedalus.orchestration.prompts import ROLE_SKILLS, SKILLS_DIR
+from daedalus.plugins import HarnessIntegration
 
 DEFAULT_MAX_STOP_BLOCKS = 8
 STOP_HOOK_TIMEOUT_S = 3600
@@ -201,7 +202,8 @@ def opened_message(ari: Ariadne, rid: str) -> str:
 
 
 # Turns the harness submits that are not the user's words. They never name a run.
-HARNESS_PROMPTS = ("<task-notification>", "<system-reminder>", "Stop hook feedback:")
+# `<agent-message` is a report from another session (e.g. a subagent hand-back), not the user.
+HARNESS_PROMPTS = ("<task-notification>", "<system-reminder>", "<agent-message", "Stop hook feedback:")
 
 
 def is_harness_prompt(text: str) -> bool:
@@ -283,7 +285,7 @@ def _review_adapter(root: Path):
     return adapter if available is None or available() else None
 
 
-def settle(ari: Ariadne, run_id: str, *, reviews: bool = True, notify=lambda _m: None) -> tuple[Decision, list[str], bool]:
+def settle(ari: Ariadne, run_id: str, *, reviews: bool = True, cache: bool = True, notify=lambda _m: None) -> tuple[Decision, list[str], bool]:
     """Bring a run as close to a decision as the system can on its own: verify stale or
     missing evidence, then (once checks pass) launch every review the run still needs.
 
@@ -293,6 +295,8 @@ def settle(ari: Ariadne, run_id: str, *, reviews: bool = True, notify=lambda _m:
     from daedalus.orchestration.lifecycle import launch_required_reviews
 
     notes: list[str] = []
+    if not cache:
+        ari.no_cache = True  # `--no-cache`: verify and review for real, whatever earlier runs proved
     if ari.needs_recovery(run_id):
         ari.recover(run_id)
     decision = ari.evaluate(run_id)
@@ -568,3 +572,16 @@ def install(root: Path, *, skills: tuple[str, ...] = ("gate",)) -> list[str]:
         shutil.copyfile(SKILLS_DIR / name / "SKILL.md", dest / "SKILL.md")
         done.append(f"skill {name} -> {dest.relative_to(root).as_posix()}")
     return done
+
+
+def _detect(root: Path) -> bool:
+    return (root / ".claude").is_dir() or shutil.which("claude") is not None
+
+
+INTEGRATION = HarnessIntegration(
+    name="claude-code",
+    description="Claude Code: hooks, status line and the gate skill in .claude/",
+    install=lambda root: install(root),
+    detect=_detect,
+    adapter_preset="claude-code",
+)

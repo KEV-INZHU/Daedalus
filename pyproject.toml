@@ -22,7 +22,7 @@ daedalus = "daedalus.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-daedalus = ["data/*.yaml", "data/skills/*/*.md"]
+daedalus = ["data/*.yaml", "data/skills/*/*.md", "data/harness/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

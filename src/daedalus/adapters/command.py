@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import replace
@@ -44,6 +45,7 @@ _BASE_CAPS = Capabilities(
 # Reviewers get exactly these tools: an allowlist, so a new editing or shell tool
 # in a future harness release is excluded by default rather than by a denylist.
 CLAUDE_REVIEW_TOOLS = "Read,Grep,Glob"
+PI_REVIEW_TOOLS = "read,grep,find,ls"
 # A locked preset's launch line comes from the preset alone. Config may set only
 # these keys, and `args` may contain only these flags (an allowlist: anything that
 # could add tools, MCP servers, plugins, settings or permissions is refused).
@@ -81,11 +83,49 @@ PRESETS: dict[str, dict[str, Any]] = {
         "capabilities": replace(_BASE_CAPS, cost_reporting=True),
     },
     "codex": {
-        "argv": ["codex", "exec"],
+        # `codex exec` is non-interactive and read-only by default. `--full-auto` no longer
+        # exists (removed by 0.163.0: "unexpected argument"), so builders say what they want:
+        # `--sandbox workspace-write` (writes confined to the workspace, no network, `.git` read-only).
+        "argv": ["codex", "exec", "--json", "--color", "never"],
         "args": [],
-        "builder_args": ["--full-auto"],  # write-enabling: never part of a review launch
-        "read_only_args": ["--sandbox", "read-only"],
-        "prompt_via": "arg",
+        "builder_args": ["--sandbox", "workspace-write"],  # write-enabling: never part of a review launch
+        # Reviewers: read-only sandbox, no session files written, and no hooks (a reviewer
+        # must not run the project's hooks, whatever the user has trusted).
+        "read_only_args": ["--sandbox", "read-only", "--ephemeral", "--disable", "hooks"],
+        "prompt_via": "stdin",  # `codex exec` reads the prompt from stdin when none is given
+        "parse": "codex-json",
+        "capabilities": replace(_BASE_CAPS, limitations=_BASE_CAPS.limitations + ("experimental preset",)),
+    },
+    "opencode": {
+        # The launcher (daedalus.harness.opencode) runs `opencode run` and, for a review, first makes
+        # the session read-only: OpenCode has no read-only CLI flag, only config, so the launcher
+        # generates one (OPENCODE_CONFIG_CONTENT + OPENCODE_DISABLE_PROJECT_CONFIG) and fails closed.
+        "argv": [sys.executable, "-m", "daedalus.harness.opencode", "run", "--format", "json"],
+        "args": [],
+        "builder_args": [],  # `opencode run` allows edits and shell by default; nothing to add
+        "read_only_args": ["--daedalus-read-only"],
+        "available_probe": "opencode",  # argv[0] is python, which is always there: probe the real CLI
+        "prompt_via": "stdin",
+        "parse": "opencode-json",
+        "capabilities": replace(
+            _BASE_CAPS,
+            cost_reporting=True,
+            limitations=_BASE_CAPS.limitations
+            + ("experimental preset", "read-only is enforced by a generated config, which ignores project-level opencode.json"),
+        ),
+    },
+    "hermes": {
+        # `chat --oneshot -Q`: answer once, print only the reply, exit. `--source daedalus` tags the session
+        # so the Daedalus plugin (which runs in Hermes's shared gateway, where DAEDALUS_AGENT does not
+        # arrive) stays out of it. The prompt comes on stdin (`--query-file -`), never shell-interpreted.
+        "argv": ["hermes", "chat", "--oneshot", "-Q", "--source", "daedalus", "--query-file", "-"],
+        "args": [],
+        "builder_args": [],  # Hermes's default toolsets: file tools and terminal
+        # Hermes has no read-only file toolset (`file` bundles write_file and patch), so a reviewer
+        # gets only the in-memory `todo` toolset: no file, shell, web or MCP tools; the review prompt
+        # carries the diff. --ignore-rules skips AGENTS.md/memory a Builder session could have written.
+        "read_only_args": ["--toolsets", "todo", "--ignore-rules"],
+        "prompt_via": "stdin",
         "parse": "text",
         "capabilities": replace(_BASE_CAPS, limitations=_BASE_CAPS.limitations + ("experimental preset",)),
     },
@@ -98,7 +138,36 @@ PRESETS: dict[str, dict[str, Any]] = {
         "parse": "text",
         "capabilities": replace(_BASE_CAPS, limitations=_BASE_CAPS.limitations + ("experimental preset",)),
     },
+    "pi": {
+        # Pi (pi-mono coding agent). `--mode json` prints every session event as a JSON line;
+        # the prompt goes on stdin (print/json mode merges piped stdin into the prompt).
+        # Sessions are ephemeral. https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md
+        "argv": ["pi", "-p", "--mode", "json", "--no-session"],
+        "args": [],
+        "builder_args": [],  # Pi's default tools (read, bash, edit, write) are the builder's tools
+        # An allowlist: no bash, edit or write. Extensions, skills, prompt templates and
+        # AGENTS.md/CLAUDE.md are not loaded, so nothing a builder wrote can widen a reviewer.
+        "read_only_args": ["--tools", PI_REVIEW_TOOLS, "--no-extensions", "--no-skills",
+                           "--no-prompt-templates", "--no-context-files"],
+        "prompt_via": "stdin",
+        "parse": "pi-json",
+        "capabilities": replace(_BASE_CAPS, cost_reporting=True,
+                                limitations=_BASE_CAPS.limitations + ("experimental preset",)),
+    },
 }
+
+
+def _complete_preset(preset: dict[str, Any] | None) -> dict[str, Any]:
+    """A plugin's preset with the optional keys filled in. It is locked only if it says so."""
+    if not preset:
+        return {}
+    if not preset.get("argv"):
+        raise CapabilityError("adapter preset needs `argv`")
+    return {
+        "args": [], "builder_args": [], "read_only_args": [], "prompt_via": "stdin", "parse": "text",
+        "capabilities": replace(_BASE_CAPS, limitations=_BASE_CAPS.limitations + ("third-party preset",)),
+        **preset,
+    }
 
 
 HARNESS_SESSION_VARS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT")
@@ -327,6 +396,99 @@ def claude_cost_basis(messages: list[dict[str, Any]], env: dict[str, str]) -> st
     return "api_equivalent" if init.get("apiKeySource") == "none" else "cash"
 
 
+class CodexResult:
+    """What a `codex exec --json` session printed: the final agent message, summed token
+    usage and any failure. The event stream is JSONL (`thread.started`, `turn.started`,
+    `item.completed`, `turn.completed`/`turn.failed`, `error`); `item.completed` items of
+    type `error` are warnings (e.g. unknown model metadata), not failures."""
+
+    def __init__(self) -> None:
+        self.message = ""
+        self.completed = False
+        self.error: str | None = None
+        self.usage: dict[str, Any] | None = None
+
+
+def codex_result(text: str) -> CodexResult:
+    res = CodexResult()
+    totals = {"input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0, "reasoning_output_tokens": 0}
+    seen_usage = False
+    for line in text.split("\n"):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        kind = ev.get("type")
+        item = ev.get("item")
+        if kind == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
+            res.message = str(item.get("text", ""))
+        elif kind == "turn.completed":
+            res.completed = True
+            u = ev.get("usage")
+            if isinstance(u, dict):
+                seen_usage = True
+                for ours, theirs in (("input_tokens", "input_tokens"), ("cache_read_input_tokens", "cached_input_tokens"),
+                                     ("output_tokens", "output_tokens"),
+                                     ("reasoning_output_tokens", "reasoning_output_tokens")):
+                    try:
+                        v = int(u.get(theirs) or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        v = 0
+                    totals[ours] += max(v, 0)
+        elif kind in ("turn.failed", "error"):
+            err = ev.get("error")
+            msg = err.get("message") if isinstance(err, dict) else ev.get("message")
+            res.error = f"codex reported an error: {msg}"
+    if seen_usage:
+        res.usage = {"model": None, "models": {}, **totals}
+    return res
+
+
+def pi_events(text: str) -> list[dict[str, Any]]:
+    """The JSON events of a `pi --mode json` session (one object per line; non-JSON lines are skipped)."""
+    out = []
+    for line in text.split("\n"):
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(m, dict):
+            out.append(m)
+    return out
+
+
+def pi_result(text: str) -> dict[str, Any] | None:
+    """Final answer, cost and token counts of a Pi session, from its assistant `message_end` events.
+    None when the session printed no assistant message. Never raises on malformed fields."""
+    def num(v: Any) -> float:
+        try:
+            f = float(v or 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+        return f if math.isfinite(f) and f >= 0 else 0.0
+
+    msgs = [e["message"] for e in pi_events(text)
+            if e.get("type") == "message_end" and isinstance(e.get("message"), dict)
+            and e["message"].get("role") == "assistant"]
+    if not msgs:
+        return None
+    cost = input_t = output_t = 0.0
+    for m in msgs:
+        u = m.get("usage") if isinstance(m.get("usage"), dict) else {}
+        c = u.get("cost")
+        cost += num(c.get("total")) if isinstance(c, dict) else 0.0
+        input_t += num(u.get("input"))
+        output_t += num(u.get("output"))
+    last = msgs[-1]
+    parts = last.get("content") if isinstance(last.get("content"), list) else []
+    answer = "\n".join(str(p.get("text", "")) for p in parts if isinstance(p, dict) and p.get("type") == "text")
+    return {"text": answer, "stop_reason": str(last.get("stopReason", "stop")), "error": last.get("errorMessage"),
+            "cost": cost, "model": last.get("model"), "input_tokens": int(input_t), "output_tokens": int(output_t),
+            "num_turns": len(msgs)}
+
+
 _PRESET_CONFIG_KEYS = frozenset({"name", "args"})
 
 
@@ -362,6 +524,7 @@ class CommandAdapter(Adapter):
         model: str | None = None,
         review_model: str | None = None,
         builder_args: list[str] | None = None,
+        available_probe: str | None = None,
     ):
         if prompt_via not in ("stdin", "arg", "message"):
             raise CapabilityError(f"prompt_via must be stdin, arg or message (got {prompt_via!r})")
@@ -375,20 +538,23 @@ class CommandAdapter(Adapter):
         self.model = model
         self.review_model = review_model or model
         self.builder_args = list(builder_args or [])
+        self.available_probe = available_probe
         self._procs: dict[str, _SessionTree] = {}
 
     @classmethod
-    def from_config(cls, cfg: dict[str, Any]) -> CommandAdapter:
+    def from_config(cls, cfg: dict[str, Any], preset: dict[str, Any] | None = None) -> CommandAdapter:
+        """`preset` is a third-party preset (from a plugin); built-in names always use PRESETS."""
         name = cfg.get("name", "claude-code")
-        preset = PRESETS.get(name, {})
+        preset = PRESETS[name] if name in PRESETS else _complete_preset(preset)
         if preset.get("locked_read_only"):
             return cls._locked(name, preset, cfg)
         if preset:
             # Built-in presets keep their launch line; config args reach builder launches only.
             extra = sorted(set(cfg) - _PRESET_CONFIG_KEYS)
             if extra:
+                kind = "built-in" if name in PRESETS else "third-party"
                 raise CapabilityError(
-                    f"adapter {name!r} is a built-in preset; {extra} cannot be set "
+                    f"adapter {name!r} is a {kind} preset; {extra} cannot be set "
                     f"(allowed: {sorted(_PRESET_CONFIG_KEYS)}; use your own adapter name with `argv` "
                     "for a different command line)"
                 )
@@ -464,6 +630,7 @@ class CommandAdapter(Adapter):
             capabilities=preset["capabilities"],
             model=model,
             review_model=review_model,
+            available_probe=preset.get("available_probe"),
         )
 
     def expected_cost_basis(self) -> str | None:
@@ -472,7 +639,7 @@ class CommandAdapter(Adapter):
         return None
 
     def available(self) -> bool:
-        return shutil.which(self.argv[0]) is not None
+        return shutil.which(self.available_probe or self.argv[0]) is not None
 
     def _command(self, req: AgentRequest) -> tuple[list[str], bytes | None]:
         # Read-only arguments come last so nothing configurable can follow (and override) them.
@@ -571,11 +738,44 @@ class CommandAdapter(Adapter):
                     quota=quota,
                     cost_basis=basis,
                 )
+        elif self.parse == "codex-json":
+            parsed = codex_result(text)
+            if code != 0 or not parsed.completed:  # an `error` event alone may be a transient retry notice
+                return AgentResult(
+                    "FAILED", output=parsed.message or text[-4000:], session_id=session, usage=parsed.usage,
+                    error=parsed.error or f"codex session did not complete (exit {code}): {err[-500:]}",
+                )
+            text = parsed.message
+            usage = parsed.usage
+        elif self.parse == "opencode-json":
+            from daedalus.harness.opencode import parse_run
+
+            text_out, cost, usage, problem = parse_run(text)
+            if problem or code != 0:
+                return AgentResult(
+                    "FAILED", output=text_out or text[-4000:], cost=cost, session_id=session, usage=usage,
+                    error=f"opencode failed (exit {code}): {problem or err[-500:]}",
+                )
+            text = text_out
+        elif self.parse == "pi-json":
+            res = pi_result(text)
+            if res is None:
+                return AgentResult("FAILED", output=text[-4000:], session_id=session,
+                                   error=f"unparseable pi output (exit {code}): {err[-500:]}")
+            text, cost = res["text"], res["cost"]
+            usage = {"model": res["model"], "input_tokens": res["input_tokens"],
+                     "output_tokens": res["output_tokens"], "num_turns": res["num_turns"]}
+            if res["stop_reason"] in ("error", "aborted") or code != 0:
+                return AgentResult("FAILED", output=text, cost=cost, session_id=session, usage=usage,
+                                   cost_basis="cash" if cost else "api_equivalent",
+                                   error=f"agent reported an error ({res['stop_reason']}, exit {code})"
+                                   + (f": {res['error'] or err[-500:]}" if (res["error"] or err.strip()) else ""))
         elif code != 0:
             return AgentResult("FAILED", output=text, session_id=session, error=f"exit {code}: {err[-500:]}")
         return AgentResult(
             "COMPLETED", output=text, structured=extract_json(text), cost=cost, session_id=session,
-            usage=usage, quota=quota, cost_basis=basis if self.parse == "claude-json" else "api_equivalent",
+            usage=usage, quota=quota,
+            cost_basis=basis if self.parse == "claude-json" else ("cash" if self.parse == "pi-json" and cost else "api_equivalent"),
         )
 
     def cancel(self, session_id: str) -> bool:

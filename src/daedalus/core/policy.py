@@ -45,6 +45,8 @@ class CheckDefinition:
     env_inputs: tuple[str, ...] = ()
     transient_exit_codes: tuple[int, ...] = ()
     retry_on_timeout: bool = False
+    cache: bool = True  # `cache: false`: non-deterministic, never reuse a result across runs
+    cache_inputs: tuple[str, ...] = ()  # files (paths or globs) whose contents join the cross-run cache key
 
     @property
     def definition_hash(self) -> str:
@@ -169,6 +171,38 @@ def _strict_bool(raw: dict[str, Any], key: str, default: bool = False) -> bool:
     return value
 
 
+DEFAULT_MAX_AGE_S = 86400  # cross-run evidence cache: a source older than a day is not reused
+
+
+def cache_flag(value: Any, what: str) -> bool:
+    """A `cache` switch: a real boolean, or None for the default (on)."""
+    if value is None:
+        return True
+    if not isinstance(value, bool):
+        raise PolicyError(f"{what} must be true or false")
+    return value
+
+
+def cache_max_age(value: Any, what: str, default: int) -> int:
+    """A `max_age_s`: a positive integer number of seconds, or None for the default."""
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise PolicyError(f"{what} must be a positive integer number of seconds")
+    return value
+
+
+def _cache_inputs(cid: str, value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
+        raise PolicyError(f"check {cid!r} cache_inputs must be a list of paths or globs")
+    for x in value:
+        if x.startswith(("/", "\\")) or ".." in x.replace("\\", "/").split("/") or ":" in x.split("/")[0]:
+            raise PolicyError(f"check {cid!r} cache_inputs {x!r} must be a relative path inside the repository")
+    return tuple(value)
+
+
 def policy_from_dict(raw: dict[str, Any]) -> Policy:
     if not isinstance(raw, dict):
         raise PolicyError("policy must be a mapping")
@@ -207,6 +241,8 @@ def policy_from_dict(raw: dict[str, Any]) -> Policy:
             env_inputs=tuple(c.get("env_inputs", ())),
             transient_exit_codes=tuple(int(x) for x in c.get("transient_exit_codes", ())),
             retry_on_timeout=bool(c.get("retry_on_timeout", False)),
+            cache=cache_flag(c.get("cache"), f"check {cid!r} cache"),
+            cache_inputs=_cache_inputs(cid, c.get("cache_inputs")),
         )
 
     floors_path = _floors(raw.get("path_floors"), "path_floors")

@@ -50,6 +50,7 @@ def test_first_pass_and_human_interventions(ari, repo):
 
 
 def test_aggregate_excludes_open_runs_from_rates(ari, repo):
+    ari.no_cache = True  # run b must really run its check, not reuse a's pass on the same tree
     a = ari.start({"objective": "accepted"}, actor=HUMAN)
     fix(repo)
     ari.verify(a)

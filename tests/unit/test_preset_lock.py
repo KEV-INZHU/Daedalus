@@ -21,7 +21,9 @@ EXACT_REVIEW_ARGV = {
         "--strict-mcp-config", "--disable-slash-commands",
         "--restricted", "--tools", "Read,Grep,Glob",
     ],
-    "codex": ["codex", "exec", "--sandbox", "read-only", "PROMPT"],
+    # codex-cli 0.163.0 has no --full-auto; the prompt goes on stdin, so it is not in argv
+    "codex": ["codex", "exec", "--json", "--color", "never", "--sandbox", "read-only", "--ephemeral",
+              "--disable", "hooks"],
     "aider": ["aider", "--yes-always", "--no-auto-commits", "--dry-run", "--message", "PROMPT"],
 }
 CONFIG_ARG = {"claude-code": "--verbose", "codex": "--dangerously-bypass-approvals-and-sandbox", "aider": "--x"}
@@ -43,7 +45,7 @@ def test_write_enabling_preset_flags_are_builder_only():
         shared = preset["argv"] + preset["args"] + preset["read_only_args"]
         for flag in ("--full-auto", "acceptEdits", "--permission-mode"):
             assert flag not in shared, (name, flag)
-    assert "--full-auto" in CommandAdapter.from_config({"name": "codex"})._command(request(False))[0]
+    assert "workspace-write" in CommandAdapter.from_config({"name": "codex"})._command(request(False))[0]
 
 
 @pytest.mark.parametrize("name", ["codex", "aider"])

@@ -1,0 +1,9 @@
+# daedalus-gate: installed by `daedalus init`
+name: daedalus
+version: "0.1.0"
+description: "Daedalus acceptance gate: opens a run on the first file edit and keeps the agent working until the gate accepts (pre_verify). Shells out to `daedalus hook`; does nothing where Daedalus is not installed."
+author: "Daedalus"
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - pre_verify

@@ -118,6 +118,18 @@ class EventStore:
             rows = self._db.execute(self._SELECT + " WHERE run_id = ? ORDER BY seq", (run_id,)).fetchall()
         return [self._event(r) for r in rows]
 
+    def events_of_type(self, *types: str, candidate_id: str | None = None) -> list[Event]:
+        """Every event of these types, in log order, across all runs. With `candidate_id`, only the
+        evidence and review events that name that candidate."""
+        marks = ",".join("?" * len(types))
+        sql, args = f" WHERE type IN ({marks})", list(types)
+        if candidate_id is not None:
+            sql += (" AND COALESCE(json_extract(payload, '$.record.candidate_id'),"
+                    " json_extract(payload, '$.review.candidate_id')) = ?")
+            args.append(candidate_id)
+        rows = self._db.execute(self._SELECT + sql + " ORDER BY seq", args).fetchall()
+        return [self._event(r) for r in rows]
+
     def verify_chain(self) -> int:
         """Recompute the whole chain. Returns the number of events verified."""
         prev = GENESIS

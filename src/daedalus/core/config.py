@@ -8,6 +8,7 @@ The user-facing file is deliberately small:
     checks:                # trusted checks; replaces the default list
       tests: python -m pytest -q
       typecheck: {command: [mypy, src], mandatory: true}
+    cache: {checks: true, reviews: true, max_age_s: 86400}  # reuse verified evidence across runs (default on)
     policy: {...}          # optional overrides of any default-policy key
     policy_file: path.yaml # or: a complete policy file instead of the default
 
@@ -29,7 +30,14 @@ import yaml
 
 from daedalus.core.contracts import MODES
 from daedalus.core.errors import PolicyError
-from daedalus.core.policy import Policy, default_policy_text, policy_from_dict
+from daedalus.core.policy import (
+    DEFAULT_MAX_AGE_S,
+    Policy,
+    cache_flag,
+    cache_max_age,
+    default_policy_text,
+    policy_from_dict,
+)
 
 CONFIG_FILE = ".daedalus.yml"
 STATE_DIR = ".daedalus"
@@ -45,6 +53,9 @@ class RepoConfig:
     policy_raw: dict[str, Any]
     source: str  # file | default
     notes: tuple[str, ...] = field(default=())
+    cache_checks: bool = True  # reuse PASS check results from earlier runs on a byte-identical tree
+    cache_reviews: bool = True  # reuse approving review verdicts likewise
+    cache_max_age_s: int = DEFAULT_MAX_AGE_S  # a source older than this is not reused
 
     @property
     def policy(self) -> Policy:
@@ -150,6 +161,13 @@ def load_config(root: str | Path) -> RepoConfig:
     mode = str(cfg.get("mode", "gate"))
     if mode not in MODES:
         raise PolicyError(f"mode must be one of {MODES}")
+    cache = cfg.get("cache")
+    if cache is None:
+        cache = {}
+    elif isinstance(cache, bool):
+        cache = {"checks": cache, "reviews": cache}
+    if not isinstance(cache, dict) or set(cache) - {"checks", "reviews", "max_age_s"}:
+        raise PolicyError("`cache:` must be a mapping with only `checks`, `reviews` (booleans) and `max_age_s`")
     adapter = cfg.get("adapter") or {}
     if isinstance(adapter, str):
         adapter = {"name": adapter}
@@ -163,6 +181,9 @@ def load_config(root: str | Path) -> RepoConfig:
         policy_raw=raw,
         source="file",
         notes=tuple(notes),
+        cache_checks=cache_flag(cache.get("checks"), "`cache: checks`"),
+        cache_reviews=cache_flag(cache.get("reviews"), "`cache: reviews`"),
+        cache_max_age_s=cache_max_age(cache.get("max_age_s"), "`cache: max_age_s`", DEFAULT_MAX_AGE_S),
     )
 
 

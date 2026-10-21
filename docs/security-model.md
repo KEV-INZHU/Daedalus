@@ -24,6 +24,46 @@ This document says where the line falls.
 | Reviewers can't write, or see what the diff doesn't show | `claude-code` reviews launch with `--restricted --tools Read,Grep,Glob`: no write or shell tools, no settings files, file access confined to the repository, no `.claude/CLAUDE.md` or auto-memory (verified live in run 10) |
 | Launched sessions don't outlive supervision | Cancellation is polled while a session runs; timeouts and orchestrator errors kill it; on Windows a kill-on-close job object ends the session's whole process tree, including when the orchestrator itself is killed |
 
+## Evidence cache
+
+Reusing a result from an earlier run is sound only if the earlier result cannot be forged and answers the
+same question. The cache is built to that:
+
+- **No store of its own.** The source of truth is the hash-chained audit log in `.daedalus/daedalus.db`,
+  which only Ariadne writes. There is no cache file an agent could edit. A lookup first verifies the whole
+  chain; a broken chain, an unreadable log or an unloadable config disables reuse and the checks and
+  reviews simply run (fail closed). The chain stops naive edits, not an actor who rewrites the whole
+  database (see Known limitations); against that actor `cache: {checks: false, reviews: false}` or
+  `--no-cache` is the setting.
+- **Same question.** The key for a check is the candidate content hash, check id, exact argv, timeout,
+  `env_inputs` (by value hash), executable content and OS fingerprint, policy hash, Daedalus version and the
+  contents of the files its `cache_inputs` name.
+  The key for a review is the candidate, perspective, policy hash, contract text, review prompt hash,
+  adapter + effective review model, version and `first_pass`; an adapter with no configured model is never
+  keyed, and only a review shown no earlier findings is; a review event stores these inputs and the lookup recomputes the key from the
+  event's own candidate id and inputs, never read back from it, and requires that candidate to be the current
+  one, so a mismatch in any input is a miss. A review is keyed to the candidate it was submitted against; if
+  the tree moved between key computation and submission it stores no key and is never a source.
+- **Limit: the installed environment.** The candidate hash covers repository files, not site-packages,
+  node_modules or the system toolchain, so a dependency upgrade does not change a check's key by itself.
+  Two knobs narrow this and neither closes it. `cache: {max_age_s: N}` (default 86400, one day, by
+  the orchestrator's clock) refuses any source older than N seconds. A check's `cache_inputs` (paths or
+  globs inside the repository, such as a lockfile or `.venv/pyvenv.cfg`) hash those files into its key. An
+  environment changed in place and not listed stays invisible; use `cache: false` on that check, or
+  `--no-cache`.
+- **Never in CI.** `daedalus ci` does not read the audit log at all. A pull request can ship its own
+  `.daedalus/daedalus.db`, so CI reusing a PASS from it would let the author supply the verdict CI exists to
+  check independently. CI always runs every mandatory check on the fresh checkout.
+- **Same kind of answer.** Only PASS evidence from a trusted verifier that Daedalus ran (not a submitted
+  claim) and approving reviews that Daedalus launched with no blocking finding and no exposure to other
+  reviewers' findings qualify. FAIL, ERROR, timeouts and failed reviews are never reused; a check with
+  `cache: false` never is. Reviews with prior open findings of the same perspective are launched, since
+  only a launched review can say which findings the new candidate resolves.
+- **Still evidence.** A reuse is a new `evidence.recorded` / `review.recorded` event with `reused_from`
+  naming the source run, event sequence and event hash. It binds to the current candidate, contract
+  version and policy hash and passes the same staleness checks as any record, so the acceptance predicate
+  is unchanged and the audit trail shows exactly what was not re-run.
+
 ## Human identity on the local CLI
 
 Human-only commands (`approve`, `deny`, `attest`, `amend`, `risk-exception`,

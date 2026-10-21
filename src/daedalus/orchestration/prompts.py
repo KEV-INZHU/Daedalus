@@ -374,3 +374,11 @@ def factory_plan_prompt(goal: str, existing: list[dict[str, Any]], checks: list[
     parts += ["", "## Existing orders", ""]
     parts += [f"- {o['id']} ({o['status']}): {o['title']}" for o in existing] or ["- none"]
     return "\n".join(parts)
+
+
+def review_template_hash(perspective: str) -> str:
+    """Identity of the instructions a full review is given, without the run's diff and evidence:
+    a verdict reached under other instructions is not the same verdict."""
+    from daedalus.core.policy import sha256_hex
+
+    return sha256_hex("\0".join([skill_body(perspective), REVIEW_OUTPUT, FIRST_PASS_INTRO, SWEEP]))
