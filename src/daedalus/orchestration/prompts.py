@@ -290,7 +290,7 @@ Before the JSON block, list the areas you swept in one line each, so coverage is
 
 
 def _review_frame(perspective: str, task: str, c: TaskContract, checks: dict[str, Any],
-                  prior_findings: list[dict[str, str]]) -> list[str]:
+                  prior_findings: list[dict[str, str]], integrity: str = "") -> list[str]:
     """The parts every review prompt shares: role, output format, task, contract, evidence, prior findings."""
     parts = [skill_body(perspective), "", REVIEW_OUTPUT, "", task, "", contract_block(c), "",
              "## Verification evidence", ""]
@@ -298,6 +298,8 @@ def _review_frame(perspective: str, task: str, c: TaskContract, checks: dict[str
     if prior_findings:
         parts += ["", "## Your earlier open findings", ""]
         parts += [f"- {f['id']} [{f['severity']}] {f['title']}: {f['required_change']}" for f in prior_findings]
+    if integrity:
+        parts += ["", integrity]
     return parts
 
 
@@ -320,10 +322,12 @@ def review_prompt(
     checks: dict[str, Any],
     prior_findings: list[dict[str, str]],
     first_pass: bool = True,
+    integrity: str = "",
 ) -> str:
-    """A full review. `first_pass` is False for a full re-review (one that could not be a delta)."""
+    """A full review. `first_pass` is False for a full re-review (one that could not be a delta).
+    `integrity` is the test-tampering section (`IntegrityReport.review_section()`), if anything was flagged."""
     task = (FIRST_PASS_INTRO if first_pass else REREVIEW_INTRO) + "\n\n" + SWEEP
-    parts = _review_frame(perspective, task, c, checks, prior_findings)
+    parts = _review_frame(perspective, task, c, checks, prior_findings, integrity)
     parts += ["", "## Candidate diff", "", "```diff", diff or "(no changes)", "```"]
     return "\n".join(parts)
 
@@ -336,9 +340,10 @@ def delta_review_prompt(
     old_candidate: str,
     checks: dict[str, Any],
     prior_findings: list[dict[str, str]],
+    integrity: str = "",
 ) -> str:
     task = DELTA_OUTPUT.format(old=old_candidate[:12]) + "\n" + SWEEP
-    parts = _review_frame(perspective, task, c, checks, prior_findings)
+    parts = _review_frame(perspective, task, c, checks, prior_findings, integrity)
     parts += ["", f"## Changed since your last review ({len(touched)} file(s))", "", "```diff",
               inter_diff or "(no textual changes)", "```"]
     return "\n".join(parts)
@@ -374,3 +379,11 @@ def factory_plan_prompt(goal: str, existing: list[dict[str, Any]], checks: list[
     parts += ["", "## Existing orders", ""]
     parts += [f"- {o['id']} ({o['status']}): {o['title']}" for o in existing] or ["- none"]
     return "\n".join(parts)
+
+
+def review_template_hash(perspective: str) -> str:
+    """Identity of the instructions a full review is given, without the run's diff and evidence:
+    a verdict reached under other instructions is not the same verdict."""
+    from daedalus.core.policy import sha256_hex
+
+    return sha256_hex("\0".join([skill_body(perspective), REVIEW_OUTPUT, FIRST_PASS_INTRO, SWEEP]))

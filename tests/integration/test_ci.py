@@ -54,8 +54,8 @@ def test_risk_floors_apply_to_the_whole_diff(tmp_path):
 
     branch_with(root, trailer=True, edit=touch_auth)
     rep = run_ci(root, "main")
-    assert rep.tier == "high" and "merge" in rep.approvals and "socrates" in rep.reviews
-    assert "Confirm them before merging" in rep.markdown()
+    assert rep.tier == "high" and "merge" not in rep.approvals and "socrates" in rep.reviews
+    assert "Confirm them before merging" in rep.markdown()  # the reviews are still listed
 
 
 def test_no_mandatory_check_never_passes(tmp_path):
@@ -286,3 +286,35 @@ def test_init_validates_the_workflow_before_writing_anything(tmp_path):
     (root / ".daedalus.yml").unlink()
     assert cli.main(["-C", str(root), "init", "--ci", "--ci-install", "a\nb"]) == 2
     assert not (root / ".daedalus.yml").exists() and not (root / ".claude").exists()
+
+
+def test_a_weakened_test_raises_the_tier_and_the_report_says_so(tmp_path):
+    root = make_repo(tmp_path / "r")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_app.py").write_text("def test_a():\n    assert 1 + 1 == 2\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "add a test")
+
+    def weaken(r):
+        fix(r)
+        (r / "tests" / "test_app.py").write_text("def test_a():\n    assert True\n")
+
+    branch_with(root, trailer=True, edit=weaken)
+    rep = run_ci(root, "main")
+    assert rep.tier == "high" and "test_integrity" in rep.risk
+    assert rep.test_integrity and "tests/test_app.py" in rep.test_integrity[0]
+    text = rep.markdown()
+    assert "Tests weakened" in text and "tests/test_app.py" in text
+
+
+def test_a_new_workspace_config_is_not_a_weakened_test(tmp_path):
+    root = make_repo(tmp_path / "r")
+
+    def add_package_json(r):
+        fix(r)
+        (r / "web").mkdir()
+        (r / "web" / "package.json").write_text('{"name": "web", "version": "1.0.0"}\n')
+
+    branch_with(root, trailer=True, edit=add_package_json)
+    rep = run_ci(root, "main")
+    assert not rep.test_integrity and "Tests weakened" not in rep.markdown()

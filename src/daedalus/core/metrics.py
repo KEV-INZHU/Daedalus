@@ -67,6 +67,16 @@ class RunMetrics:
     followup_rounds: int = 0  # one-time fix rounds offered for non-blocking findings
     input_tokens: int = 0  # uncached + cache read + cache creation, over those sessions
     output_tokens: int = 0
+    # Evidence reused from earlier runs (`reused_from` events): what it saved, by the source's own record.
+    cache_check_hits: int = 0
+    cache_review_hits: int = 0
+    cache_seconds_saved: float = 0.0
+    cache_cost_saved: float = 0.0
+    cache_cash_saved: float = 0.0  # part of cache_cost_saved that was billed money
+
+    @property
+    def cache_hits(self) -> int:
+        return self.cache_check_hits + self.cache_review_hits
 
     @property
     def finished(self) -> bool:
@@ -87,7 +97,7 @@ class RunMetrics:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {**asdict(self), "first_pass": self.first_pass}
+        return {**asdict(self), "first_pass": self.first_pass, "cache_hits": self.cache_hits}
 
 
 def _tokens(session: dict[str, Any], key: str) -> int:
@@ -95,6 +105,33 @@ def _tokens(session: dict[str, Any], key: str) -> int:
         return max(int(session.get(key) or 0), 0)
     except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _reuse_savings(events: list[Event]) -> dict[str, Any]:
+    """Hits and savings from events that name the earlier evidence they reused. Savings are the
+    source's recorded duration and cost, so they are only as honest as that record."""
+    checks = reviews = 0
+    seconds = cost = cash = 0.0
+    for e in events:
+        if e.type == ev.EVIDENCE_RECORDED:
+            src = e.payload.get("reused_from")
+        elif e.type == ev.REVIEW_RECORDED:
+            src = e.payload.get("review", {}).get("reused_from")
+        else:
+            continue
+        if not isinstance(src, dict):
+            continue
+        checks += e.type == ev.EVIDENCE_RECORDED
+        reviews += e.type == ev.REVIEW_RECORDED
+        try:
+            s, c = max(float(src.get("duration_s") or 0), 0.0), max(float(src.get("cost") or 0), 0.0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        seconds += s if s == s else 0.0  # NaN-safe
+        cost += c if c == c else 0.0
+        cash += c if src.get("basis") == "cash" and c == c else 0.0
+    return {"cache_check_hits": checks, "cache_review_hits": reviews, "cache_seconds_saved": round(seconds, 3),
+            "cache_cost_saved": round(cost, 4), "cache_cash_saved": round(cash, 4)}
 
 
 def run_metrics(events: Iterable[Event]) -> RunMetrics:
@@ -137,6 +174,7 @@ def run_metrics(events: Iterable[Event]) -> RunMetrics:
         delta_reviews=sum(1 for r in state.reviews if r.scope == "delta"),
         late_findings=_late_findings(state),
         followup_rounds=state.followup_rounds,
+        **_reuse_savings(events),
     )
 
 
@@ -178,6 +216,12 @@ class Aggregate:
     delta_reviews: int = 0
     late_findings: int = 0
     reviews_per_accepted: float | None = None  # review sessions per accepted change (lower is cheaper)
+    cache_hits: int = 0  # checks and reviews reused from earlier runs instead of re-run
+    cache_check_hits: int = 0
+    cache_review_hits: int = 0
+    cache_seconds_saved: float = 0.0
+    cache_cost_saved: float = 0.0
+    cache_cash_saved: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -217,6 +261,12 @@ def aggregate(metrics: Iterable[RunMetrics]) -> Aggregate:
         delta_reviews=sum(m.delta_reviews for m in ms),
         late_findings=sum(m.late_findings for m in ms),
         reviews_per_accepted=round(sum(m.reviews for m in accepted) / len(accepted), 4) if accepted else None,
+        cache_hits=sum(m.cache_hits for m in ms),
+        cache_check_hits=sum(m.cache_check_hits for m in ms),
+        cache_review_hits=sum(m.cache_review_hits for m in ms),
+        cache_seconds_saved=round(sum(m.cache_seconds_saved for m in ms), 3),
+        cache_cost_saved=round(sum(m.cache_cost_saved for m in ms), 4),
+        cache_cash_saved=round(sum(m.cache_cash_saved for m in ms), 4),
     )
 
 

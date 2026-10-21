@@ -11,6 +11,7 @@ import textwrap
 import pytest
 
 from daedalus import cli
+from daedalus.cli import lifecycle
 
 # Drives cli.main with a stand-in `status` so the test does not depend on a repository.
 DRIVER = textwrap.dedent(
@@ -40,7 +41,8 @@ DRIVER = textwrap.dedent(
         os.write(write_end, b"x")
 
     import os
-    cli.cmd_status = {
+    from daedalus.cli import lifecycle
+    lifecycle.cmd_status = {
         "chatty": chatty, "broken": broken, "refused": refused,
         "interrupted": interrupted, "other_pipe": other_pipe,
     }[sys.argv[1]]
@@ -175,7 +177,7 @@ def test_broken_pipe_in_process_returns_sigpipe_status(monkeypatch):
     def broken_pipe(args):
         raise BrokenPipeError
 
-    monkeypatch.setattr(cli, "cmd_status", broken_pipe)
+    monkeypatch.setattr(lifecycle, "cmd_status", broken_pipe)
     monkeypatch.setattr(sys, "stdout", _ClosedStdout())
     assert cli.main(["status"]) == 128 + cli.SIGPIPE
 
@@ -184,7 +186,7 @@ def test_broken_pipe_in_process_with_healthy_stdout_propagates(monkeypatch):
     def broken_pipe(args):
         raise BrokenPipeError
 
-    monkeypatch.setattr(cli, "cmd_status", broken_pipe)
+    monkeypatch.setattr(lifecycle, "cmd_status", broken_pipe)
     monkeypatch.setattr(sys, "stdout", io.StringIO())
     with pytest.raises(BrokenPipeError):
         cli.main(["status"])
@@ -196,7 +198,7 @@ def test_error_paths_flush_closed_stdout_in_process(monkeypatch, exc, status):
         raise exc
 
     silenced = []
-    monkeypatch.setattr(cli, "cmd_status", failing)
+    monkeypatch.setattr(lifecycle, "cmd_status", failing)
     monkeypatch.setattr(cli, "_silence_stdout", lambda: silenced.append(True))
     monkeypatch.setattr(sys, "stdout", _ClosedStdout())
     monkeypatch.setattr(sys, "stderr", io.StringIO())
@@ -210,7 +212,7 @@ def test_error_paths_survive_closed_stderr(monkeypatch, exc, status):
         raise exc
 
     silenced = []
-    monkeypatch.setattr(cli, "cmd_status", failing)
+    monkeypatch.setattr(lifecycle, "cmd_status", failing)
     monkeypatch.setattr(cli, "_silence_stdout", lambda: silenced.append(True))
     monkeypatch.setattr(sys, "stdout", _ClosedStdout())
     monkeypatch.setattr(sys, "stderr", _ClosedStdout())
@@ -246,6 +248,6 @@ def test_other_exceptions_propagate_in_process(monkeypatch, exc):
     def failing(args):
         raise exc
 
-    monkeypatch.setattr(cli, "cmd_status", failing)
+    monkeypatch.setattr(lifecycle, "cmd_status", failing)
     with pytest.raises(type(exc)):
         cli.main(["status"])

@@ -45,6 +45,8 @@ class CheckDefinition:
     env_inputs: tuple[str, ...] = ()
     transient_exit_codes: tuple[int, ...] = ()
     retry_on_timeout: bool = False
+    cache: bool = True  # `cache: false`: non-deterministic, never reuse a result across runs
+    cache_inputs: tuple[str, ...] = ()  # files (paths or globs) whose contents join the cross-run cache key
 
     @property
     def definition_hash(self) -> str:
@@ -85,6 +87,20 @@ class Floor:
 
 
 @dataclass(frozen=True)
+class TestIntegrityPolicy:
+    """Test-tampering detection (see daedalus.verification.test_integrity).
+
+    A finding raises the risk tier to `tier` (the behavioral floor `test_integrity`), so the
+    tier's reviews apply. Disabling it is a policy change like any other: pinned and hashed."""
+
+    __test__ = False  # not a pytest class, whatever its name suggests
+
+    enabled: bool = True
+    test_globs: tuple[str, ...] = ()
+    tier: str = ""
+
+
+@dataclass(frozen=True)
 class Policy:
     policy_version: str
     tiers: tuple[str, ...]
@@ -113,6 +129,7 @@ class Policy:
     followup_severities: frozenset[str] = frozenset({"MAJOR", "MINOR"})
     # Whether Builders may run the run's check commands themselves (see docs/security-model.md).
     builder_runs_checks: bool = True
+    test_integrity: TestIntegrityPolicy = field(default_factory=TestIntegrityPolicy)
     raw: dict[str, Any] = field(repr=False, compare=False, default_factory=dict)
 
     # ------------------------------------------------------------------ hashing
@@ -169,6 +186,60 @@ def _strict_bool(raw: dict[str, Any], key: str, default: bool = False) -> bool:
     return value
 
 
+DEFAULT_MAX_AGE_S = 86400  # cross-run evidence cache: a source older than a day is not reused
+
+
+def cache_flag(value: Any, what: str) -> bool:
+    """A `cache` switch: a real boolean, or None for the default (on)."""
+    if value is None:
+        return True
+    if not isinstance(value, bool):
+        raise PolicyError(f"{what} must be true or false")
+    return value
+
+
+def cache_max_age(value: Any, what: str, default: int) -> int:
+    """A `max_age_s`: a positive integer number of seconds, or None for the default."""
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise PolicyError(f"{what} must be a positive integer number of seconds")
+    return value
+
+
+def _cache_inputs(cid: str, value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
+        raise PolicyError(f"check {cid!r} cache_inputs must be a list of paths or globs")
+    for x in value:
+        if x.startswith(("/", "\\")) or ".." in x.replace("\\", "/").split("/") or ":" in x.split("/")[0]:
+            raise PolicyError(f"check {cid!r} cache_inputs {x!r} must be a relative path inside the repository")
+    return tuple(value)
+
+
+def _test_integrity(raw: Any, tiers: tuple[str, ...], reqs: dict[str, TierRequirement]) -> TestIntegrityPolicy:
+    # Imported here: the detector's defaults live with the detector, which imports core.paths.
+    from daedalus.verification.test_integrity import DEFAULT_TEST_GLOBS
+
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise PolicyError("test_integrity must be a mapping")
+    unknown = set(raw) - {"enabled", "test_globs", "tier"}
+    if unknown:
+        raise PolicyError(f"test_integrity has unknown keys {sorted(unknown)}")
+    globs = raw.get("test_globs", list(DEFAULT_TEST_GLOBS))
+    if not isinstance(globs, list) or not all(isinstance(g, str) for g in globs):
+        raise PolicyError("test_integrity.test_globs must be a list of path globs")
+    # Default floor: the lowest tier that demands an independent review, else the highest tier.
+    independent = [t for t in tiers if reqs.get(t, TierRequirement()).independent_review]
+    tier = str(raw.get("tier", independent[0] if independent else tiers[-1]))
+    if tier not in tiers:
+        raise PolicyError(f"test_integrity.tier names unknown tier {tier!r}")
+    return TestIntegrityPolicy(_strict_bool(raw, "enabled", True), tuple(globs), tier)
+
+
 def policy_from_dict(raw: dict[str, Any]) -> Policy:
     if not isinstance(raw, dict):
         raise PolicyError("policy must be a mapping")
@@ -207,6 +278,8 @@ def policy_from_dict(raw: dict[str, Any]) -> Policy:
             env_inputs=tuple(c.get("env_inputs", ())),
             transient_exit_codes=tuple(int(x) for x in c.get("transient_exit_codes", ())),
             retry_on_timeout=bool(c.get("retry_on_timeout", False)),
+            cache=cache_flag(c.get("cache"), f"check {cid!r} cache"),
+            cache_inputs=_cache_inputs(cid, c.get("cache_inputs")),
         )
 
     floors_path = _floors(raw.get("path_floors"), "path_floors")
@@ -285,6 +358,7 @@ def policy_from_dict(raw: dict[str, Any]) -> Policy:
         rereview=rereview,
         followup_severities=frozenset(str(s) for s in followups),
         builder_runs_checks=_strict_bool(raw, "builder_runs_checks", True),
+        test_integrity=_test_integrity(raw.get("test_integrity"), tiers, reqs),
         raw=raw,
     )
 

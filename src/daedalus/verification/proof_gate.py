@@ -18,6 +18,7 @@ from daedalus.core.acceptance import budget_exhausted
 from daedalus.core.evidence import EvidenceRecord, environment_fingerprint
 from daedalus.core.policy import CheckDefinition
 from daedalus.verification.check_runner import CheckOutcome, run_check
+from daedalus.verification.evidence_cache import check_key, inputs_digest, reused_record
 
 if TYPE_CHECKING:  # pragma: no cover
     from daedalus.orchestration.ariadne import Ariadne
@@ -29,6 +30,27 @@ def _retryable(defn: CheckDefinition, out: CheckOutcome) -> bool:
     if out.timed_out:
         return defn.retry_on_timeout
     return out.result == "FAIL" and out.exit_code in defn.transient_exit_codes
+
+
+def _reuse(ari: Ariadne, cache, state, defn: CheckDefinition, required: set[str]) -> EvidenceRecord | None:
+    """Record an earlier PASS of this exact check on this exact candidate as evidence of this run.
+    The audit log says where it came from; `check_status` judges it like any other record."""
+    cand = ari.capture(state)
+    if not cand.complete:
+        return None  # an unreadable file means the hash does not describe the tree
+    fp, _ = environment_fingerprint(defn, ari.verifier_id)
+    key = check_key(cand.candidate_id, defn.check_id, defn.command, defn.timeout_s, defn.env_inputs, fp,
+                    state.policy_hash,
+                    inputs_digest=inputs_digest(ari.root, defn.cache_inputs))
+    found = cache.find_check(key, policy=state.policy, candidate_id=cand.candidate_id)
+    if found is None:
+        return None
+    src, source = found
+    rec = reused_record(src, run_id=state.run_id, contract_version=state.contract.contract_version,
+                        mandatory=defn.check_id in required, now=ari.clock())
+    ari._append(state.run_id, ev.EVIDENCE_RECORDED, SYSTEM,
+                {"record": rec.to_dict(), "reused_from": source.to_dict(key)})
+    return rec
 
 
 def verify(ari: Ariadne, run_id: str, *, only: set[str] | None = None) -> list[EvidenceRecord]:
@@ -52,14 +74,20 @@ def verify(ari: Ariadne, run_id: str, *, only: set[str] | None = None) -> list[E
             order = [c for c in order if c in only]
         trusted = ari.verifier_id in policy.trusted_verifiers
         log_dir = ari.state_dir / "runs" / run_id / "logs"
+        # Reuse needs a Daedalus-run check on a trusted verifier and an intact audit chain.
+        cache = ari.evidence_cache("checks") if trusted else None
 
         for check_id in order:
             defn = policy.checks[check_id]
+            if cache is not None and defn.cache and (hit := _reuse(ari, cache, state, defn, required)):
+                produced.append(hit)
+                continue
             for attempt in range(1, defn.max_attempts + 1):
                 state = ari.state(run_id)
                 if budget_exhausted(state, ari.clock()):
                     return produced
                 before = ari.capture(state)
+                digest = inputs_digest(ari.root, defn.cache_inputs)
                 key = f"{check_id}#{state.last_seq + 1}"
                 fp, env = environment_fingerprint(defn, ari.verifier_id)
                 ari._append(
@@ -117,7 +145,12 @@ def verify(ari: Ariadne, run_id: str, *, only: set[str] | None = None) -> list[E
                     timeout_s=defn.timeout_s,
                     mandatory=check_id in required,
                 )
-                ari._append(run_id, ev.EVIDENCE_RECORDED, SYSTEM, {"key": key, "record": rec.to_dict()})
+                # The `cache_inputs` digest is kept only if those files held still while the check ran.
+                stable = digest == inputs_digest(ari.root, defn.cache_inputs)
+                payload = {"key": key, "record": rec.to_dict()}
+                if stable:
+                    payload["cache_inputs_digest"] = digest
+                ari._append(run_id, ev.EVIDENCE_RECORDED, SYSTEM, payload)
                 produced.append(rec)
                 if not (trusted and result != "PASS" and _retryable(defn, out)):
                     break

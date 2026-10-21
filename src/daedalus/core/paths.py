@@ -13,6 +13,10 @@ import re
 from functools import lru_cache
 
 
+# Every spelling of a Makefile that `make` (and the check detector) recognises.
+MAKEFILE_NAMES: tuple[str, ...] = ("Makefile", "makefile", "GNUmakefile")
+
+
 @lru_cache(maxsize=1024)
 def _compile(pattern: str) -> re.Pattern[str]:
     pattern = pattern.replace("\\", "/").lstrip("/")

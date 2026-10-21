@@ -9,7 +9,7 @@ silently repaired.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from daedalus.audit.store import Event
@@ -204,6 +204,22 @@ class RunState:
 
 
 # --------------------------------------------------------------------- reducer
+#: Policy features a run records at start (run.created `policy_features`). A run without the
+#: marker was pinned before the feature existed.
+POLICY_FEATURES = ("test_integrity",)
+
+
+def _pinned_policy(raw: dict, features: Any = None) -> Policy:
+    """The policy a run pinned. A run created before test-integrity existed keeps behaving as it did
+    then: it has no `policy_features` marker, so a pinned policy without the key has the detector
+    disabled. A run that records the marker evaluates exactly what `policy_from_dict` reports, even
+    for a `policy_file` that omits the key (the default, enabled)."""
+    policy = policy_from_dict(raw)
+    if "test_integrity" not in raw and "test_integrity" not in (features or ()):
+        policy = replace(policy, test_integrity=replace(policy.test_integrity, enabled=False))
+    return policy
+
+
 def _created(ev: Event) -> RunState:
     p = ev.payload
     return RunState(
@@ -211,7 +227,7 @@ def _created(ev: Event) -> RunState:
         created_at=ev.ts,
         created_by=ev.actor,
         mode=p["mode"],
-        policy=policy_from_dict(p["policy"]),
+        policy=_pinned_policy(p["policy"], p.get("policy_features")),
         policy_hash=p["policy_hash"],
         contract=contract_from_dict(p["contract"]),
         contract_file=p.get("contract_file"),

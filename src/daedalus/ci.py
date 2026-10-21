@@ -36,7 +36,10 @@ import yaml
 from daedalus.core.config import load_config
 from daedalus.core.errors import DaedalusError
 from daedalus.core.risk import assess
+from daedalus.repository.candidate import file_sha256
 from daedalus.verification.check_runner import run_check
+from daedalus.verification.test_integrity import analyze as analyze_tests
+from daedalus.verification.test_integrity import check_runner_specs
 
 
 @dataclass
@@ -52,6 +55,7 @@ class CIReport:
     require_provenance: bool = False
     policy_source: str = "base"  # base | head (the base has no Daedalus config yet)
     policy_changed: list[str] = field(default_factory=list)
+    test_integrity: list[str] = field(default_factory=list)  # signals from the test-tampering scan
 
     @property
     def checks_ok(self) -> bool:
@@ -74,6 +78,10 @@ class CIReport:
                          f"{self.policy_source} branch's policy; the change applies once merged.")
         if self.policy_source == "head":
             lines.append("**Note:** the base branch has no Daedalus config, so this PR's own policy is used.")
+        if self.test_integrity:
+            lines.append("**Tests weakened?** The scan found changes that may have weakened the tests; "
+                         "a reviewer should check them:")
+            lines += [f"- {_cell(sig)}" for sig in self.test_integrity]
         if self.reviews or self.approvals:
             need = ", ".join([*(f"{r} review" for r in self.reviews), *(f"`{a}` approval" for a in self.approvals)])
             lines.append(f"**This tier requires:** {need}. Confirm them before merging.")
@@ -103,9 +111,10 @@ def _cell(text: str) -> str:
 
 
 def _git(root: Path, *args: str) -> str:
-    r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False)
+    r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                       encoding="utf-8", errors="surrogateescape", check=False)
     if r.returncode != 0:
-        raise DaedalusError(f"git {' '.join(args[:2])} failed: {r.stderr.strip()}")
+        raise DaedalusError(f"git {' '.join(a for a in args if a not in ('-c', 'core.quotepath=off'))[:40]} failed: {r.stderr.strip()}")
     return r.stdout
 
 
@@ -143,7 +152,10 @@ def run_ci(root: Path, base: str, *, require_provenance: bool = False) -> CIRepo
             "`actions/checkout` with `fetch-depth: 0`) or pass `--base <ref>`"
         )
     merge_base = r.stdout.strip()
-    changed = [p for p in _git(root, "diff", "--name-only", "--no-renames", merge_base, "HEAD").splitlines() if p]
+    changed = [
+        p for p in _git(root, "-c", "core.quotepath=off", "diff", "--name-only", "-z", "--no-renames",
+                        merge_base, "HEAD").split("\0") if p
+    ]
     with tempfile.TemporaryDirectory(prefix="daedalus-ci-") as tmpdir:
         tmp = Path(tmpdir)
         (tmp / "base").mkdir()
@@ -174,11 +186,27 @@ def run_ci(root: Path, base: str, *, require_provenance: bool = False) -> CIRepo
 
 def _report(root: Path, base: str, merge_base: str, changed: list[str], policy, require_provenance: bool,
             logs: Path) -> CIReport:
-    risk = assess(policy, changed, policy.tiers[0])
+    signals: list[str] = []
+    paths: tuple[str, ...] = ()
+    if policy.test_integrity.enabled:
+        files = {}
+        for p in changed:
+            try:
+                files[p] = file_sha256(root / p) if (root / p).is_file() else None
+            except OSError:
+                files[p] = None
+        scan = analyze_tests(
+            root, merge_base, files, policy.test_integrity.test_globs,
+            check_runner_specs(policy.checks[cid] for cid in policy.mandatory_checks()),
+        )
+        paths = scan.paths
+        signals = [f"{s.path}: {s.detail}" for s in scan.signals]
+    risk = assess(policy, changed, policy.tiers[0], test_integrity_paths=paths)
     req = policy.requirement(risk.effective_tier)
     report = CIReport(
         base=base, changed=changed, tier=risk.effective_tier, risk=risk.explain(),
         reviews=req.reviews, approvals=req.approvals, require_provenance=require_provenance,
+        test_integrity=signals,
     )
     for cid in policy.mandatory_checks():
         out = run_check(policy.checks[cid], root, logs, log_name=cid)

@@ -125,6 +125,15 @@
           },
           "retry_on_timeout": {
             "type": "boolean"
+          },
+          "cache": {
+            "type": "boolean"
+          },
+          "cache_inputs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }
@@ -196,6 +205,24 @@
     },
     "default_budget": {
       "type": "object"
+    },
+    "test_integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "tier": {
+          "type": "string"
+        },
+        "test_globs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "candidate": {
       "type": "object",

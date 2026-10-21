@@ -30,11 +30,12 @@ from typing import Any
 from daedalus.adapters.base import Adapter, AgentRequest, AgentResult, require
 from daedalus.core.acceptance import Decision
 from daedalus.core.errors import BudgetExhausted, ContractError, DaedalusError, IntegrationError
-from daedalus.core.state_machine import Disposition, ExecutionState, WorkerState
+from daedalus.core.state_machine import Disposition, ExecutionState, Severity, WorkerState
 from daedalus.orchestration import prompts
-from daedalus.orchestration.ariadne import SYSTEM, Ariadne
+from daedalus.orchestration.ariadne import SEVERITY_SYNONYMS, SYSTEM, Ariadne
 from daedalus.repository import snapshot
 from daedalus.repository.candidate import diff_text
+from daedalus.verification.evidence_cache import EvidenceCache, adapter_identity, review_inputs, review_key_from
 
 Notify = Callable[[str], None]
 
@@ -120,6 +121,66 @@ def refuse_unaffordable(state: Any, adapter: Adapter, what: str) -> None:
         )
 
 
+def _review_key(ari: Ariadne, state: Any, perspective: str, adapter: Adapter) -> tuple[str, str, dict] | None:
+    """(candidate id, cache key, key inputs) for a first-pass full review of the current tree, or None
+    if it cannot be computed: an unreadable tree, or an adapter with no explicitly configured model
+    (the key could not name what ran)."""
+    if adapter_identity(adapter) is None:
+        return None
+    cand = ari.capture(state)
+    if not cand.complete:
+        return None  # an unreadable file means the hash does not describe the tree
+    inputs = review_inputs(perspective, state.policy_hash, state.contract,
+                           prompts.review_template_hash(perspective), adapter, first_pass=True)
+    return cand.candidate_id, review_key_from(cand.candidate_id, inputs), inputs
+
+
+def _reuse_review(ari: Ariadne, state: Any, perspective: str, keyed: tuple[str, str, dict],
+                  cache: EvidenceCache, notify: Notify) -> str | None:
+    """Record an earlier approving review of this exact candidate as this run's review, without
+    launching anything. Every precondition is checked before anything is recorded, so a refusal
+    leaves no trace and the caller launches a real review."""
+    cand_id, key, inputs = keyed
+    found = cache.find_review(key, candidate_id=cand_id, blocking=state.policy.blocking_severities)
+    if found is None:
+        return None
+    r, source = found
+    reviewer, findings = r["reviewer"], r.get("findings", ())
+    if reviewer.startswith("system:") or reviewer in state.candidate_authors:
+        return None  # the reviewer authored this run's candidate: launch a fresh one
+    if not _well_formed(findings) or ari.capture(state).candidate_id != cand_id:
+        return None  # a malformed source, or the tree moved since the lookup
+    run_id = state.run_id
+    cand = ari.record_candidate(run_id, actor=SYSTEM, authored=False, label=f"review {perspective} (reused)")
+    if cand.candidate_id != cand_id:
+        return None  # moved again in between: this review does not describe it
+    try:
+        rid = ari.submit_review(
+            run_id, reviewer=reviewer, perspective=perspective, summary=r.get("summary", ""),
+            findings=findings, source="launched", exposed_to=(), candidate_id=cand.candidate_id,
+            extra={"cache_key": key, "cache_inputs": inputs, "duration_s": source.duration_s, "cost": source.cost,
+                   "cost_basis": source.basis, "reused_from": source.to_dict(key)},
+        )
+    except (ContractError, DaedalusError):
+        return None
+    notify(f"{perspective} review reused from run {source.run_id} (event {source.seq}): "
+           f"same candidate, contract, policy, prompt and model")
+    return rid
+
+
+def _well_formed(findings: Any) -> bool:
+    """What `submit_review` insists on: a title and evidence, and a known severity."""
+    if not isinstance(findings, (list, tuple)):
+        return False
+    for f in findings:
+        if not isinstance(f, dict) or not str(f.get("title", "")).strip() or not str(f.get("evidence", "")).strip():
+            return False
+        raw = str(f.get("severity", "")).strip().upper()
+        if raw not in SEVERITY_SYNONYMS and raw not in {s.value for s in Severity}:
+            return False
+    return True
+
+
 def launch_review(
     ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, notify: Notify = _quiet
 ) -> str | None:
@@ -131,29 +192,37 @@ def launch_review(
         {"launch_agent": True, "structured_results": True, "identity": "launched"},
         state.policy.allowed_degradations,
     )
-    refuse_unaffordable(state, adapter, f"a {perspective} review")
-    cand = ari.record_candidate(run_id, actor=SYSTEM, authored=False, label=f"review {perspective}")
-    decision = ari.evaluate(run_id)
     prior = [
         {"id": f.finding_id, "severity": f.severity.value, "title": f.title, "required_change": f.required_change}
         for f in state.open_findings
         if f.perspective == perspective
     ]
+    again = any(r.perspective == perspective and r.contract_version == state.contract.contract_version
+                for r in state.reviews)
+    # Only a first-pass review, shown no earlier findings, is keyed: a re-review answers a different prompt.
+    cache = ari.evidence_cache("reviews") if not (again or prior) else None
+    keyed = _review_key(ari, state, perspective, adapter) if cache is not None else None
+    if keyed is not None and (reused := _reuse_review(ari, state, perspective, keyed, cache, notify)):
+        return reused
+    refuse_unaffordable(state, adapter, f"a {perspective} review")
+    cand = ari.record_candidate(run_id, actor=SYSTEM, authored=False, label=f"review {perspective}")
+    decision = ari.evaluate(run_id)
     checks = {k: (v[0].value, v[1]) for k, v in decision.check_states.items()}
+    integrity = decision.integrity.review_section() if decision.integrity else ""
     run_dir = ari.state_dir / "runs" / run_id
     delta = _delta_basis(ari, state, perspective, cand, run_dir) if delta_ok(state) else None
     if delta is not None:
         old_id, inter, touched = delta
-        prompt = prompts.delta_review_prompt(perspective, state.contract, inter, touched, old_id, checks, prior)
+        prompt = prompts.delta_review_prompt(perspective, state.contract, inter, touched, old_id, checks, prior,
+                                             integrity)
         notify(f"launching {perspective} delta review of candidate {cand.short} "
                f"({len(touched)} file(s) changed since {old_id[:12]})")
     else:
-        again = any(r.perspective == perspective and r.contract_version == state.contract.contract_version
-                    for r in state.reviews)
         prompt = prompts.review_prompt(perspective, state.contract, diff_text(ari.root, cand), checks, prior,
-                                       first_pass=not again)
+                                       first_pass=not again, integrity=integrity)
         notify(f"launching {perspective} review of candidate {cand.short}")
     snapshot.save(ari.root, run_dir, cand.candidate_id, cand.manifest)  # best effort: else the next is full
+    started = ari.clock()
     res = adapter.run_agent(
         AgentRequest(
             run_id, f"review-{perspective}", perspective, prompt, ari.root, REVIEW_TIMEOUT_S, read_only=True,
@@ -191,6 +260,11 @@ def launch_review(
             candidate_id=cand.candidate_id,
             scope="delta" if delta is not None else "full",
             delta_from=delta[0] if delta is not None else None,
+            # What a later run needs to reuse this verdict, and to say what reusing it saved.
+            # The key binds to the candidate reviewed: if the tree moved since it was computed there is none.
+            extra={**({"cache_key": keyed[1], "cache_inputs": keyed[2]}
+                      if keyed is not None and delta is None and keyed[0] == cand.candidate_id else {}),
+                   "duration_s": round(ari.clock() - started, 3), "cost": res.cost, "cost_basis": res.cost_basis},
         )
     except (ContractError, DaedalusError) as exc:
         failed(f"invalid review result: {exc}")

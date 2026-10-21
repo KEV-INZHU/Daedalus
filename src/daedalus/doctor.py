@@ -29,6 +29,7 @@ class Finding:
     ok: bool
     detail: str
     fix: str = ""
+    warn: bool = False  # passes, but something the person should know (shown as WARN, not FAIL)
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
@@ -192,8 +193,17 @@ def _adapter(cfg: RepoConfig | None) -> tuple[list[Finding], object | None]:
         return [Finding(name, False, f"invalid adapter: {exc}", f"correct `adapter:` in {CONFIG_FILE}")], None
     caps = adapter.capabilities
     if not (caps.launch_agent and caps.structured_results and caps.identity == "launched"):
-        return [Finding(name, False, f"`{adapter.name}` cannot launch reviewers",
-                        f"set `adapter: claude-code` in {CONFIG_FILE}")], None
+        if cfg.mode == "gate":
+            # What `init` writes: gate mode runs checks only, so no reviewer is needed. A risk floor can
+            # still ask for a review; that falls to a person until an adapter is configured.
+            return [Finding(name, True,
+                            f"`{adapter.name}`: gate mode runs checks only, and nothing can launch an independent "
+                            f"review, so high-tier changes (risk floors such as auth, migrations, test_integrity) "
+                            f"will need a human `daedalus risk-exception`",
+                            f"for automatic reviews set `adapter: claude-code` and `mode: review` in {CONFIG_FILE}",
+                            warn=True)], None
+        return [Finding(name, False, f"`{adapter.name}` cannot launch reviewers, and mode `{cfg.mode}` needs them",
+                        f"set `adapter: claude-code` in {CONFIG_FILE}, or `mode: gate`")], None
     available = getattr(adapter, "available", None)
     if available is not None and not available():
         cmd = getattr(adapter, "argv", [adapter.name])[0]
@@ -242,8 +252,8 @@ def render(findings: list[Finding]) -> list[str]:
     lines = []
     for f in findings:
         detail = " ".join(f.detail.split())  # parser errors span lines; keep one line per finding
-        lines.append(f"{'ok  ' if f.ok else 'FAIL'}  {f.name}: {detail}")
-        if not f.ok:
+        lines.append(f"{'FAIL' if not f.ok else 'WARN' if f.warn else 'ok  '}  {f.name}: {detail}")
+        if not f.ok or f.warn:
             lines.append(f"      fix: {f.fix}")
     bad = sum(not f.ok for f in findings)
     lines.append("ready: the gate is set up" if not bad else f"{bad} problem(s) found")

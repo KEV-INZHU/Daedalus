@@ -49,7 +49,13 @@ def assess(
     *,
     capture_complete: bool = True,
     exception_tier: str | None = None,
+    test_integrity_paths: tuple[str, ...] = (),
+    integrity_acknowledged: bool = False,
 ) -> RiskAssessment:
+    """`test_integrity_paths`: test files the tamper detector flagged. They raise the behavioral
+    floor `test_integrity` to the policy's configured tier (an independent review by default).
+    `integrity_acknowledged`: a human's risk exception recorded those very signals, so the floor
+    is not applied; every other floor still is."""
     contributions = [RiskContribution("declared", "contract", declared_tier)]
     for source, floors in (
         ("path", policy.path_floors),
@@ -60,6 +66,10 @@ def assess(
             for p in changed_paths:
                 if match_any(p, floor.patterns):
                     contributions.append(RiskContribution(source, floor.name, floor.tier, p))
+    if test_integrity_paths and policy.test_integrity.enabled and not integrity_acknowledged:
+        contributions.append(
+            RiskContribution("behavioral", "test_integrity", policy.test_integrity.tier, test_integrity_paths[0])
+        )
     if not capture_complete:
         contributions.append(RiskContribution("uncertainty", "incomplete-capture", policy.highest_tier))
 

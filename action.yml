@@ -1,0 +1,69 @@
+name: Daedalus gate
+description: Re-run a repository's committed Daedalus checks on a pull request and report risk and provenance.
+author: KEV-INZHU
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  python-version:
+    description: Python version used to run Daedalus and your checks.
+    default: "3.12"
+  daedalus-source:
+    description: >-
+      What `pip install` receives for Daedalus. Pin it to a commit or tag, for example
+      `git+https://github.com/KEV-INZHU/Daedalus@<commit-or-tag>` (or `daedalus==<version>` after the
+      first PyPI release), so the tool judging pull requests doesn't change under you.
+    default: git+https://github.com/KEV-INZHU/Daedalus
+  install-command:
+    description: Shell command that installs what your checks need (for example `pip install -e ".[dev]"`). Empty to skip.
+    default: ""
+  base:
+    description: Base ref to compare against. Defaults to origin/<the pull request's base branch>.
+    default: ""
+  require-provenance:
+    description: Fail when a commit lacks a Daedalus-Run trailer ("true" or "false").
+    default: "false"
+  extra-args:
+    description: Extra arguments appended to `daedalus ci`, space-separated.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install Daedalus
+      shell: bash
+      env:
+        DAEDALUS_SOURCE: ${{ inputs.daedalus-source }}  # via env, never interpolated into the script
+      run: python -m pip install "$DAEDALUS_SOURCE"
+    - name: Install project
+      if: inputs.install-command != ''
+      shell: bash
+      env:
+        INSTALL_COMMAND: ${{ inputs.install-command }}
+      run: eval "$INSTALL_COMMAND"
+    - name: Gate
+      shell: bash
+      env:
+        BASE_INPUT: ${{ inputs.base }}
+        BASE_REF: ${{ github.base_ref }}
+        REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
+        EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        if [ -z "$BASE_INPUT" ] && [ -z "$BASE_REF" ]; then
+          echo "::error::no base to compare against: this event is not a pull_request, so set the action's 'base:' input (for example origin/main)"
+          exit 2
+        fi
+        base="${BASE_INPUT:-origin/$BASE_REF}"
+        args=(--base "$base")
+        if [ "$REQUIRE_PROVENANCE" = "true" ]; then args+=(--require-provenance); fi
+        # Splitting EXTRA_ARGS on whitespace is intended: it is a flag list from the workflow author.
+        # Globbing is switched off so a `*` in it stays literal.
+        set -f
+        # shellcheck disable=SC2206
+        extra=($EXTRA_ARGS)
+        set +f
+        daedalus ci "${args[@]}" "${extra[@]}"
