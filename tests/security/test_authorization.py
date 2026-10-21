@@ -50,11 +50,11 @@ def test_expired_authorization_denies_action(ari, repo, clock):
 def test_approval_is_bound_to_candidate(ari, repo):
     rid = ari.start({"objective": "o"}, actor=HUMAN)
     fix(repo)
-    (repo / "src" / "auth").mkdir()
-    (repo / "src" / "auth" / "a.py").write_text("", encoding="utf-8")
+    (repo / "secrets").mkdir()  # critical tier: the default policy requires a merge approval
+    (repo / "secrets" / "a.txt").write_text("", encoding="utf-8")
     ari.approve(rid, "merge", actor=HUMAN)
     assert "approval:merge" not in {r.code for r in ari.evaluate(rid).reasons}
-    (repo / "src" / "auth" / "a.py").write_text("changed = 1\n", encoding="utf-8")
+    (repo / "secrets" / "a.txt").write_text("changed = 1\n", encoding="utf-8")
     assert "approval:merge" in {r.code for r in ari.evaluate(rid).reasons}
 
 

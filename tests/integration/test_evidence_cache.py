@@ -186,14 +186,14 @@ def test_cli_no_cache_flag(repo, monkeypatch, capsys):
     a = Ariadne(repo)
     r2 = reopen(a, first_run(a, repo))
     a.close()
-    assert cli.main(["-C", str(repo), "verify", "--no-review", "--no-cache"]) == 0
+    assert cli.main(["-C", str(repo), "verify", "--no-review", "--no-cache", "--no-finish"]) == 0
     assert "reused" not in capsys.readouterr().out
     a = Ariadne(repo)
     assert reused(a, r2) == [] and ran(a, r2) == 1
     a.abandon(r2, actor=HUMAN, reason="x")
-    r3 = a.start({"objective": "o"}, actor=HUMAN)
+    a.start({"objective": "o"}, actor=HUMAN)
     a.close()
-    assert cli.main(["-C", str(repo), "verify", "--no-review"]) == 0
+    assert cli.main(["-C", str(repo), "verify", "--no-review", "--no-finish"]) == 0
     assert "reused from run" in capsys.readouterr().out
 
 

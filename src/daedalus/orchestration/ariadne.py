@@ -45,7 +45,7 @@ from daedalus.core.errors import (
 from daedalus.core.evidence import EvidenceRecord, environment_fingerprint
 from daedalus.core.paths import normalize
 from daedalus.core.policy import ActionDefinition, is_agent, sha256_hex
-from daedalus.core.run import RunState, WorkerRecord, replay
+from daedalus.core.run import POLICY_FEATURES, RunState, WorkerRecord, replay
 from daedalus.core.state_machine import (
     WORKER_ACTIVE,
     AuthorizationState,
@@ -60,6 +60,9 @@ from daedalus.orchestration.scheduler import WorkPackage, dispatch_blockers, liv
 from daedalus.repository import worktree
 from daedalus.repository.candidate import CandidateManifest, capture, file_sha256, git_head
 from daedalus.verification.evidence_cache import EvidenceCache
+from daedalus.verification.test_integrity import IntegrityReport
+from daedalus.verification.test_integrity import analyze as analyze_tests
+from daedalus.verification.test_integrity import check_runner_specs
 
 DEFAULT_VERIFIER = "daedalus-proof-gate@local"
 CLEANUP_ATTEMPTS = 3  # workspace removals tried before leaving it to a human
@@ -107,6 +110,7 @@ class Ariadne:
         self.verifier_id = verifier_id
         self.adapter = adapter
         self.no_cache = no_cache  # `--no-cache`: never reuse evidence from earlier runs
+        self._integrity_cache: dict[tuple[str, str, tuple[str, ...]], IntegrityReport] = {}
         self.lock = OrchestratorLock(self.state_dir / "orchestrator.lock")
 
     @classmethod
@@ -177,14 +181,34 @@ class Ariadne:
             for cid in state.contract.required_checks
             if cid in state.policy.checks
         }
+        candidate = self.capture(state)
         return Observation(
-            candidate=self.capture(state),
+            candidate=candidate,
             policy_hash=policy_hash,
             policy_error=policy_error,
             contract_file_hash=self._contract_file_hash(state.run_id),
             env_fingerprints=fps,
             now=self.clock(),
+            test_integrity=self.test_integrity(state, candidate),
         )
+
+    def test_integrity(self, state: RunState, candidate: CandidateManifest) -> IntegrityReport | None:
+        """Compare the candidate's test files with the base's (None when the policy turns it off)."""
+        cfg = state.policy.test_integrity
+        if not cfg.enabled:
+            return None
+        # Memoised: the scan spawns git per changed test file and evaluate runs on every status line.
+        runner = check_runner_specs(state.policy.checks[cid] for cid in state.policy.mandatory_checks())
+        key = (candidate.candidate_id, state.contract.base_revision, tuple(cfg.test_globs), runner)
+        report = self._integrity_cache.get(key)
+        if report is None:
+            report = analyze_tests(
+                self.root, state.contract.base_revision, candidate.manifest["files"], cfg.test_globs, runner
+            )
+            if len(self._integrity_cache) > 32:
+                self._integrity_cache.clear()
+            self._integrity_cache[key] = report
+        return report
 
     def evaluate(self, run_id: str) -> Decision:
         state = self.state(run_id)
@@ -304,6 +328,7 @@ class Ariadne:
                 "contract": contract.to_dict(),
                 "policy": policy.raw,
                 "policy_hash": policy.policy_hash,
+                "policy_features": list(POLICY_FEATURES),
                 "mode": mode,
                 "contract_file": rel,
                 "contract_file_hash": fhash,
@@ -697,14 +722,28 @@ class Ariadne:
         )
 
     def risk_exception(
-        self, run_id: str, tier: str, *, actor: str, rationale: str, interactive: bool = False
+        self, run_id: str, tier: str, *, actor: str, rationale: str, interactive: bool = False,
+        expected_candidate: str | None = None, expected_integrity: tuple[str, ...] | None = None,
     ) -> None:
+        """Record a risk exception for the current candidate. `expected_candidate` and
+        `expected_integrity` (the candidate id and signal digests the human was shown) make the
+        call refuse when the tree changed in between: an exception must cover what was shown."""
         state = self._running(run_id)
         state.policy.tier_rank(tier)
         if not state.policy.has_authority(actor, "risk_exception"):
             raise AuthorizationError(f"{actor} lacks `risk_exception` authority")
         if not rationale.strip():
             raise ContractError("a risk exception needs a rationale")
+        candidate = self.capture(state)
+        report = self.test_integrity(state, candidate)
+        digests = tuple(report.digests()) if report else ()
+        if (expected_candidate is not None and expected_candidate != candidate.candidate_id) or (
+            expected_integrity is not None and tuple(expected_integrity) != digests
+        ):
+            raise ContractError(
+                "the working tree changed while you were confirming, so the candidate or its test-integrity "
+                "signals are not the ones you were shown; nothing recorded. Run it again."
+            )
         self._append(
             run_id,
             ev.RISK_EXCEPTION,
@@ -712,8 +751,10 @@ class Ariadne:
             {
                 "tier": tier,
                 "rationale": rationale,
-                "candidate_id": self.capture(state).candidate_id,
+                "candidate_id": candidate.candidate_id,
                 "interactive": interactive,
+                # The test-integrity signals the human was shown: the exception covers exactly these.
+                "integrity": list(digests),
             },
         )
 

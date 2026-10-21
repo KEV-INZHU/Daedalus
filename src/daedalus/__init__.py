@@ -5,4 +5,5 @@ state, risk policy, evidence validation, authorization and the derived
 acceptance decision. Harness adapters supply agent execution only.
 """
 
-__version__ = "0.1.0"
+# The single source of truth for the version: pyproject.toml reads it (`[tool.setuptools.dynamic]`).
+__version__ = "0.2.0"

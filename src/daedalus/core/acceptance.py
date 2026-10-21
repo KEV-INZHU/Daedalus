@@ -21,6 +21,7 @@ from daedalus.core.risk import RiskAssessment, assess
 from daedalus.core.run import RunState
 from daedalus.core.state_machine import AuthorizationState, CheckState, Disposition
 from daedalus.repository.candidate import CandidateManifest
+from daedalus.verification.test_integrity import IntegrityReport
 
 AGENT, HUMAN, SYSTEM = "agent", "human", "system"
 
@@ -33,6 +34,8 @@ class Observation:
     contract_file_hash: str | None
     env_fingerprints: dict[str, str]
     now: float
+    # What the test-tampering detector found in this candidate; None when it was not run.
+    test_integrity: IntegrityReport | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,7 @@ class Decision:
     check_states: dict[str, tuple[CheckState, str]] = field(default_factory=dict)
     required_reviews: tuple[str, ...] = ()
     required_approvals: tuple[str, ...] = ()
+    integrity: IntegrityReport | None = None
 
     @property
     def agent_fixable(self) -> list[Reason]:
@@ -73,6 +77,7 @@ class Decision:
             "required_reviews": list(self.required_reviews),
             "required_approvals": list(self.required_approvals),
             "reasons": [r.to_dict() for r in self.reasons],
+            "test_integrity": self.integrity.to_dict() if self.integrity else {"flagged": False, "signals": []},
         }
 
 
@@ -84,13 +89,29 @@ def valid_exception_tier(state: RunState, candidate_id: str) -> str | None:
     return None
 
 
-def risk_for(state: RunState, candidate: CandidateManifest) -> RiskAssessment:
+def integrity_acknowledged(state: RunState, candidate_id: str, integrity: IntegrityReport | None) -> bool:
+    """True when the latest valid risk exception for this candidate was recorded by a human who was
+    shown every test-integrity signal now present (the exception stores a digest of each). An
+    exception granted for another reason, or before the signals existed, does not cover them."""
+    if integrity is None or not integrity.flagged:
+        return False
+    for e in reversed(state.risk_exceptions):
+        if e["candidate_id"] == candidate_id and state.policy.has_authority(e["by"], "risk_exception"):
+            return set(integrity.digests()) <= set(e.get("integrity") or ())
+    return False
+
+
+def risk_for(
+    state: RunState, candidate: CandidateManifest, integrity: IntegrityReport | None = None
+) -> RiskAssessment:
     return assess(
         state.policy,
         candidate.changed_paths,
         state.contract.risk_tier,
         capture_complete=candidate.complete,
         exception_tier=valid_exception_tier(state, candidate.candidate_id),
+        test_integrity_paths=integrity.paths if integrity else (),
+        integrity_acknowledged=integrity_acknowledged(state, candidate.candidate_id, integrity),
     )
 
 
@@ -140,6 +161,32 @@ def review_satisfied(
     return False
 
 
+def test_integrity_cleared(
+    state: RunState,
+    candidate_id: str,
+    reviews_needed: tuple[str, ...],
+    independent: bool,
+    integrity: IntegrityReport | None = None,
+) -> bool:
+    """A test-integrity signal stops blocking when a human acknowledged these very signals (a risk
+    exception bound to this candidate that recorded them) or when the independent reviews its tier
+    requires have all passed over it: the reviewers were shown the flagged hunks. With no
+    independent review required or available the signal keeps blocking, so tampering cannot be
+    accepted by the gate alone."""
+    if integrity_acknowledged(state, candidate_id, integrity):
+        return True
+    return independent and bool(reviews_needed) and all(
+        review_satisfied(state, p, candidate_id, True) for p in reviews_needed
+    )
+
+
+def tier_without_test_integrity(state: RunState, risk: RiskAssessment) -> str:
+    """The tier every other floor yields: what a risk exception should name to acknowledge tampering
+    signals without waiving any other floor."""
+    tiers = [c.tier for c in risk.contributions if c.name != "test_integrity" and c.source != "exception"]
+    return state.policy.max_tier(*tiers)
+
+
 def observed_violations(state: RunState, obs: Observation) -> list[tuple[str, str, str]]:
     """(key, message, fixable_by) for violations visible in the live state."""
     out = []
@@ -149,7 +196,9 @@ def observed_violations(state: RunState, obs: Observation) -> list[tuple[str, st
             (
                 "policy_drift",
                 f"the effective policy changed after the run started (pinned {state.policy_hash[:12]}, now {now}). "
-                "A changed policy cannot certify this run: revert the change or start a new run.",
+                "A changed policy cannot certify this run: revert the change or start a new run "
+                "(upgrading Daedalus changes the built-in defaults, so a run opened on an older version "
+                "cannot be certified either).",
                 HUMAN,
             )
         )
@@ -196,7 +245,8 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
     policy = state.policy
     cand = obs.candidate
     cid = cand.candidate_id
-    risk = risk_for(state, cand)
+    integrity = obs.test_integrity if policy.test_integrity.enabled else None
+    risk = risk_for(state, cand, integrity)
     tier = risk.effective_tier
     reviews_needed = required_reviews(state, tier)
     approvals_needed = required_approvals(state, tier)
@@ -206,7 +256,8 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
         disposition: Disposition, reasons: list[Reason], acceptable: bool = False, terminal: bool = False
     ) -> Decision:
         return Decision(
-            disposition, reasons, acceptable, terminal, cid, risk, checks, reviews_needed, approvals_needed
+            disposition, reasons, acceptable, terminal, cid, risk, checks, reviews_needed, approvals_needed,
+            integrity,
         )
 
     # 1. A valid terminal acceptance is preserved; later edits need a new run.
@@ -361,6 +412,22 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
                     SYSTEM,
                 )
             )
+
+    if integrity is not None and integrity.flagged and not test_integrity_cleared(
+        state, cid, reviews_needed, independent, integrity
+    ):
+        rest = tier_without_test_integrity(state, risk)
+        reasons.append(
+            Reason(
+                "test_integrity",
+                f"tests weakened: {integrity.summary()}; restore the assertion or fix the code. If this test "
+                f"change is deliberate, a human acknowledges these signals for this candidate with `daedalus "
+                f"risk-exception {rest} --rationale ...` (`{rest}` is the tier every other floor yields, so "
+                "the exception waives the test-integrity floor and nothing else), or the independent "
+                "reviews of the flagged hunks clear it.",
+                AGENT,
+            )
+        )
 
     for action, (st, msg, _) in approval_states.items():
         if st not in (AuthorizationState.APPROVED, AuthorizationState.DENIED):

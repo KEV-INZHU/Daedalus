@@ -64,6 +64,69 @@ same question. The cache is built to that:
   version and policy hash and passes the same staleness checks as any record, so the acceptance predicate
   is unchanged and the audit trail shows exactly what was not re-run.
 
+## Test tampering
+
+A green check proves little if the agent changed the tests that define green. The commonest cheat
+is to replace a failing test with `assert True`, delete it, or skip it. Daedalus scans every
+changed test file against the base revision, deterministically and without a model:
+
+- tests or test files removed or emptied, and tests that no longer assert anything
+- a net drop in assertions
+- skip or focus markers added (`pytest.mark.skip`, `it.skip`, `.only`, `t.Skip`, `#[ignore]`, ...)
+- trivially true assertions (`assert True`, `expect(true).toBe(true)`, ...)
+- a changed expected literal in `assert f(x) == <literal>` (Python)
+
+Python is parsed with `ast`; JS/TS, Go and Rust use diff-based heuristics. Tests that move
+between files, are renamed or are newly added are not flagged. A test file that cannot be
+analysed (syntax error, binary, too large) is itself a signal: unknown is never a pass.
+
+A signal raises the risk tier to at least the policy's `test_integrity.tier` (floor id
+`test_integrity`; `high` by default, the lowest tier that requires an independent review) and
+adds an agent-fixable reason with the code `test_integrity` and a message such as
+``tests weakened: tests/test_app.py: 'test_add' lost 1 assertion and now asserts `True`; restore
+the assertion or fix the code``. The flagged hunks go into every launched reviewer's prompt. The
+reason stops blocking when the agent restores the test, when the independent reviews the tier
+requires have all passed, or when a human acknowledges the signals with `daedalus risk-exception`.
+The reason names the tier to pass: the tier every *other* floor yields, so the exception drops the
+`test_integrity` floor and waives nothing else (an auth or migration floor still applies). The
+command shows the signals it is acknowledging, and the exception records a digest of each; it covers
+exactly those signals on that candidate, so an exception granted for another reason does not clear
+tampering, and any later edit needs a new one. In `gate` mode with no reviewer available the agent
+can only fix the tests, so tampering cannot be accepted by the gate alone.
+
+A run started before this detector existed keeps the behaviour it was pinned with (detector off).
+Every run started since records that it carries the feature, so a `policy_file` that omits the
+`test_integrity:` key gets the same default (enabled) in a run as in `daedalus ci` and `daedalus policy`.
+
+Configure it under `test_integrity:` in the policy (`enabled`, `tier`, `test_globs`; the default globs cover
+`test_*.py`, `*_test.py`, `*_tests.py`, `tests.py` and `test.py` (Django and unittest layouts), `tests/` and
+`test/` directories, `*.test.*`, `*.spec.*`, `*_test.go` and `__tests__/`). Turning it
+off is a policy change, pinned and hashed like any other.
+
+Limits: it reads the base and the candidate, not intent. A rewrite that keeps the assertion count
+but weakens what is asserted (for example `assert x` for `assert x == 3`) can pass the scan, and
+Go, Rust and JS tests are judged by regex, not a parser; JS assertions are not attributed to
+individual tests, so removing one in a test and adding another elsewhere in the same file nets out
+(the equivalent Python change is flagged). Python assertions that cannot fail are flagged:
+`assert True`, `assert x or True`, `assert (x, "msg")` (a non-empty literal is always true), and
+assertions that sit after an unconditional `return`/`raise` (or an `if True: return`), under `if <falsy
+constant>:`, inside a `try` whose `except AssertionError`, `except Exception`, `except BaseException`
+(dotted or in a tuple) or bare `except` does not re-raise, or inside `with contextlib.suppress(...)` /
+`with pytest.raises(AssertionError)`. A skip marker that moves from one test to another is flagged. Following a
+test target's prerequisites in a Makefile is not done. Other ways to neutralise an assertion (a never-called helper, an always-false guard that is not a
+constant) are not seen. Changes to test-runner config are signals too, since they can disable tests
+without touching a test file: `conftest.py`, `pytest.ini`, `jest.config.*`, `vitest.config.*`, and only
+the test-related part of the shared files: `[tool.pytest*]`/`[tool.coverage*]` in `pyproject.toml`,
+`[tool:pytest]`/`[coverage:*]` in `setup.cfg`, `[pytest]`/`[testenv*]` in `tox.ini`, the `jest` key and
+the `test`, `pretest`, `posttest` and `test:*` scripts of `package.json`, and the `test`/`tests`/`check`
+targets of any `Makefile`/`makefile`/`GNUmakefile`, a `[tool]` table of `pyproject.toml` that holds pytest or
+coverage keys, and `noxfile.py`. An unrelated edit to those files, or adding or removing one with no runner
+configuration, is not a signal. Every repository file named in a mandatory check's command or
+`cache_inputs` (`run_tests.py`, `scripts/test.sh`) is runner config too, and any change to it is a signal
+(the whole file is compared). A test counts as moved only into a file the runner collects by name, and only
+where that name is new in the file. It narrows the cheat; the reviewers still
+decide whether the flagged change is legitimate.
+
 ## Human identity on the local CLI
 
 Human-only commands (`approve`, `deny`, `attest`, `amend`, `risk-exception`,

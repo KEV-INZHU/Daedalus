@@ -208,16 +208,18 @@ def launch_review(
     cand = ari.record_candidate(run_id, actor=SYSTEM, authored=False, label=f"review {perspective}")
     decision = ari.evaluate(run_id)
     checks = {k: (v[0].value, v[1]) for k, v in decision.check_states.items()}
+    integrity = decision.integrity.review_section() if decision.integrity else ""
     run_dir = ari.state_dir / "runs" / run_id
     delta = _delta_basis(ari, state, perspective, cand, run_dir) if delta_ok(state) else None
     if delta is not None:
         old_id, inter, touched = delta
-        prompt = prompts.delta_review_prompt(perspective, state.contract, inter, touched, old_id, checks, prior)
+        prompt = prompts.delta_review_prompt(perspective, state.contract, inter, touched, old_id, checks, prior,
+                                             integrity)
         notify(f"launching {perspective} delta review of candidate {cand.short} "
                f"({len(touched)} file(s) changed since {old_id[:12]})")
     else:
         prompt = prompts.review_prompt(perspective, state.contract, diff_text(ari.root, cand), checks, prior,
-                                       first_pass=not again)
+                                       first_pass=not again, integrity=integrity)
         notify(f"launching {perspective} review of candidate {cand.short}")
     snapshot.save(ari.root, run_dir, cand.candidate_id, cand.manifest)  # best effort: else the next is full
     started = ari.clock()

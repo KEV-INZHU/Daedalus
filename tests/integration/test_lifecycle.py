@@ -192,7 +192,7 @@ def test_cli_criteria_are_proved_by_the_checks(repo, capsys, monkeypatch):
     monkeypatch.setenv("CLAUDECODE", "1")
     assert cli.main(["-C", str(repo), "start", "make app ok", "-c", "app says ok"]) == 0
     fix(repo)
-    assert cli.main(["-C", str(repo), "verify"]) == 0
+    assert cli.main(["-C", str(repo), "verify", "--no-finish"]) == 0
     assert cli.main(["-C", str(repo), "finish"]) == 0  # no human attestation needed
 
 

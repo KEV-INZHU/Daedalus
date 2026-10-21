@@ -20,8 +20,12 @@ tier_requirements:
     reviews: [aristotle]
     approvals: []
   high:
+    # No human merge approval by default: three independent, Daedalus-launched
+    # read-only reviews plus the trusted checks must pass on the exact candidate.
+    # Teams that want a human on high-tier merges add `approvals: [merge]` here.
+    # Critical (secrets, the gate's own verification policy) keeps the human.
     reviews: [socrates, aristotle, james]
-    approvals: [merge]
+    approvals: []
     independent_review: true
   critical:
     reviews: [socrates, mozi, aristotle, james]
@@ -80,6 +84,18 @@ behavioral_floors:
   - name: pii
     patterns: ["**/pii/**", "**/gdpr/**"]
     tier: high
+
+# Test-tampering detection. When the candidate removes or empties tests, drops assertions, adds
+# skip/focus markers, adds trivially true assertions (`assert True`) or changes an expected value,
+# the risk tier rises to `tier` (floor id `test_integrity`) and the decision says why. `tier`
+# should be one that requires an independent review. A human acknowledges a deliberate test
+# change with `daedalus risk-exception`. `test_globs` replaces the default list below.
+test_integrity:
+  enabled: true
+  tier: high
+  test_globs: ["**/test_*.py", "**/*_test.py", "**/*_tests.py", "**/tests.py", "**/test.py", "**/tests/**", "**/*.test.js", "**/*.test.ts",
+               "**/*.test.jsx", "**/*.test.tsx", "**/*.test.mjs", "**/*.test.cjs", "**/*.spec.*",
+               "**/*_test.go", "**/__tests__/**", "**/test/**"]
 
 # Trusted check definitions. Contracts may ADD required checks from this list;
 # they can never remove a mandatory one.

@@ -99,7 +99,20 @@ def test_sensitive_path_enforces_risk_floor(ari, repo):
     d = ari.finish(rid)
     assert d.risk.effective_tier == "high"
     assert d.disposition is Disposition.BLOCKED
-    assert {"review:socrates", "review:aristotle", "review:james", "approval:merge"} <= reason_codes(d)
+    assert {"review:socrates", "review:aristotle", "review:james"} <= reason_codes(d)
+    assert "approval:merge" not in reason_codes(d)  # high tier needs no human merge approval by default
+
+
+def test_critical_path_still_requires_merge_approval(ari, repo):
+    rid = ari.start({"objective": "o"}, actor=HUMAN)
+    fix(repo)
+    (repo / "secrets").mkdir()
+    (repo / "secrets" / "token.txt").write_text("x\n", encoding="utf-8")
+    ari.verify(rid)
+    d = ari.finish(rid)
+    assert d.risk.effective_tier == "critical"
+    assert d.disposition is Disposition.BLOCKED
+    assert "approval:merge" in reason_codes(d)
 
 
 def test_declared_risk_cannot_lower_floor(ari, repo):

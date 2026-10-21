@@ -147,7 +147,7 @@ def _no_daedalus_on_path(root, bindir, mp):
 
 
 def _inline_adapter(root, bindir, mp):
-    edit_config(root, adapter="inline")
+    edit_config(root, adapter="inline", mode="review")  # gate mode needs no reviewer; review mode does
 
 
 def _adapter_unavailable(root, bindir, mp):
@@ -371,3 +371,30 @@ def test_doctor_creates_nothing_in_an_empty_directory(tmp_path, bindir, capsys):
     before = tree_state(root)
     doctor(root, capsys)
     assert tree_state(root) == before
+
+
+# ------------------------------------------- first run: what `init` writes must pass
+def test_inline_adapter_in_gate_mode_is_not_a_failure(ready, capsys):
+    edit_config(ready, adapter="inline", mode="gate")
+    code, out = doctor(ready, capsys)
+    assert code == 0, out
+    assert "FAIL" not in out
+    assert "gate mode runs checks only" in out
+
+
+def test_a_fresh_init_commit_passes_doctor(tmp_path, bindir, capsys):
+    root = tmp_path / "fresh"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "t@example.com")
+    git(root, "config", "user.name", "t")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_app.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "base")
+
+    assert cli.main(["-C", str(root), "init", "--commit"]) == 0
+    capsys.readouterr()
+    code, out = doctor(root, capsys)
+    assert code == 0, out
+    assert "FAIL" not in out

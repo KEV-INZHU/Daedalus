@@ -9,6 +9,8 @@ The user-facing file is deliberately small:
       tests: python -m pytest -q
       typecheck: {command: [mypy, src], mandatory: true}
     cache: {checks: true, reviews: true, max_age_s: 86400}  # reuse verified evidence across runs (default on)
+    harness:
+      auto_finish: true    # `daedalus verify` records acceptance when every condition holds
     policy: {...}          # optional overrides of any default-policy key
     policy_file: path.yaml # or: a complete policy file instead of the default
 
@@ -20,6 +22,7 @@ policy and detects a test command, so `daedalus run "..."` works zero-config.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -29,6 +32,7 @@ from typing import Any
 import yaml
 
 from daedalus.core.contracts import MODES
+from daedalus.core.paths import MAKEFILE_NAMES
 from daedalus.core.errors import PolicyError
 from daedalus.core.policy import (
     DEFAULT_MAX_AGE_S,
@@ -92,24 +96,111 @@ def _check_entry(cid: str, value: Any) -> dict[str, Any]:
     raise PolicyError(f"check {cid!r} must be a command string, list, or mapping")
 
 
-def detect_checks(root: Path) -> dict[str, dict[str, Any]]:
-    """Best-effort test command for zero-config use. Never guesses silently:
-    `daedalus status` shows what was detected, and `daedalus init` writes it down."""
-    if (root / "pyproject.toml").exists() or (root / "setup.py").exists() or (root / "pytest.ini").exists():
-        return {"tests": {"command": ["python", "-m", "pytest", "-q"], "timeout_s": 1800}}
-    pkg = root / "package.json"
-    if pkg.exists():
-        try:
-            scripts = json.loads(pkg.read_text(encoding="utf-8")).get("scripts", {})
-        except (ValueError, OSError):
-            scripts = {}
-        if "test" in scripts:
-            return {"tests": {"command": ["npm", "test", "--silent"], "timeout_s": 1800}}
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _has_python_tests(root: Path) -> bool:
+    """A `tests/` tree holding Python files, or a `test_*.py` next to the code. Looks only for
+    files, so a JavaScript repo's `tests/` directory does not read as pytest."""
+    tests = root / "tests"
+    if tests.is_dir() and (any(tests.rglob("test_*.py")) or any(tests.rglob("*_test.py"))):
+        return True
+    return any(root.glob("test_*.py"))
+
+
+def _node_runner(root: Path) -> list[str]:
+    """How this package manager runs a script, from the lockfile that says which one the project uses."""
+    if (root / "pnpm-lock.yaml").exists():
+        return ["pnpm"]
+    if (root / "yarn.lock").exists():
+        return ["yarn"]
+    if (root / "bun.lockb").exists() or (root / "bun.lock").exists():
+        return ["bun", "run"]
+    return ["npm"]
+
+
+def _package_json(root: Path) -> dict[str, Any]:
+    try:
+        data = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+# `npm init` writes this placeholder as the test script; running it only fails.
+_NPM_PLACEHOLDER_TEST = "no test specified"
+
+
+def _detect_tests(root: Path) -> dict[str, Any] | None:
+    py_signals = (
+        any((root / f).exists() for f in ("pyproject.toml", "setup.py", "setup.cfg", "pytest.ini"))
+        or _has_python_tests(root)
+    )
+    if py_signals:
+        # uv owns the environment when it has a lockfile; `uv run` is then the only command that finds pytest.
+        cmd = ["uv", "run", "pytest", "-q"] if (root / "uv.lock").exists() else ["python", "-m", "pytest", "-q"]
+        return {"command": cmd, "timeout_s": 1800}
+    if (root / "tox.ini").exists():
+        return {"command": ["tox"], "timeout_s": 3600}
+    for name in MAKEFILE_NAMES:
+        if re.search(r"^test\s*:(?![:=])", _read(root / name), re.MULTILINE):
+            return {"command": ["make", "test"], "timeout_s": 1800}
+    scripts = _package_json(root).get("scripts")
+    test = scripts.get("test") if isinstance(scripts, dict) else None
+    if isinstance(test, str) and _NPM_PLACEHOLDER_TEST not in test:
+        runner = _node_runner(root)
+        cmd = ["npm", "test", "--silent"] if runner == ["npm"] else [*runner, "test"]
+        return {"command": cmd, "timeout_s": 1800}
     if (root / "Cargo.toml").exists():
-        return {"tests": {"command": ["cargo", "test", "--quiet"], "timeout_s": 3600}}
+        return {"command": ["cargo", "test", "--quiet"], "timeout_s": 3600}
     if (root / "go.mod").exists():
-        return {"tests": {"command": ["go", "test", "./..."], "timeout_s": 1800}}
-    return {}
+        return {"command": ["go", "test", "./..."], "timeout_s": 1800}
+    return None
+
+
+def _detect_quality(root: Path) -> dict[str, dict[str, Any]]:
+    """Lint and type checks, only for tools the repository itself configures, and never mandatory:
+    a style failure should be visible, not a reason to refuse the work. Conservative on purpose."""
+    pyproject = _read(root / "pyproject.toml")
+    py_prefix = ["uv", "run"] if (root / "uv.lock").exists() else ["python", "-m"]
+    out: dict[str, dict[str, Any]] = {}
+
+    def add(cid: str, command: list[str]) -> None:
+        out.setdefault(cid, {"command": command, "timeout_s": 900, "mandatory": False})
+
+    if "[tool.ruff" in pyproject or (root / "ruff.toml").exists() or (root / ".ruff.toml").exists():
+        add("lint", [*py_prefix, "ruff", "check", "."] if py_prefix[0] == "uv" else ["ruff", "check", "."])
+    if "[tool.mypy" in pyproject or (root / "mypy.ini").exists() or (root / ".mypy.ini").exists():
+        add("typecheck", [*py_prefix, "mypy", "."])
+    elif "[tool.pyright" in pyproject or (root / "pyrightconfig.json").exists():
+        add("typecheck", ["uv", "run", "pyright"] if py_prefix[0] == "uv" else ["pyright"])
+    pkg = _package_json(root)
+    deps = {
+        **(pkg["dependencies"] if isinstance(pkg.get("dependencies"), dict) else {}),
+        **(pkg["devDependencies"] if isinstance(pkg.get("devDependencies"), dict) else {}),
+    }
+    if (root / "tsconfig.json").exists() and "typescript" in deps:
+        runner = _node_runner(root)
+        exec_ = {"npm": ["npx", "--no-install"], "pnpm": ["pnpm", "exec"], "yarn": ["yarn"], "bun": ["bunx"]}
+        add("typecheck", [*exec_[runner[0]], "tsc", "--noEmit"])
+    return out
+
+
+def detect_checks(root: Path, *, quality: bool = True) -> dict[str, dict[str, Any]]:
+    """Best-effort checks for zero-config use. Never guesses silently:
+    `daedalus status` shows what was detected, and `daedalus init` writes it down.
+
+    The test command is the only mandatory check. Lint and type checks join it, optional, when the
+    repository configures those tools. Without a recognised test command nothing is returned,
+    because a gate with only advisory checks would accept anything."""
+    tests = _detect_tests(root)
+    if tests is None:
+        return {}
+    return {"tests": tests, **(_detect_quality(root) if quality else {})}
 
 
 def load_config(root: str | Path) -> RepoConfig:
@@ -119,7 +210,9 @@ def load_config(root: str | Path) -> RepoConfig:
     notes: list[str] = []
     if not path.exists():
         raw = dict(default_raw)
-        raw["checks"] = detect_checks(root)
+        # Lint and type checks are for `daedalus init` to write down; an unconfigured run does not
+        # start running them (up to 900s each) on every verify.
+        raw["checks"] = detect_checks(root, quality=False)
         notes.append(
             "no .daedalus.yml: using the default policy with detected checks "
             f"{sorted(raw['checks']) or 'NONE'}"
@@ -172,12 +265,15 @@ def load_config(root: str | Path) -> RepoConfig:
     if isinstance(adapter, str):
         adapter = {"name": adapter}
     policy_from_dict(raw)  # validate now so errors point at the config file
+    harness = dict(cfg.get("harness") or {})
+    if "auto_finish" in harness and not isinstance(harness["auto_finish"], bool):
+        raise PolicyError("`harness: auto_finish` must be true or false")
     return RepoConfig(
         root=root,
         enabled=bool(cfg.get("enabled", True)),
         mode=mode,
         adapter=dict(adapter),
-        harness=dict(cfg.get("harness") or {}),
+        harness=harness,
         policy_raw=raw,
         source="file",
         notes=tuple(notes),
@@ -230,6 +326,10 @@ def uncommitted_policy_files(root: Path) -> list[str]:
     return [line[3:] for line in r.stdout.splitlines() if line.strip()]
 
 
+# The timeout a check gets when it sets none (CheckDefinition.timeout_s).
+DEFAULT_CHECK_TIMEOUT_S = 600
+
+
 def render_config(checks: dict[str, dict[str, Any]], adapter: str | None = None) -> str:
     lines = [
         "# Daedalus gate configuration (see the Daedalus README).",
@@ -244,11 +344,20 @@ def render_config(checks: dict[str, dict[str, Any]], adapter: str | None = None)
     if adapter:
         lines += ["# Agent harness used by `daedalus run` and `daedalus review`.", f"adapter: {adapter}", ""]
     lines += ["# Trusted checks. Every check here is mandatory unless `mandatory: false`.", "checks:"]
-    if not checks:
-        lines += ["  # tests: python -m pytest -q", "  {}"]
+    if not checks:  # no entries at all: loads as "no checks", and doctor says what to add
+        lines.append("  # tests: python -m pytest -q")
     for cid, entry in checks.items():
-        cmd = " ".join(shlex.quote(c) for c in entry["command"])
-        lines.append(f"  {cid}: {cmd}")
+        mandatory = entry.get("mandatory", True)
+        timeout = entry.get("timeout_s")
+        if mandatory and timeout in (None, DEFAULT_CHECK_TIMEOUT_S):
+            lines.append(f"  {cid}: " + " ".join(shlex.quote(c) for c in entry["command"]))
+        else:  # a flow mapping keeps the command an exact list, whatever it contains
+            parts = [f"command: {json.dumps(entry['command'])}"]
+            if timeout not in (None, DEFAULT_CHECK_TIMEOUT_S):
+                parts.append(f"timeout_s: {json.dumps(timeout)}")
+            if not mandatory:
+                parts.append("mandatory: false")
+            lines.append(f"  {cid}: {{{', '.join(parts)}}}")
     lines += [
         "",
         "# Override any key of the default policy (risk floors, tier requirements,",

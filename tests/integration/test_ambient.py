@@ -153,7 +153,7 @@ def test_verify_launches_the_required_review_itself(tmp_path, clock, monkeypatch
     reviewer = SimulatedAdapter({"aristotle": [ScriptedStep(structured={"summary": "fine", "findings": []})]})
     monkeypatch.setattr(claude_code, "_review_adapter", lambda _root: reviewer)
     monkeypatch.setenv("CLAUDECODE", "1")
-    assert cli.main(["-C", str(root), "verify"]) == 0
+    assert cli.main(["-C", str(root), "verify", "--no-finish"]) == 0
     assert [r.role for r in reviewer.requests] == ["aristotle"]
     assert cli.main(["-C", str(root), "finish"]) == 0  # ACCEPTED: no one typed `daedalus review`
 
