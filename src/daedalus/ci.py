@@ -18,8 +18,8 @@ committed, so a contributor's machine never has to be trusted:
    fails the job when any non-merge commit lacks one. Trailers are claims, not
    proof; the checks in step 1 are the proof.
 
-It writes a Markdown report to `$GITHUB_STEP_SUMMARY` when that is set, and
-exits non-zero when a check fails or required provenance is missing.
+It writes a Markdown report to `$GITHUB_STEP_SUMMARY` when that is set (and a compact pull request
+comment body to `--markdown-out`), and exits non-zero when a check fails or required provenance is missing.
 """
 
 from __future__ import annotations
@@ -56,6 +56,10 @@ class CIReport:
     policy_source: str = "base"  # base | head (the base has no Daedalus config yet)
     policy_changed: list[str] = field(default_factory=list)
     test_integrity: list[str] = field(default_factory=list)  # signals from the test-tampering scan
+    signals: list[tuple[str, str, str]] = field(default_factory=list)  # kind, path, detail (same scan, structured)
+    durations: dict[str, float] = field(default_factory=dict)  # check id -> seconds
+    tier_source: str = ""  # what set the tier: "path", "behavioral", ...
+    head_sha: str = ""  # the commit that was judged; shown in the headline so a stale comment is visible
 
     @property
     def checks_ok(self) -> bool:
@@ -68,6 +72,92 @@ class CIReport:
     @property
     def ok(self) -> bool:
         return self.checks_ok and not (self.require_provenance and self.unattested)
+
+    def headline(self) -> str:
+        """One line for the top of the PR comment."""
+        if self.ok:
+            state = "✅ passed"
+        elif not self.checks_ok:
+            state = "❌ failed"
+        else:
+            state = "❌ failed (provenance missing)"
+        if not self.tier_source:
+            where = ""
+        elif self.tier_source in _FLOOR_SOURCES:
+            where = f" ({_cell(self.tier_source)} floor)"
+        else:
+            where = f" ({_cell(self.tier_source)})"
+        tier = f"tier {_cell(self.tier)}{where}"
+        if not self.checks:
+            tests = "no checks"
+        elif len(self.checks) <= 3:
+            tests = " · ".join(f"{_cell(cid)} {res}" for cid, (res, _) in self.checks.items())
+        else:
+            good = sum(1 for r, _ in self.checks.values() if r == "PASS")
+            tests = f"{good}/{len(self.checks)} checks PASS"
+        scan = "tamper scan clean" if not self.signals else f"tamper scan: {len(self.signals)} signal(s)"
+        sha = f" @ `{_cell(self.head_sha[:10])}`" if self.head_sha else ""
+        return f"Daedalus CI: {state}{sha} · {tier} · {tests} · {scan}"
+
+    def pr_comment(self) -> str:
+        """The sticky pull request comment: a headline, then collapsible details. Everything that
+        comes from the repository goes through `_cell`, so a hostile path or commit message can't
+        inject markup. The trailing marker lets the action find and update this one comment."""
+        out = [self.headline(), ""]
+        if self.policy_changed:
+            out += [f"Policy changed in this PR ({_cell(', '.join(self.policy_changed))}): judged by the "
+                    f"{self.policy_source} branch's policy; the change applies once merged.", ""]
+        if self.policy_source == "head":
+            out += ["Note: the base branch has no Daedalus config, so this PR's own policy is used.", ""]
+        if self.checks:
+            rows = ["| Check | Result | Time | Detail |", "|---|---|---|---|"]
+            for cid, (res, detail) in self.checks.items():
+                took = f"{self.durations[cid]:.1f}s" if cid in self.durations else ""
+                rows.append(f"| `{_cell(cid)}` | {res} | {took} | {_cell(detail)} |")
+        else:
+            rows = ["The committed policy defines no mandatory check."]
+        out += _details("Checks", rows)
+        out += _details("Risk tier", [f"{len(self.changed)} file(s) changed against `{_cell(self.base)}`.", "",
+                                      _cell(self.risk)])
+        if self.signals:
+            rows = [f"- {_cell(k)}: `{_cell(p)}` {_cell(d)}" for k, p, d in self.signals[:_MAX_ROWS]]
+            if len(self.signals) > _MAX_ROWS:
+                rows.append(f"- … and {len(self.signals) - _MAX_ROWS} more")
+            out += _details("Test-integrity signals",
+                            ["Changes that may have weakened the tests; a reviewer should check them.", "", *rows])
+        else:
+            out += _details("Test-integrity signals", ["None found."])
+        if self.reviews or self.approvals:
+            need = [*(f"- {_cell(r)} review" for r in self.reviews), *(f"- {_cell(a)} approval" for a in self.approvals)]
+            out += _details("Required reviews (listed, not verified)",
+                            ["CI cannot see local review records. Confirm these before merging.", "", *need])
+        if self.commits:
+            n = len(self.commits) - len(self.unattested)
+            rows = [f"- `{_cell(sha[:10])}` {_cell(subj)}"
+                    + (f" (run `{_cell(rid)}`)" if rid else " — no Daedalus-Run trailer")
+                    for sha, subj, rid in self.commits[:_MAX_ROWS]]
+            if len(self.commits) > _MAX_ROWS:
+                rows.append(f"- … and {len(self.commits) - _MAX_ROWS} more")
+            out += _details("Provenance trailers",
+                            [f"{n} of {len(self.commits)} commit(s) carry a Daedalus-Run trailer. Trailers are "
+                             "claims; the checks are the proof.", "", *rows])
+        out.append(COMMENT_MARKER)
+        body = "\n".join(out)
+        if len(body) > _MAX_COMMENT:  # keep the marker so the comment can still be updated
+            body = _truncate(body, _MAX_COMMENT)
+        return body + "\n"
+
+    def annotations(self) -> list[str]:
+        """GitHub workflow commands: warnings on test-integrity signals (inline on the diff) and
+        errors on failing checks."""
+        lines = []
+        for kind, path, detail in self.signals:
+            lines.append(f"::warning file={_prop(path)},line=1,title={_prop('Daedalus: ' + kind)}::{_data(detail)}")
+        for cid, (res, detail) in self.checks.items():
+            if res != "PASS":
+                msg = f"check {cid} {res}" + (f": {detail}" if detail else "")
+                lines.append(f"::error title={_prop('Daedalus check failed')}::{_data(msg)}")
+        return lines
 
     def markdown(self) -> str:
         mark = "✅" if self.ok else "❌"
@@ -97,6 +187,36 @@ class CIReport:
                 lines.append(f"- `{sha[:10]}` {_cell(subject)}"
                              + (f" (run `{_cell(rid)}`)" if rid else " — no `Daedalus-Run` trailer"))
         return "\n".join(lines) + "\n"
+
+
+COMMENT_MARKER = "<!-- daedalus-ci -->"
+_FLOOR_SOURCES = ("path", "change", "behavioral")
+_MAX_ROWS = 50
+_MAX_COMMENT = 60000  # GitHub rejects comments over 65536 characters
+
+
+def _truncate(body: str, limit: int) -> str:
+    """Cut a comment body on a line boundary (never inside an entity), close any `<details>` the
+    cut left open, and end with the marker so the comment can still be found and updated."""
+    tail = "\n</details>\n\n(truncated)\n" + COMMENT_MARKER
+    cut = body[: max(0, limit - len(tail))]
+    cut = cut[: cut.rfind("\n")] if "\n" in cut else ""
+    close = "\n</details>" * max(0, cut.count("<details>") - cut.count("</details>"))
+    return cut + close + "\n\n(truncated)\n" + COMMENT_MARKER
+
+
+def _details(title: str, body: list[str]) -> list[str]:
+    return [f"<details><summary>{title}</summary>", "", *body, "", "</details>", ""]
+
+
+def _data(text: str) -> str:
+    """Escape a workflow command's message (GitHub's rules)."""
+    return str(text).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _prop(text: str) -> str:
+    """Escape a workflow command property: the message rules plus `:` and `,`."""
+    return _data(text).replace(":", "%3A").replace(",", "%2C")
 
 
 def _cell(text: str) -> str:
@@ -142,7 +262,8 @@ def _base_config(root: Path, merge_base: str, tmp: Path):
     return load_config(tmp)
 
 
-def run_ci(root: Path, base: str, *, require_provenance: bool = False) -> CIReport:
+def run_ci(root: Path, base: str, *, require_provenance: bool = False,
+           markdown_out: str | Path | None = None, head_sha: str = "") -> CIReport:
     from daedalus.core.config import CONFIG_FILE
 
     r = subprocess.run(["git", "-C", str(root), "merge-base", base, "HEAD"], capture_output=True, text=True, check=False)
@@ -174,6 +295,12 @@ def run_ci(root: Path, base: str, *, require_provenance: bool = False) -> CIRepo
         report = _report(root, base, merge_base, changed, policy, require_provenance, tmp / "logs")
         report.policy_source = source
         report.policy_changed = sorted(p for p in changed if p in policy_files)
+    report.head_sha = head_sha or _git(root, "rev-parse", "HEAD").strip()
+    if markdown_out:
+        try:
+            Path(markdown_out).write_text(report.pr_comment(), encoding="utf-8")
+        except OSError as exc:
+            raise DaedalusError(f"cannot write the comment body to {markdown_out}: {exc}") from exc
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         try:
@@ -184,9 +311,19 @@ def run_ci(root: Path, base: str, *, require_provenance: bool = False) -> CIRepo
     return report
 
 
+def _tier_source(risk) -> str:
+    """What set the effective tier; "escalated" when the effective tier is above every contribution."""
+    found = next((c.source for c in risk.contributions
+                  if c.tier == risk.effective_tier and c.source != "declared"), "")
+    if found:
+        return found
+    return "" if any(c.tier == risk.effective_tier for c in risk.contributions) else "escalated"
+
+
 def _report(root: Path, base: str, merge_base: str, changed: list[str], policy, require_provenance: bool,
             logs: Path) -> CIReport:
     signals: list[str] = []
+    items: list[tuple[str, str, str]] = []
     paths: tuple[str, ...] = ()
     if policy.test_integrity.enabled:
         files = {}
@@ -201,17 +338,20 @@ def _report(root: Path, base: str, merge_base: str, changed: list[str], policy, 
         )
         paths = scan.paths
         signals = [f"{s.path}: {s.detail}" for s in scan.signals]
+        items = [(s.kind, s.path, s.detail) for s in scan.signals]
     risk = assess(policy, changed, policy.tiers[0], test_integrity_paths=paths)
     req = policy.requirement(risk.effective_tier)
     report = CIReport(
         base=base, changed=changed, tier=risk.effective_tier, risk=risk.explain(),
         reviews=req.reviews, approvals=req.approvals, require_provenance=require_provenance,
-        test_integrity=signals,
+        test_integrity=signals, signals=items,
+        tier_source=_tier_source(risk),
     )
     for cid in policy.mandatory_checks():
         out = run_check(policy.checks[cid], root, logs, log_name=cid)
         detail = out.error or (f"exit {out.exit_code}" if out.result != "PASS" else "")
         report.checks[cid] = (out.result, detail)
+        report.durations[cid] = max(0.0, out.ended_at - out.started_at)
     log = _git(root, "log", "--no-merges", "--format=%H%x1f%s%x1f%(trailers:key=Daedalus-Run,valueonly,separator=%x2c)%x1e",
                f"{merge_base}..HEAD")
     for rec in log.split("\x1e"):
@@ -258,3 +398,11 @@ def render_workflow(source: str, install: str | None = None, require_provenance:
     step = f"      - name: Install project\n        run: {json.dumps(install)}\n" if install else ""
     source = json.dumps(f"pip install {shlex.quote(source)}")  # one argument to pip, safe in YAML
     return WORKFLOW.format(source=source, install=step, flags=" --require-provenance" if require_provenance else "")
+
+
+def write_result(path: str | Path, verdict: str, *, head_sha: str = "", detail: str = "") -> None:
+    """The machine-readable verdict the action reads: `passed`, `blocked` or `error`. It is the only
+    thing the action trusts for the outcome; an exit code alone cannot tell a block from a crash."""
+    assert verdict in ("passed", "blocked", "error")
+    data = {"verdict": verdict, "head_sha": head_sha, "detail": detail[:500]}
+    Path(path).write_text(json.dumps(data) + "\n", encoding="utf-8")

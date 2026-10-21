@@ -1,0 +1,15 @@
+# solo: one developer plus agents, cost-conscious.
+# One reviewer from the first review-worthy change, three independent reviewers and no human
+# approval on high-risk work, and the evidence cache on so an identical tree is checked once.
+# Critical risk (secrets, the gate's own policy) keeps the human merge approval from the default.
+mode: review
+cache: {checks: true, reviews: true}
+policy:
+  tier_requirements:
+    medium:
+      reviews: [aristotle]
+      approvals: []
+    high:
+      reviews: [socrates, aristotle, james]
+      approvals: []
+      independent_review: true

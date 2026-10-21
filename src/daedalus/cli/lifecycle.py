@@ -28,6 +28,7 @@ from daedalus.cli._common import (
 )
 from daedalus.core.config import (
     CONFIG_FILE,
+    PRESETS,
     STATE_DIR,
     detect_checks,
     find_root,
@@ -55,6 +56,10 @@ def cmd_init(args: argparse.Namespace) -> int:
     if cfg.exists() and (args.ci or not args.force):  # with --ci, --force refreshes only the workflow
         _print(f"{CONFIG_FILE} already exists" + (" (kept; --ci --force refreshes only the workflow)" if args.ci
                                                   else " (use --force to overwrite)"))
+        if args.preset:
+            _print(f"preset {args.preset!r} was NOT applied: the existing {CONFIG_FILE} is kept. Add `preset: "
+                   f"{args.preset}` to it yourself (see what it changes: daedalus policy --preset {args.preset} "
+                   f"--diff), or use --force to rewrite the file (the old one is saved as a backup)")
     else:
         if cfg.exists():  # --force replaces a file someone may have edited by hand: keep it
             bak = cfg.with_name(CONFIG_FILE + ".bak")
@@ -72,8 +77,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         adapter = args.adapter or _default_adapter(root, args)
         if adapter and not args.adapter:
             _print(f"adapter: {adapter} (found the `claude` binary; independent reviews can launch)")
-        cfg.write_text(render_config(checks, adapter), encoding="utf-8")
+        cfg.write_text(render_config(checks, adapter, args.preset), encoding="utf-8")
         _print(f"wrote {CONFIG_FILE} with checks: {', '.join(checks) or 'NONE — add one before starting a run'}")
+        if args.preset:
+            _print(f"preset: {args.preset} (see what it changes: daedalus policy --preset {args.preset} --diff)")
         written.append(CONFIG_FILE)
     if _ensure_ignored(root, f"{STATE_DIR}/"):
         _print(f"added {STATE_DIR}/ to .gitignore")
@@ -418,6 +425,9 @@ def register(sub: Any) -> None:
     sp = add_command(sub, "init", cmd_init, "write .daedalus.yml with detected checks")
     sp.add_argument("--adapter", help="agent harness for `daedalus run` (e.g. claude-code)")
     sp.add_argument("--claude-code", action="store_true", help=argparse.SUPPRESS)  # the default now
+    sp.add_argument("--preset", choices=PRESETS,
+                    help="policy preset: solo (one developer, cost-conscious) | standard (the defaults) | "
+                         "strict (full council and human approval on high risk)")
     sp.add_argument("--no-hooks", action="store_true", help="do not install the harness hooks and git hook")
     sp.add_argument("--harness", action="append", metavar="NAME",
                     help="harness to install (repeatable; default: claude-code plus every detected harness)")

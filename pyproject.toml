@@ -48,7 +48,7 @@ version = { attr = "daedalus.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-daedalus = ["data/*.yaml", "data/skills/*/*.md", "data/harness/*/*", "data/demo/**/*"]
+daedalus = ["data/*.yaml", "data/presets/*.yaml","data/skills/*/*.md", "data/harness/*/*", "data/demo/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

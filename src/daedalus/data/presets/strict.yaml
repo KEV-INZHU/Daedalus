@@ -1,0 +1,13 @@
+# strict: a full council and a human merge approval on high and critical work, and pushes
+# refused when a commit was not accepted by the gate.
+harness: {require_provenance_on_push: true}
+policy:
+  tier_requirements:
+    high:
+      reviews: [socrates, mozi, aristotle, james]
+      approvals: [merge]
+      independent_review: true
+    critical:
+      reviews: [socrates, mozi, aristotle, james]
+      approvals: [merge]
+      independent_review: true

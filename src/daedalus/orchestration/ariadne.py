@@ -1196,7 +1196,7 @@ class Ariadne:
             )
         if quota is not None:
             self._append(run_id, ev.QUOTA_OBSERVED, SYSTEM, quota)
-        if usage is None and res.status != "COMPLETED" and not cost:
+        if (usage is None and res.status != "COMPLETED" and not cost) or (res.cost_unknown and basis == "cash"):
             # The session ended without reporting its cost; record the gap rather than imply it was free.
             self._append(run_id, ev.SESSION_USAGE, SYSTEM, {"task_id": task_id, "role": role,
                                                             "session_id": res.session_id, "status": res.status,

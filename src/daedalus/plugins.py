@@ -182,14 +182,18 @@ def preset_available(preset: dict[str, Any]) -> tuple[bool, str]:
 
 def list_adapters() -> list[PluginInfo]:
     from daedalus.adapters.command import PRESETS
+    from daedalus.adapters.openai_compat import HTTP_ADAPTERS
 
     out = [PluginInfo("inline", "adapter", "built-in", True, "the harness agent is the executor", read_only="n/a")]
+    for name in HTTP_ADAPTERS:  # always available: stdlib HTTP, nothing to install
+        out.append(PluginInfo(name, "adapter", "built-in", True,
+                              "reviews over HTTP, no agent CLI; judges from the diff only", read_only="no tools"))
     for name, preset in PRESETS.items():
         ok, exe = preset_available(preset)
         out.append(PluginInfo(name, "adapter", "built-in", ok, "" if ok else f"`{exe}` not on PATH",
                               read_only=read_only_mode(preset)))
     for name in sorted(_entry_points(ADAPTER_GROUP)):
-        if name in PRESETS or name == "inline":
+        if name in PRESETS or name in HTTP_ADAPTERS or name == "inline":
             continue  # built-ins cannot be shadowed
         try:
             obj = adapter_entry_point(name)

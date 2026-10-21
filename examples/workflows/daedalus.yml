@@ -1,0 +1,24 @@
+# Daedalus gate for pull requests: copy to .github/workflows/daedalus.yml.
+name: Daedalus
+on:
+  pull_request:   # never pull_request_target: it runs with the base repository's secrets
+permissions:
+  contents: read         # checkout, and the token your check commands run with
+  pull-requests: write   # lets the action post and update its one comment (forks stay read-only; the comment is skipped)
+concurrency:
+  group: daedalus-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the gate needs the base branch's history
+      - uses: KEV-INZHU/Daedalus@main   # pin a release tag or commit once you have chosen one
+        with:
+          install-command: pip install -e ".[dev]"   # whatever your checks need
+          # daedalus-source: git+https://github.com/KEV-INZHU/Daedalus@<commit-or-tag>
+          # require-provenance: "true"
+          # comment: "false"      # job summary and annotations only
+          # fail-on: never        # report the verdict without failing the job

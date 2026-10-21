@@ -62,8 +62,21 @@ def test_main_cleans_up_and_keep_prints_path(capsys, monkeypatch):
     demo.main(["--fast", "--keep"])
     out = capsys.readouterr().out
     assert "\033[" not in out and "Kept: " in out and "daedalus init" in out
-    import shutil
     from pathlib import Path
     kept = Path(out.split("Kept: ")[1].splitlines()[0])
     assert (kept / ".daedalus").is_dir()
-    shutil.rmtree(kept.parent)
+    demo.remove_tree(kept.parent)
+
+
+def test_remove_tree_deletes_read_only_files(tmp_path):
+    # Git writes objects read-only; Windows refuses to delete those unless the flag is cleared.
+    import stat
+
+    d = tmp_path / "project" / ".git" / "objects" / "05"
+    d.mkdir(parents=True)
+    f = d / "2a10e3"
+    f.write_text("x")
+    f.chmod(stat.S_IREAD)
+    d.chmod(stat.S_IREAD | stat.S_IEXEC)
+    demo.remove_tree(tmp_path / "project")
+    assert not (tmp_path / "project").exists()

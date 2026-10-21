@@ -11,7 +11,10 @@ def make_adapter(cfg: dict[str, Any] | None) -> Adapter:
     """Build the adapter named in `.daedalus.yml` (`adapter:`); inline when unset."""
     from daedalus.adapters.command import PRESETS, CommandAdapter
     from daedalus.adapters.inline import InlineAdapter
+    from daedalus.adapters.openai_compat import HTTP_ADAPTERS, HttpReviewAdapter
 
+    if cfg and cfg.get("name") in HTTP_ADAPTERS:
+        return HttpReviewAdapter.from_config(cfg)
     if not cfg or cfg.get("name") in (None, "inline"):
         return InlineAdapter()
     name = cfg["name"]

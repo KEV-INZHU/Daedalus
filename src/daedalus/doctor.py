@@ -204,12 +204,48 @@ def _adapter(cfg: RepoConfig | None) -> tuple[list[Finding], object | None]:
                             warn=True)], None
         return [Finding(name, False, f"`{adapter.name}` cannot launch reviewers, and mode `{cfg.mode}` needs them",
                         f"set `adapter: claude-code` in {CONFIG_FILE}, or `mode: gate`")], None
+    if getattr(adapter, "endpoint", None):
+        return _http_findings(name, adapter), adapter
     available = getattr(adapter, "available", None)
     if available is not None and not available():
         cmd = getattr(adapter, "argv", [adapter.name])[0]
         return [Finding(name, False, f"`{adapter.name}` is configured but `{cmd}` is not on PATH",
                         f"install `{cmd}` or put it on PATH")], adapter
     return [Finding(name, True, adapter.name)], adapter
+
+
+def _http_findings(name: str, adapter: object) -> list[Finding]:
+    """The config of an HTTP reviewer (`openai-compatible`, `anthropic`). The adapter's constructor has
+    already checked base_url and review_model, so what is left is the key and what the reviewer can see."""
+    label = getattr(adapter, "name", "adapter")
+    found: list[Finding] = []
+    env = getattr(adapter, "api_key_env", None)
+    local = getattr(adapter, "local", False)
+    if env and not os.environ.get(env) and not local:
+        found.append(Finding(name, False, f"`{label}` reads its API key from ${env}, which is not set",
+                             f"export {env}=... where reviews run (the key stays out of {CONFIG_FILE})"))
+    elif not env and not local:
+        found.append(Finding(name, False, f"`{label}` talks to {adapter.base_url} but names no `api_key_env`",
+                             f"add `api_key_env: <VARIABLE NAME>` under `adapter:` in {CONFIG_FILE}"))
+    else:
+        found.append(Finding(name, True, f"{label} -> {adapter.base_url}, model {adapter.review_model}"))
+    if not local and adapter.base_url.startswith("http://"):
+        found.append(Finding("HTTPS for reviews", True, "the API key would travel unencrypted",
+                             "use an https:// base_url", warn=True))
+    if getattr(adapter, "cost_untracked", False):
+        found.append(Finding("review cost tracking", True,
+                             f"`{label}` talks to {adapter.base_url} and has no `cost_per_mtok`, so what it bills is "
+                             "unknown: reviews count as cash with unknown cost, the cash budget fails closed, and a "
+                             "run that launches one cannot be accepted",
+                             f"add `cost_per_mtok: {{input: <dollars>, output: <dollars>}}` under `adapter:` in "
+                             f"{CONFIG_FILE}", warn=True))
+    found.append(Finding("review context", True,
+                         f"`{label}` reviewers have no tools: they judge from the diff and the full content of "
+                         f"changed files only (up to {adapter.max_context_chars} characters), never the rest of "
+                         "the repository",
+                         "fine for medium-tier changes; use a stronger model for high-tier ones "
+                         "(see docs/adapters.md)", warn=True))
+    return found
 
 
 def _cash(cfg: RepoConfig, adapter: object) -> Finding | None:

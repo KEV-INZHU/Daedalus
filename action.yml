@@ -27,6 +27,20 @@ inputs:
   extra-args:
     description: Extra arguments appended to `daedalus ci`, space-separated.
     default: ""
+  comment:
+    description: >-
+      Post the verdict as one pull request comment, updated on each push ("true" or "false"). Only on
+      `pull_request` events. Needs `pull-requests: write`; on fork pull requests the token is read-only and
+      the comment is skipped with a notice.
+    default: "true"
+  annotations:
+    description: Show test-integrity signals and failing checks inline on the pull request diff ("true" or "false").
+    default: "true"
+  fail-on:
+    description: >-
+      When the job fails: `blocked` fails it when the gate rejects the change; `never` reports the verdict
+      but never fails the job over it (errors running the gate still fail).
+    default: blocked
 
 runs:
   using: composite
@@ -46,24 +60,109 @@ runs:
         INSTALL_COMMAND: ${{ inputs.install-command }}
       run: eval "$INSTALL_COMMAND"
     - name: Gate
+      id: gate
       shell: bash
       env:
         BASE_INPUT: ${{ inputs.base }}
         BASE_REF: ${{ github.base_ref }}
         REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
         EXTRA_ARGS: ${{ inputs.extra-args }}
+        ANNOTATIONS: ${{ inputs.annotations }}
+        WANT_COMMENT: ${{ inputs.comment }}
+        EVENT_NAME: ${{ github.event_name }}
+        RUNNER_TEMP_DIR: ${{ runner.temp }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
+        result_file="$RUNNER_TEMP_DIR/daedalus-result.json"
+        comment_file="$RUNNER_TEMP_DIR/daedalus-comment.md"
+        rm -f "$result_file" "$comment_file"
+        echo "comment-file=$comment_file" >> "$GITHUB_OUTPUT"
+        echo "verdict=error" >> "$GITHUB_OUTPUT"  # until the gate says otherwise
         if [ -z "$BASE_INPUT" ] && [ -z "$BASE_REF" ]; then
           echo "::error::no base to compare against: this event is not a pull_request, so set the action's 'base:' input (for example origin/main)"
           exit 2
         fi
         base="${BASE_INPUT:-origin/$BASE_REF}"
-        args=(--base "$base")
+        args=(--base "$base" --result-out "$result_file")
+        if [ -n "$PR_HEAD_SHA" ]; then args+=(--head-sha "$PR_HEAD_SHA"); fi
         if [ "$REQUIRE_PROVENANCE" = "true" ]; then args+=(--require-provenance); fi
+        if [ "$ANNOTATIONS" = "true" ]; then args+=(--annotations); fi
+        if [ "$WANT_COMMENT" = "true" ] && [ "$EVENT_NAME" = "pull_request" ]; then
+          args+=(--markdown-out "$comment_file")
+        fi
         # Splitting EXTRA_ARGS on whitespace is intended: it is a flag list from the workflow author.
         # Globbing is switched off so a `*` in it stays literal.
         set -f
         # shellcheck disable=SC2206
         extra=($EXTRA_ARGS)
         set +f
-        daedalus ci "${args[@]}" "${extra[@]}"
+        # Record the verdict and keep going: the comment is posted first, then the last step fails the job.
+        code=0
+        daedalus ci "${args[@]}" "${extra[@]}" || code=$?
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        # The verdict comes from the result file, never from the exit code alone: a crash exits 1 too.
+        # A missing or unreadable file, or a verdict that disagrees with the exit code, is an error.
+        verdict="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["verdict"])' "$result_file" 2>/dev/null)" || verdict=error
+        case "$verdict:$code" in
+          passed:0|blocked:1) ;;
+          *) verdict=error ;;
+        esac
+        echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+    - name: Pull request comment
+      if: inputs.comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        # Cross-repository means a read-only token. `head.repo.fork` is not that test: it is also true
+        # for same-repository pull requests in a repository that is itself a fork.
+        IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        COMMENT_FILE: ${{ steps.gate.outputs.comment-file }}
+        VERDICT: ${{ steps.gate.outputs.verdict }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        marker='<!-- daedalus-ci -->'
+        if [ "$VERDICT" = "error" ] || [ ! -s "$COMMENT_FILE" ]; then
+          # No trustworthy report: replace any earlier verdict (possibly a stale pass) with an error body.
+          printf '%s\n\n%s\n' "Daedalus CI: ❌ error running the gate @ \`${PR_HEAD_SHA:0:10}\` · this is not a pass; see the job log." "$marker" > "$COMMENT_FILE"
+        fi
+        if [ "$IS_FORK" = "true" ]; then
+          echo "::notice::Daedalus: skipping the pull request comment, the token is read-only on pull requests from forks. The report is in the job summary."
+          exit 0
+        fi
+        skip() {  # a comment is a convenience: never fail the job over it
+          if grep -qiE '403|Resource not accessible' "$1"; then
+            echo "::notice::Daedalus: skipping the pull request comment, the token cannot write to pull requests (403). Grant 'pull-requests: write' to the job to enable it."
+          else
+            echo "::warning::Daedalus: could not post the pull request comment: $(head -c 300 "$1" | tr '\r\n' '  ')"
+          fi
+          exit 0
+        }
+        err="$(mktemp)"
+        # Only the Actions bot's own comment is updated, so a look-alike comment with the marker is ignored.
+        # The whole output is captured and the first line taken in bash: `| head -n 1` under pipefail can
+        # turn a SIGPIPE into a spurious failure when several marker comments exist.
+        ids="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+          --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" \
+          2>"$err")" || skip "$err"
+        id="${ids%%$'\n'*}"
+        if [ -s "$err" ] && [ -z "$id" ]; then skip "$err"; fi
+        if [ -n "$id" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$id" -F "body=@$COMMENT_FILE" >/dev/null 2>"$err" || skip "$err"
+        else
+          gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F "body=@$COMMENT_FILE" >/dev/null 2>"$err" || skip "$err"
+        fi
+    - name: Verdict
+      shell: bash
+      env:
+        EXIT_CODE: ${{ steps.gate.outputs.exit-code }}
+        VERDICT: ${{ steps.gate.outputs.verdict }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        case "$VERDICT" in
+          passed) exit 0 ;;
+          blocked) if [ "$FAIL_ON" = "never" ]; then echo "::notice::Daedalus: the gate blocked this change; fail-on is 'never', so the job passes."; exit 0; fi
+             echo "::error::Daedalus gate blocked this change"; exit 1 ;;
+          *) echo "::error::Daedalus could not run the gate (exit ${EXIT_CODE:-unknown}, no valid result); fail-on does not apply"; exit 1 ;;
+        esac

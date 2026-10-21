@@ -22,6 +22,24 @@ from daedalus.core.contracts import bind_text_criteria
 from daedalus.core.errors import AuthorizationError, DaedalusError
 from daedalus.core.state_machine import Disposition
 
+# Plain-words names for the roles, for display only. Persisted ids, reason codes and event payloads
+# keep the short ids: the audit log refers to them.
+DISPLAY_NAMES = {
+    "aristotle": "quality review (Aristotle)",
+    "socrates": "validation review (Socrates)",
+    "james": "functionality review (James)",
+    "mozi": "simplicity review (Mozi)",
+    "plato": "arbiter (Plato)",
+    "brunel": "builder (Brunel)",
+    "vitruvius": "planner (Vitruvius)",
+}
+
+
+def display_name(role: str) -> str:
+    """How a person reads a role id; an id with no entry (a custom review) is shown as it is."""
+    return DISPLAY_NAMES.get(role, role)
+
+
 SEV_ABBR = {"BLOCKER": "B", "MAJOR": "M", "MINOR": "m", "ADVISORY": "A"}
 EXIT = {Disposition.ACCEPTED: 0, Disposition.BLOCKED: 1, Disposition.REJECTED: 3, Disposition.CANCELLED: 4}
 
@@ -135,7 +153,7 @@ def render_decision(d: Decision, *, verbose: bool = True, root: Path | None = No
         for cid, (st, detail) in d.check_states.items():
             lines.append(f"  {cid.ljust(w)}  {st.value:<7} {detail if verbose else ''}".rstrip())
     if d.required_reviews:
-        lines.append("Required reviews: " + ", ".join(d.required_reviews))
+        lines.append("Required reviews: " + ", ".join(display_name(r) for r in d.required_reviews))
     if d.required_approvals:
         lines.append("Required approvals: " + ", ".join(d.required_approvals))
     lines += disposition_lines(d, root)

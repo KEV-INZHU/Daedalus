@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -212,7 +214,23 @@ def run(args: argparse.Namespace) -> int:
         return 0 if ok else 1
     finally:
         if not args.keep:
-            shutil.rmtree(root.parent, ignore_errors=True)
+            remove_tree(root.parent)
+
+
+def remove_tree(path: Path) -> None:
+    """Delete the demo repository. Git writes its objects read-only, and Windows refuses to
+    delete a read-only file, so clear the flag and retry instead of leaving the repo behind."""
+    def retry(func: Any, target: str, *_: Any) -> None:
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except OSError:
+            pass  # best effort: a demo leftover in the temp dir is not worth an error
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=retry)
+    else:
+        shutil.rmtree(path, onerror=retry)
 
 
 def main(argv: list[str] | None = None) -> int:
