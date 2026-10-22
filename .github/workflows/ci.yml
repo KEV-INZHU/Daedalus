@@ -17,7 +17,7 @@ jobs:
   test:
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -33,11 +33,15 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: pyproject.toml
+      # The Pi and OpenCode plugin tests run their TypeScript/JS shims under Node (22.6+ strips types).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Install
         run: python -m pip install -e ".[dev]"
       - name: Lint
         run: ruff check
-      # The full suite (subprocess and integration tests included) runs on every OS in the matrix:
-      # the gate's git, hook and path handling differ per platform.
+      # The full suite on every OS. In parallel (pytest-xdist): Windows runners take about 5s per
+      # subprocess-heavy test, so one process would need well over an hour there.
       - name: Tests
-        run: python -m pytest -q
+        run: python -m pytest -q -n auto -rs

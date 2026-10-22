@@ -16,12 +16,14 @@ was reviewed.
 from __future__ import annotations
 
 import difflib
+import os
 import shutil
 import stat
 import subprocess
 from pathlib import Path
 from typing import Any
 
+from daedalus.core.fsutil import remove_tree
 from daedalus.repository.candidate import MAX_DIFF_BYTES, file_sha256
 
 SNAPSHOTS = "snapshots"
@@ -57,8 +59,17 @@ def copy_files(root: Path, dest: Path, manifest: dict[str, Any]) -> bool:
     `files` directory is removed."""
     if _copy_files(root, dest, manifest):
         return True
-    shutil.rmtree(dest / "files", ignore_errors=True)
+    remove_tree(dest / "files")
     return False
+
+
+def _unlink(path: Path) -> None:
+    """Remove a file, even a read-only one (Windows refuses to delete those as they are)."""
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        path.unlink(missing_ok=True)
 
 
 def _copy_files(root: Path, dest: Path, manifest: dict[str, Any]) -> bool:
@@ -70,7 +81,7 @@ def _copy_files(root: Path, dest: Path, manifest: dict[str, Any]) -> bool:
                 return False  # a symlink, submodule or unreadable entry cannot be proven later
             target = dest / "files" / rel
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.unlink(missing_ok=True)  # an earlier copy may be read-only
+            _unlink(target)  # an earlier copy may be read-only
             shutil.copy2(root / rel, target)  # keeps the mode (an executable stays executable)
             if file_sha256(target) != digest:
                 return False  # changed between capture and copy

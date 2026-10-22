@@ -227,6 +227,7 @@ def launch_review(
         AgentRequest(
             run_id, f"review-{perspective}", perspective, prompt, ari.root, REVIEW_TIMEOUT_S, read_only=True,
             should_stop=ari.stop_check(run_id),
+            context_paths=tuple(delta[2]) if delta is not None else tuple(cand.changed_paths),
         )
     )
     ari.record_session(run_id, f"review-{perspective}", perspective, res)

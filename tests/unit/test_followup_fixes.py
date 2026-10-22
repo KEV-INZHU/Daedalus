@@ -5,15 +5,18 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import shlex
 import shutil
 import subprocess
+import types
 from pathlib import Path
 
 import pytest
 import yaml
 
-from conftest import git
+from conftest import fake_executable, git
 from daedalus import cli, demo
+from daedalus.cli import lifecycle
 from daedalus.adapters.command import BILLING_ENV_VARS
 from daedalus.core.config import load_config, render_config
 from daedalus.core.paths import MAKEFILE_NAMES
@@ -25,7 +28,7 @@ def commit(root: Path, files: dict[str, str]) -> str:
     for rel, text in files.items():
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8")
+        p.write_bytes(text.encode())  # exact bytes: Windows text mode would add CR
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "base")
     return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
@@ -41,7 +44,7 @@ def change(root: Path, files: dict[str, str | None]) -> dict[str, str | None]:
             out[rel] = None
         else:
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(text, encoding="utf-8")
+            p.write_bytes(text.encode())  # exact bytes: Windows text mode would add CR
             out[rel] = hashlib.sha256(text.encode()).hexdigest()
     return out
 
@@ -336,7 +339,8 @@ def test_init_commit_command_from_a_subdirectory_uses_git_dash_c(tmp_path, capsy
     monkeypatch.chdir(sub)
     assert cli.main(["init", "--no-hooks"]) == 0
     out = capsys.readouterr().out
-    assert f"git -C {root.resolve()}" in out or f"git -C {root}" in out
+    quote = (lambda a: f'"{a}"') if os.name == "nt" else shlex.quote  # tmp paths need no escaping
+    assert any(f"git -C {quote(str(r))} add" in out for r in (root, root.resolve())), out
     monkeypatch.chdir(root)
     capsys.readouterr()
     assert cli.main(["init", "--no-hooks", "--force"]) == 0
@@ -345,12 +349,27 @@ def test_init_commit_command_from_a_subdirectory_uses_git_dash_c(tmp_path, capsy
 
 def _fake_claude(tmp_path, monkeypatch):
     d = tmp_path / "bin"
-    d.mkdir()
-    (d / "claude").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    (d / "claude").chmod(0o755)
+    fake_executable(d, "claude", "")
     monkeypatch.setenv("PATH", os.pathsep.join([str(d), str(Path(shutil.which("git")).parent)]))
     for var in BILLING_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.mark.parametrize("name", ["posix", "nt"])
+def test_commit_command_quoting_survives_spaces_backslashes_and_ampersands(monkeypatch, name):
+    monkeypatch.setattr(lifecycle, "os", types.SimpleNamespace(name=name))  # pathlib keeps the real os
+    root = r"C:\Users\A B\R&D"
+    q = lifecycle._quote(root)
+    if name == "nt":
+        assert q == '"C:\\Users\\A B\\R&D"'  # one double-quoted argument, backslashes kept
+        assert lifecycle._quote('say "hi"') == '"say \\"hi\\""'
+        # Backslashes are doubled only before a quote, so a trailing one cannot escape the closing quote.
+        assert lifecycle._quote("D:\\") == '"D:\\\\"'
+        assert lifecycle._quote("D:\\repo\\") == '"D:\\repo\\\\"'
+    else:
+        assert shlex.split(q) == [root]
+    cmd = lifecycle._commit_command([".daedalus.yml"], Path(root))
+    assert cmd.startswith(f"git -C {q} add ") and cmd.count(q) == 2
 
 
 def test_init_writes_the_claude_code_adapter_when_the_binary_is_on_path(tmp_path, monkeypatch, capsys):

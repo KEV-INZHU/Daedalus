@@ -112,7 +112,10 @@ def adapter_identity(adapter: Any) -> str | None:
     if not model:
         return None
     name = getattr(adapter, "name", None) or f"{type(adapter).__module__}.{type(adapter).__qualname__}"
-    return f"{name}:{model}"
+    # An HTTP reviewer is also identified by its endpoint: two servers can serve different weights
+    # under the same model name.
+    base_url = getattr(adapter, "base_url", None)
+    return f"{name}:{model}" + (f"@{base_url}" if base_url else "")
 
 
 def review_inputs(perspective: str, policy_hash: str, contract: TaskContract, template_hash: str,

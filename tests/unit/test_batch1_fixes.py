@@ -11,6 +11,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 from conftest import git, make_repo
 from daedalus import cli
 from daedalus.core.config import detect_checks, load_config
@@ -44,13 +49,25 @@ def test_release_workflow_tests_checks_the_tag_and_confines_the_publish_token():
         assert has == (name == "publish"), name
 
 
-def test_ci_workflow_runs_the_full_suite_on_every_os_and_never_on_pull_request_target():
+def test_ci_workflow_runs_every_suite_and_never_on_pull_request_target():
     text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     wf = yaml.safe_load(text)
     assert "pull_request_target" not in wf[True]
-    assert set(wf["jobs"]["test"]["strategy"]["matrix"]["os"]) == {"ubuntu-latest", "macos-latest", "windows-latest"}
-    runs = [s for s in wf["jobs"]["test"]["steps"] if "pytest" in s.get("run", "")]
-    assert len(runs) == 1 and "if" not in runs[0] and " -m " not in runs[0]["run"].replace("python -m pytest", "")
+    job = wf["jobs"]["test"]
+    assert set(job["strategy"]["matrix"]["os"]) == {"ubuntu-latest", "macos-latest", "windows-latest"}
+    steps = [s for s in job["steps"] if "pytest" in s.get("run", "")]
+    # One step, on every OS, with nothing filtered out: no path, marker or keyword selection.
+    assert len(steps) == 1, steps
+    (tests,) = steps
+    assert "if" not in tests and not tests.get("continue-on-error")
+    assert tests["run"].split() == ["python", "-m", "pytest", "-q", "-n", "auto", "-rs"]  # -rs: every skip, with why
+    assert "pytest-xdist" in (ROOT / "pyproject.toml").read_text(encoding="utf-8")  # what `-n` needs
+    # Nor does the pytest configuration filter anything, and collection starts at tests/.
+    opts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]
+    assert opts.get("testpaths") == ["tests"]
+    addopts = opts.get("addopts", "")
+    addopts = addopts.split() if isinstance(addopts, str) else list(addopts)
+    assert not {"-m", "-k", "--ignore", "--deselect", "--ignore-glob"} & {a.split("=")[0] for a in addopts}
     assert "slow" not in text
 
 
@@ -110,7 +127,7 @@ LEGACY_COMMANDS = {
 def test_the_split_cli_keeps_every_pre_split_command_and_adds_demo():
     parser = cli.build_parser()
     sub = next(a for a in parser._actions if a.dest == "cmd")
-    assert set(sub.choices) == LEGACY_COMMANDS | {"demo"}
+    assert set(sub.choices) == LEGACY_COMMANDS | {"demo", "report"}
 
 
 def test_importing_the_cli_does_not_import_the_demo_module():

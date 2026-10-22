@@ -43,6 +43,7 @@ from daedalus.core.errors import (
     PolicyError,
 )
 from daedalus.core.evidence import EvidenceRecord, environment_fingerprint
+from daedalus.core.fsutil import remove_tree
 from daedalus.core.paths import normalize
 from daedalus.core.policy import ActionDefinition, is_agent, sha256_hex
 from daedalus.core.run import POLICY_FEATURES, RunState, WorkerRecord, replay
@@ -370,9 +371,8 @@ class Ariadne:
 
     def _prune_snapshots(self, run_id: str) -> None:
         """Reviewed-content snapshots exist only to scope the next review of an open run."""
-        import shutil
 
-        shutil.rmtree(self.state_dir / "runs" / run_id / "snapshots", ignore_errors=True)
+        remove_tree(self.state_dir / "runs" / run_id / "snapshots")
 
     def _record_disposition(self, state: RunState, d: Decision, actor: str) -> None:
         self._transition(state, ExecutionState.FINISHED, SYSTEM, f"final disposition {d.disposition.value}")
@@ -1196,7 +1196,7 @@ class Ariadne:
             )
         if quota is not None:
             self._append(run_id, ev.QUOTA_OBSERVED, SYSTEM, quota)
-        if usage is None and res.status != "COMPLETED" and not cost:
+        if (usage is None and res.status != "COMPLETED" and not cost) or (res.cost_unknown and basis == "cash"):
             # The session ended without reporting its cost; record the gap rather than imply it was free.
             self._append(run_id, ev.SESSION_USAGE, SYSTEM, {"task_id": task_id, "role": role,
                                                             "session_id": res.session_id, "status": res.status,

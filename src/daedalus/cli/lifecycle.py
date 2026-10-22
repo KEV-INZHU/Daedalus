@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ from daedalus.cli._common import (
 )
 from daedalus.core.config import (
     CONFIG_FILE,
+    PRESETS,
     STATE_DIR,
     detect_checks,
     find_root,
@@ -55,6 +57,10 @@ def cmd_init(args: argparse.Namespace) -> int:
     if cfg.exists() and (args.ci or not args.force):  # with --ci, --force refreshes only the workflow
         _print(f"{CONFIG_FILE} already exists" + (" (kept; --ci --force refreshes only the workflow)" if args.ci
                                                   else " (use --force to overwrite)"))
+        if args.preset:
+            _print(f"preset {args.preset!r} was NOT applied: the existing {CONFIG_FILE} is kept. Add `preset: "
+                   f"{args.preset}` to it yourself (see what it changes: daedalus policy --preset {args.preset} "
+                   f"--diff), or use --force to rewrite the file (the old one is saved as a backup)")
     else:
         if cfg.exists():  # --force replaces a file someone may have edited by hand: keep it
             bak = cfg.with_name(CONFIG_FILE + ".bak")
@@ -72,8 +78,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         adapter = args.adapter or _default_adapter(root, args)
         if adapter and not args.adapter:
             _print(f"adapter: {adapter} (found the `claude` binary; independent reviews can launch)")
-        cfg.write_text(render_config(checks, adapter), encoding="utf-8")
+        cfg.write_text(render_config(checks, adapter, args.preset), encoding="utf-8")
         _print(f"wrote {CONFIG_FILE} with checks: {', '.join(checks) or 'NONE — add one before starting a run'}")
+        if args.preset:
+            _print(f"preset: {args.preset} (see what it changes: daedalus policy --preset {args.preset} --diff)")
         written.append(CONFIG_FILE)
     if _ensure_ignored(root, f"{STATE_DIR}/"):
         _print(f"added {STATE_DIR}/ to .gitignore")
@@ -189,11 +197,35 @@ def _gitignore_only_init_entries(root: Path) -> bool:
 
 
 def _commit_command(paths: list[str], root: Path) -> str:
-    """The one line that commits exactly what init wrote. `git -C <root>` unless cwd is the root,
+    """The command that commits exactly what init wrote. `git -C <root>` unless cwd is the root,
     so it works from a subdirectory too (the paths are relative to the root)."""
-    prefix = "git" if root.resolve() == Path.cwd().resolve() else f"git -C {shlex.quote(str(root))}"
-    quoted = " ".join(shlex.quote(p) for p in paths)
-    return f"{prefix} add {quoted} && {prefix} commit -m {shlex.quote(COMMIT_MESSAGE)}"
+    prefix = "git" if root.resolve() == Path.cwd().resolve() else f"git -C {_quote(str(root))}"
+    quoted = " ".join(_quote(p) for p in paths)
+    add, commit = f"{prefix} add {quoted}", f"{prefix} commit -m {_quote(COMMIT_MESSAGE)}"
+    # Windows PowerShell 5.1 has no `&&`: there, two lines (the caller indents the first).
+    return f"{add}\n  {commit}" if os.name == "nt" else f"{add} && {commit}"
+
+
+def _quote(arg: str) -> str:
+    """Quote one argument for the user's shell. On Windows, always one double-quoted argument
+    (cmd.exe has no single quotes), escaped by the CommandLineToArgvW rules: backslashes are
+    doubled only before a quote, so `C:\\` and `D:\\repo\\` survive. `%` or `$` in a path is not
+    escaped."""
+    if os.name != "nt":
+        return shlex.quote(arg)
+    out: list[str] = []
+    slashes = 0
+    for ch in arg:
+        if ch == "\\":
+            slashes += 1
+            continue
+        if ch == '"':
+            out.append("\\" * (slashes * 2 + 1) + '"')
+        else:
+            out.append("\\" * slashes + ch)
+        slashes = 0
+    out.append("\\" * (slashes * 2))  # before the closing quote
+    return '"' + "".join(out) + '"'
 
 
 def _commit_setup(root: Path, paths: list[str]) -> str:
@@ -418,6 +450,9 @@ def register(sub: Any) -> None:
     sp = add_command(sub, "init", cmd_init, "write .daedalus.yml with detected checks")
     sp.add_argument("--adapter", help="agent harness for `daedalus run` (e.g. claude-code)")
     sp.add_argument("--claude-code", action="store_true", help=argparse.SUPPRESS)  # the default now
+    sp.add_argument("--preset", choices=PRESETS,
+                    help="policy preset: solo (one developer, cost-conscious) | standard (the defaults) | "
+                         "strict (full council and human approval on high risk)")
     sp.add_argument("--no-hooks", action="store_true", help="do not install the harness hooks and git hook")
     sp.add_argument("--harness", action="append", metavar="NAME",
                     help="harness to install (repeatable; default: claude-code plus every detected harness)")

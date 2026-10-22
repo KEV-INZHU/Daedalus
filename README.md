@@ -2,8 +2,8 @@
 
 **Your agent says it's done. Daedalus checks.**
 
-An acceptance gate for AI coding agents. The agent does the work; "done" is decided by a deterministic
-predicate over trusted, revision-bound evidence, so the agent can't grade its own homework.
+An acceptance gate for AI coding agents. The agent does the work; your trusted checks and independent
+reviewers decide whether it is done, so the agent can't grade its own homework.
 
 ```text
 $ daedalus demo --fast        # trimmed; the rest of the output is in the demo itself
@@ -42,22 +42,25 @@ daedalus init      # .daedalus.yml (detected test command), hooks for your agent
 daedalus doctor    # checks the setup; each problem comes with a one-line fix
 ```
 
-Commit what `init` wrote. From then on the agent's first edit opens a run, and when it tries to stop,
-Daedalus re-runs your trusted checks on the exact working tree, launches the independent read-only
-reviews the risk tier requires, and either sends precise reasons back to the agent or records the run
-**ACCEPTED**. Commits that are exactly the accepted work carry `Daedalus-Run` trailers.
-See [docs/gate-workflow.md](docs/gate-workflow.md).
+Commit what `init` wrote. From then on the agent's first edit opens a run. When it tries to stop,
+Daedalus re-runs your checks on the exact working tree, launches the independent read-only reviews the
+risk requires, and either sends reasons back to the agent or records the run **ACCEPTED**. Accepted
+commits carry `Daedalus-Run` trailers. See [docs/gate-workflow.md](docs/gate-workflow.md).
+
+How strict? `daedalus init --preset solo|standard|strict` picks a policy
+([docs/configuration.md](docs/configuration.md#presets)). Unfamiliar word? See
+[docs/concepts.md](docs/concepts.md). Something not working? See
+[docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Supported harnesses
 
-Daedalus is harness-agnostic: the core owns contracts, lifecycle state, risk policy, evidence and the
-acceptance decision, and thin integrations connect it to your agent. `daedalus init` installs the gate
-into every harness it detects (Claude Code always); `daedalus install <name>` or
-`daedalus init --harness <name>` picks one, and `daedalus plugins` shows what is registered and detected.
+Daedalus is harness-agnostic: the core decides, and thin integrations connect it to your agent.
+`daedalus init` installs the gate into every harness it detects (Claude Code always);
+`daedalus install <name>` or `daedalus init --harness <name>` picks one; `daedalus plugins` lists them.
 
 | Harness     | Install                        | Notes                                                |
 |-------------|--------------------------------|------------------------------------------------------|
-| Claude Code | `daedalus install claude-code` | Reference integration: hooks, status line, gate skill |
+| Claude Code | `daedalus install claude-code` | [docs/harnesses/claude-code.md](docs/harnesses/claude-code.md): hooks, status line, gate skill |
 | Codex       | `daedalus install codex`       | [docs/harnesses/codex.md](docs/harnesses/codex.md)     |
 | OpenCode    | `daedalus install opencode`    | [docs/harnesses/opencode.md](docs/harnesses/opencode.md) |
 | Pi          | `daedalus install pi`          | [docs/harnesses/pi.md](docs/harnesses/pi.md)           |
@@ -92,6 +95,7 @@ diff, and a provenance report. See [docs/ci.md](docs/ci.md).
 
 Everything else lives in [docs/](docs/index.md):
 
+- [Concepts](docs/concepts.md): the words Daedalus uses; [troubleshooting](docs/troubleshooting.md): the common problems
 - [Working under the gate](docs/gate-workflow.md): the daily loop and the commands you touch
 - [Modes, risk and configuration](docs/configuration.md): `.daedalus.yml`, budgets, policy
 - [Reviews](docs/reviews.md): one thorough pass, then only what changed

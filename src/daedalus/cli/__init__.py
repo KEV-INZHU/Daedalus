@@ -53,7 +53,7 @@ GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Daily", ("start", "run", "verify", "finish", "review", "cancel", "runs", "log", "audit", "on", "off")),
     ("Human decisions", ("approve", "deny", "attest", "amend", "risk-exception", "resolve", "abandon")),
     ("Factory", ("factory",)),
-    ("Integrations", ("install", "plugins", "ci", "metrics", "policy")),
+    ("Integrations", ("install", "plugins", "ci", "metrics", "report", "policy")),
     ("Advanced / internal", ("dispute", "arbitrate", "blocker", "restore", "hook", "statusline", "reconcile", "act")),
 )
 FALLBACK_GROUP = "Advanced / internal"
@@ -110,8 +110,11 @@ class _Parser(argparse.ArgumentParser):
                     global _stdout_failed
                     _stdout_failed = True
                     raise
+                _silence(file)  # see below
             except (AttributeError, OSError):
-                pass
+                # A closed stderr: what failed to write stays buffered, and flushing it at
+                # interpreter shutdown would fail too and turn the usage status into 120.
+                _silence(file)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -222,16 +225,22 @@ def _warn(message: str) -> None:
     try:
         print(message, file=sys.stderr)
     except (OSError, ValueError, AttributeError):
-        pass
+        _silence(sys.stderr)
 
 
 def _silence_stdout() -> None:
     """The reader went away (`daedalus status | head`). Point stdout at devnull so the
     final flush at exit cannot raise again; see the Python `signal` docs on SIGPIPE."""
+    _silence(sys.stdout)
+
+
+def _silence(stream: Any) -> None:
+    """Point a stream whose reader is gone at devnull, so the output still buffered in it
+    cannot fail again at the final flush (which would make the exit status 120)."""
     try:
         devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
+        os.dup2(devnull, stream.fileno())
         os.close(devnull)
     except (OSError, ValueError, AttributeError):
-        # stdout is not backed by a file descriptor (e.g. replaced in tests).
+        # not backed by a file descriptor (e.g. replaced in tests)
         pass

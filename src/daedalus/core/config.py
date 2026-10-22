@@ -11,7 +11,8 @@ The user-facing file is deliberately small:
     cache: {checks: true, reviews: true, max_age_s: 86400}  # reuse verified evidence across runs (default on)
     harness:
       auto_finish: true    # `daedalus verify` records acceptance when every condition holds
-    policy: {...}          # optional overrides of any default-policy key
+    preset: solo           # solo | standard | strict: a named overlay on the default policy
+    policy: {...}          # optional overrides of any default-policy key (they win over the preset)
     policy_file: path.yaml # or: a complete policy file instead of the default
 
 Everything that is not UX (enabled/mode/adapter/harness) becomes the policy
@@ -60,6 +61,7 @@ class RepoConfig:
     cache_checks: bool = True  # reuse PASS check results from earlier runs on a byte-identical tree
     cache_reviews: bool = True  # reuse approving review verdicts likewise
     cache_max_age_s: int = DEFAULT_MAX_AGE_S  # a source older than this is not reused
+    preset: str = ""  # the named policy preset in effect, if any
 
     @property
     def policy(self) -> Policy:
@@ -203,7 +205,38 @@ def detect_checks(root: Path, *, quality: bool = True) -> dict[str, dict[str, An
     return {"tests": tests, **(_detect_quality(root) if quality else {})}
 
 
-def load_config(root: str | Path) -> RepoConfig:
+PRESETS = ("solo", "standard", "strict")
+_PRESET_KEYS = {"mode", "cache", "harness", "policy"}
+
+
+def load_preset(name: str) -> dict[str, Any]:
+    """A preset is read from the installed package each time, so upgrading Daedalus updates it.
+    It has the shape of a small `.daedalus.yml`: `mode`, `cache`, `harness` and `policy`."""
+    if name not in PRESETS:
+        raise PolicyError(f"unknown preset {name!r}: choose one of {', '.join(PRESETS)}")
+    path = Path(__file__).resolve().parent.parent / "data" / "presets" / f"{name}.yaml"
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise PolicyError(f"cannot read preset {name!r}: {exc}") from exc
+    if not isinstance(data, dict) or set(data) - _PRESET_KEYS:
+        raise PolicyError(f"preset {name!r} may only set {sorted(_PRESET_KEYS)}")
+    return data
+
+
+def _overlay(raw: dict[str, Any], overlay: dict[str, Any]) -> None:
+    """Apply a preset's policy keys. A mapping such as `tier_requirements` merges one level deep, so a
+    preset can restate only the tiers it changes; anything else is replaced."""
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(raw.get(key), dict):
+            raw[key] = {**raw[key], **value}
+        else:
+            raw[key] = value
+
+
+def load_config(root: str | Path, *, preset: str | None = None) -> RepoConfig:
+    """`preset` overrides the file's `preset:`; `daedalus policy --preset X` uses it to show what a
+    preset would change."""
     root = Path(root)
     default_raw = yaml.safe_load(default_policy_text())
     path = root / CONFIG_FILE
@@ -236,10 +269,16 @@ def load_config(root: str | Path) -> RepoConfig:
             raise PolicyError(f"cannot read policy_file {pf}: {exc}") from exc
     else:
         raw = dict(default_raw)
+    preset = preset if preset is not None else (str(cfg["preset"]) if cfg.get("preset") else "")
+    layer = load_preset(preset) if preset else {}
+    if layer:
+        if cfg.get("policy_file"):
+            raise PolicyError("`preset:` and `policy_file:` cannot be combined: put the preset's keys in your policy file")
+        _overlay(raw, layer.get("policy") or {})
     overrides = cfg.get("policy") or {}
     if not isinstance(overrides, dict):
         raise PolicyError("`policy:` must be a mapping of policy keys")
-    raw.update(overrides)
+    raw.update(overrides)  # the repository's own keys always win over a preset
 
     if "checks" in cfg:
         raw["checks"] = {cid: _check_entry(cid, v) for cid, v in (cfg["checks"] or {}).items()}
@@ -251,7 +290,7 @@ def load_config(root: str | Path) -> RepoConfig:
         for cid, entry in raw["checks"].items():
             entry["mandatory"] = cid in required
 
-    mode = str(cfg.get("mode", "gate"))
+    mode = str(cfg.get("mode", layer.get("mode", "gate")))
     if mode not in MODES:
         raise PolicyError(f"mode must be one of {MODES}")
     cache = cfg.get("cache")
@@ -259,13 +298,15 @@ def load_config(root: str | Path) -> RepoConfig:
         cache = {}
     elif isinstance(cache, bool):
         cache = {"checks": cache, "reviews": cache}
+    if isinstance(cache, dict) and layer.get("cache"):
+        cache = {**layer["cache"], **cache}
     if not isinstance(cache, dict) or set(cache) - {"checks", "reviews", "max_age_s"}:
         raise PolicyError("`cache:` must be a mapping with only `checks`, `reviews` (booleans) and `max_age_s`")
     adapter = cfg.get("adapter") or {}
     if isinstance(adapter, str):
         adapter = {"name": adapter}
     policy_from_dict(raw)  # validate now so errors point at the config file
-    harness = dict(cfg.get("harness") or {})
+    harness = {**(layer.get("harness") or {}), **dict(cfg.get("harness") or {})}
     if "auto_finish" in harness and not isinstance(harness["auto_finish"], bool):
         raise PolicyError("`harness: auto_finish` must be true or false")
     return RepoConfig(
@@ -280,6 +321,7 @@ def load_config(root: str | Path) -> RepoConfig:
         cache_checks=cache_flag(cache.get("checks"), "`cache: checks`"),
         cache_reviews=cache_flag(cache.get("reviews"), "`cache: reviews`"),
         cache_max_age_s=cache_max_age(cache.get("max_age_s"), "`cache: max_age_s`", DEFAULT_MAX_AGE_S),
+        preset=preset,
     )
 
 
@@ -330,17 +372,28 @@ def uncommitted_policy_files(root: Path) -> list[str]:
 DEFAULT_CHECK_TIMEOUT_S = 600
 
 
-def render_config(checks: dict[str, dict[str, Any]], adapter: str | None = None) -> str:
+def render_config(checks: dict[str, dict[str, Any]], adapter: str | None = None, preset: str | None = None) -> str:
     lines = [
         "# Daedalus gate configuration (see the Daedalus README).",
         "# Turn the gate off for harness hooks with `enabled: false`.",
         "enabled: true",
         "",
-        "# Default mode for new runs: gate (checks only) | review (+1 reviewer) | council (4 perspectives).",
-        "# Risk floors in the policy can require reviews and approvals in any mode.",
-        "mode: gate",
-        "",
     ]
+    if preset:
+        # No `mode:` line: a key written here would win over the preset's own.
+        lines += [
+            "# Policy preset, loaded from Daedalus itself so upgrades update it (`daedalus policy --preset X`).",
+            "# Keys you write here (mode, cache, harness, policy) win over the preset.",
+            f"preset: {preset}",
+            "",
+        ]
+    else:
+        lines += [
+            "# Default mode for new runs: gate (checks only) | review (+1 reviewer) | council (4 perspectives).",
+            "# Risk floors in the policy can require reviews and approvals in any mode.",
+            "mode: gate",
+            "",
+        ]
     if adapter:
         lines += ["# Agent harness used by `daedalus run` and `daedalus review`.", f"adapter: {adapter}", ""]
     lines += ["# Trusted checks. Every check here is mandatory unless `mandatory: false`.", "checks:"]

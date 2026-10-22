@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +32,47 @@ class Clock:
         self.t += seconds
 
 
+def fake_executable(directory: Path, name: str, script: str) -> Path:
+    """Put a stand-in `name` command in `directory` that runs the Python `script` (sys.argv as the
+    real CLI would get it). Shell-script fakes cannot run on Windows, where PATH lookup only finds
+    names with a PATHEXT extension, so there it is `name.cmd` calling this interpreter."""
+    directory.mkdir(parents=True, exist_ok=True)
+    body = directory / f"{name}_fake.py"
+    body.write_text(script, encoding="utf-8")
+    if os.name == "nt":
+        exe = directory / f"{name}.cmd"
+        exe.write_text(f'@"{sys.executable}" "{body}" %*\r\n', encoding="utf-8")
+    else:
+        exe = directory / name
+        exe.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{body}" "$@"\n', encoding="utf-8")
+        exe.chmod(0o755)
+    return exe
+
+
+def bash() -> str:
+    """A real bash. On Windows `bash` on PATH is usually the WSL launcher, so use Git's (found by
+    walking up from git.exe: Git/cmd, Git/bin or Git/mingw64/bin). Missing on CI is a failure."""
+    if os.name != "nt":
+        return "bash"
+    git_exe = shutil.which("git")
+    for parent in Path(git_exe).resolve().parents if git_exe else ():
+        for cand in (parent / "bin" / "bash.exe", parent / "usr" / "bin" / "bash.exe"):
+            if cand.exists():
+                return str(cand)
+    if os.environ.get("CI"):
+        pytest.fail("Git for Windows' bash.exe was not found next to git")
+    pytest.skip("Git for Windows' bash.exe is not installed")
+
+
+def bash_path(*dirs: str | Path) -> str:
+    """PATH for a bash child: `dirs`, then the system tools (Git's on Windows)."""
+    if os.name == "nt":
+        where = Path(bash()).parent  # Git/bin or Git/usr/bin
+        tools = where.parent.parent if where.parent.name == "usr" else where.parent
+        return os.pathsep.join([*map(str, dirs), str(tools / "bin"), str(tools / "usr" / "bin")])
+    return os.pathsep.join([*map(str, dirs), "/usr/bin", "/bin"])
+
+
 def git(root: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
 
@@ -40,6 +83,10 @@ def make_repo(root: Path, config: dict | None = None) -> Path:
     git(root, "config", "user.email", "t@example.com")
     git(root, "config", "user.name", "t")
     git(root, "config", "core.autocrlf", "false")
+    # No background `git maintenance`/gc: it adds and removes lock files under .git while a test
+    # snapshots the tree (seen on macOS runners).
+    git(root, "config", "maintenance.auto", "false")
+    git(root, "config", "gc.auto", "0")
     (root / "app.txt").write_text("bad\n", encoding="utf-8")
     (root / "src").mkdir()
     (root / "src" / "lib.py").write_text("x = 1\n", encoding="utf-8")

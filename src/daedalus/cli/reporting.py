@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import time
 from typing import Any
@@ -10,7 +11,8 @@ from typing import Any
 import yaml
 
 from daedalus.cli._common import SEV_ABBR, _ari, _print, _run_id, add_command
-from daedalus.core.config import find_root
+from daedalus.core.config import PRESETS, find_root, load_config
+from daedalus.core.errors import DaedalusError
 from daedalus.core.policy import default_policy_text
 
 
@@ -24,10 +26,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_ci(args: argparse.Namespace) -> int:
-    from daedalus.ci import run_ci
+    from daedalus.ci import run_ci, write_result
 
-    report = run_ci(find_root(args.dir), args.base, require_provenance=args.require_provenance)
+    result_out = args.result_out
+    head = args.head_sha or ""
+    try:
+        report = run_ci(find_root(args.dir), args.base, require_provenance=args.require_provenance,
+                        markdown_out=args.markdown_out, head_sha=head)
+    except BaseException as exc:
+        # Whatever went wrong, the result file says "error": exit code 1 means "blocked" and a crash
+        # (a traceback exits 1 too) must never be mistaken for it.
+        if result_out:
+            try:
+                write_result(result_out, "error", head_sha=head, detail=f"{type(exc).__name__}: {exc}")
+            except OSError:
+                pass
+        raise
     _print(report.markdown())
+    if args.annotations:
+        for line in report.annotations():
+            _print(line)
+    if result_out:
+        try:
+            write_result(result_out, "passed" if report.ok else "blocked", head_sha=report.head_sha)
+        except OSError as exc:
+            raise DaedalusError(f"cannot write the result file {result_out}: {exc}") from exc
     return 0 if report.ok else 1
 
 
@@ -100,10 +123,40 @@ def cmd_metrics(args: argparse.Namespace) -> int:
         ari.close()
 
 
+def _effective_view(cfg: Any) -> str:
+    """The resolved policy plus the UX keys a preset also sets, as text a diff can compare."""
+    view = {"mode": cfg.mode, "cache": {"checks": cfg.cache_checks, "reviews": cfg.cache_reviews},
+            "harness": cfg.harness, **cfg.policy_raw}
+    return yaml.safe_dump(view, sort_keys=False)
+
+
+def _preset_diff(args: argparse.Namespace) -> int:
+    """What `--preset X` would change in this repository's effective policy. Keys the repository
+    sets itself win over a preset, so they never show up as changes."""
+    root = find_root(args.dir)
+    current = load_config(root)
+    candidate = load_config(root, preset=args.preset)
+    old, new = _effective_view(current), _effective_view(candidate)
+    label = f"current ({current.preset or 'no preset'})"
+    diff = list(difflib.unified_diff(old.splitlines(), new.splitlines(), label, f"preset {args.preset}",
+                                     lineterm="", n=2))
+    if not diff:
+        _print(f"preset {args.preset} changes nothing here: the effective policy is already the same")
+    else:
+        for line in diff:
+            _print(line)
+        _print(f"# policy hash {current.policy.policy_hash[:12]} -> {candidate.policy.policy_hash[:12]}")
+    return 0
+
+
 def cmd_policy(args: argparse.Namespace) -> int:
     if args.default:
         _print(default_policy_text())
         return 0
+    if args.preset:
+        return _preset_diff(args)
+    if args.diff:
+        raise DaedalusError("--diff compares against a preset: add --preset solo|standard|strict")
     ari = _ari(args)
     try:
         cfg = ari.config()
@@ -170,7 +223,16 @@ def register(sub: Any) -> None:
     sp.add_argument("--json", action="store_true")
     sp = add_command(sub, "policy", cmd_policy, "print the effective policy")
     sp.add_argument("--default", action="store_true", help="print the built-in default policy")
+    sp.add_argument("--preset", choices=PRESETS, help="show what this preset would change in the effective policy")
+    sp.add_argument("--diff", action="store_true", help="with --preset: the default output (a diff)")
     sp = add_command(sub, "ci", cmd_ci, "gate a branch in CI: fresh checks, risk for the whole diff, commit provenance")
     sp.add_argument("--base", default="origin/main", help="branch or commit to compare against (default origin/main)")
     sp.add_argument("--require-provenance", action="store_true",
                     help="fail when a commit lacks a Daedalus-Run trailer (it was not accepted by the gate)")
+    sp.add_argument("--markdown-out", metavar="FILE", help="also write a compact pull request comment body to FILE")
+    sp.add_argument("--result-out", metavar="FILE",
+                    help='write the verdict as JSON ({"verdict": "passed"|"blocked"|"error", ...}) to FILE; '
+                         "an exit code of 1 alone cannot tell a block from a crash")
+    sp.add_argument("--head-sha", metavar="SHA", help="the commit to name in the report (default: HEAD)")
+    sp.add_argument("--annotations", action="store_true",
+                    help="print GitHub workflow commands so signals and failing checks show inline on the PR")

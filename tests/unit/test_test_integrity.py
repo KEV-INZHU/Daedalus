@@ -28,7 +28,7 @@ def commit(root: Path, files: dict[str, str]) -> str:
     for rel, text in files.items():
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8")
+        p.write_bytes(text.encode())  # exact bytes: Windows text mode would add CR
     run(root, "add", "-A")
     run(root, "commit", "-q", "-m", "base")
     return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
@@ -45,7 +45,7 @@ def change(root: Path, files: dict[str, str | None]) -> dict[str, str | None]:
             out[rel] = None
         else:
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(text, encoding="utf-8")
+            p.write_bytes(text.encode())  # exact bytes: Windows text mode would add CR
             out[rel] = hashlib.sha256(text.encode()).hexdigest()
     return out
 
@@ -643,3 +643,26 @@ def test_a_policy_file_without_the_key_is_enabled_for_new_runs_and_not_for_old_o
     assert _pinned_policy(raw, list(POLICY_FEATURES)).test_integrity.enabled  # a new run agrees
     assert not _pinned_policy(raw).test_integrity.enabled  # a run pinned before the feature
     assert not _pinned_policy(raw, []).test_integrity.enabled
+
+
+# ----------------------------------------------------------- skips in brand-new test files
+def test_a_skip_in_a_brand_new_test_file_removes_no_coverage(repo):
+    base = commit(repo, {"tests/test_app.py": PY_BASE})
+    new = 'import pytest\n\n\ndef test_schema():\n    js = pytest.importorskip("jsonschema")\n    assert js\n'
+    r = scan(repo, base, {"tests/test_schema.py": new})
+    assert ti.SKIP_ADDED not in kinds(r)
+
+
+def test_a_test_moved_into_a_new_file_and_skipped_is_still_flagged(repo):
+    base = commit(repo, {"tests/test_app.py": PY_BASE})
+    moved = "import pytest\n\n\n@pytest.mark.skip(reason='later')\ndef test_add():\n    assert add(1, 2) == 3\n"
+    rest = PY_BASE.split("def test_neg")[0].replace("def test_add():\n    assert add(1, 2) == 3\n", "")
+    r = scan(repo, base, {"tests/test_app.py": rest + "def test_neg" + PY_BASE.split("def test_neg")[1],
+                          "tests/test_moved.py": moved})
+    assert ti.SKIP_ADDED in kinds(r)
+
+
+def test_a_focus_marker_in_a_new_js_file_is_still_flagged(repo):
+    base = commit(repo, {"tests/app.test.js": "it('adds', () => { expect(add(1, 2)).toBe(3); });\n"})
+    r = scan(repo, base, {"tests/other.test.js": "it.only('x', () => { expect(1).toBe(1); });\n"})
+    assert ti.FOCUS_ADDED in kinds(r)

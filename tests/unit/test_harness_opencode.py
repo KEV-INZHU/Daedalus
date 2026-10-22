@@ -8,11 +8,12 @@ import shutil
 import stat
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
 
-from conftest import make_repo
+from conftest import fake_executable, make_repo
 from daedalus.adapters.base import AGENT_MARKER, AgentRequest
 from daedalus.adapters.command import PRESETS, CommandAdapter
 from daedalus.harness import opencode
@@ -97,9 +98,7 @@ def test_detect(tmp_path, monkeypatch):
     third = tmp_path / "third"
     third.mkdir()
     binary = tmp_path / "bin"
-    binary.mkdir()
-    (binary / "opencode").write_text("#!/bin/sh\n")
-    (binary / "opencode").chmod(0o755)
+    fake_executable(binary, "opencode", "")
     monkeypatch.setenv("PATH", str(binary))
     assert opencode.detect(third)
 
@@ -158,11 +157,20 @@ def _run_plugin(tmp_path: Path, repo: Path, steps: list[dict], *, with_daedalus:
     bindir.mkdir(exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k != AGENT_MARKER}
     node_dir = str(Path(NODE).parent)
-    if with_daedalus:
+    if with_daedalus and os.name == "nt":
+        # Node starts `daedalus` without a shell, so on Windows it must be a real .exe: the one pip
+        # installed for this checkout (as on a user's machine).
+        installed = shutil.which("daedalus")
+        scripts = Path(sysconfig.get_path("scripts"))
+        if installed is None or Path(installed).parent.resolve() != scripts.resolve():
+            pytest.skip("on Windows this needs this checkout installed in the running interpreter (pip install -e .)")
+        bindir = scripts
+    elif with_daedalus:
         shim = bindir / "daedalus"
         shim.write_text(f'#!/bin/sh\nPYTHONPATH={SRC} exec {sys.executable} -m daedalus "$@"\n')
         shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
-    env["PATH"] = os.pathsep.join([str(bindir), node_dir, "/usr/bin", "/bin"])
+    git_dir = str(Path(shutil.which("git")).parent)  # the gate snapshots the repository with git
+    env["PATH"] = os.pathsep.join([str(bindir), node_dir, git_dir, "/usr/bin", "/bin"])
     env.update(PLUGIN=str(plugin), REPO=str(repo), STEPS=json.dumps(steps))
     done = subprocess.run([NODE, "--input-type=module", "-e", DRIVER], capture_output=True, text=True, env=env,
                           timeout=120, cwd=tmp_path, check=False)
@@ -291,25 +299,33 @@ def test_pin_agent_replaces_any_agent_choice():
         "run", "--format", "json", "--agent", "build"]
 
 
-FAKE_OPENCODE = """#!/bin/sh
-echo "$@" > "$OUT/args"
-echo "${OPENCODE_DISABLE_PROJECT_CONFIG:-unset}" > "$OUT/disable"
-echo "${OPENCODE_CONFIG_CONTENT:-unset}" > "$OUT/content"
-pwd > "$OUT/cwd"
-echo "$PWD" > "$OUT/pwdvar"
-echo "$OPENCODE_CONFIG|$OPENCODE_CONFIG_DIR|$XDG_CONFIG_HOME" > "$OUT/cfgenv"
-[ -n "$OPENCODE_CONFIG" ] && cat "$OPENCODE_CONFIG" > "$OUT/cfgfile"; exit 0
+FAKE_OPENCODE = """
+import os, sys
+from pathlib import Path
+
+out = Path(os.environ["OUT"])
+env = os.environ.get
+(out / "args").write_text(" ".join(sys.argv[1:]) + "\\n")
+(out / "disable").write_text((env("OPENCODE_DISABLE_PROJECT_CONFIG") or "unset") + "\\n")
+(out / "content").write_text((env("OPENCODE_CONFIG_CONTENT") or "unset") + "\\n")
+(out / "cwd").write_text(os.getcwd() + "\\n")
+(out / "pwdvar").write_text(env("PWD", "") + "\\n")
+(out / "cfgenv").write_text("|".join(env(k, "") for k in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME")) + "\\n")
+if env("OPENCODE_CONFIG"):
+    (out / "cfgfile").write_text(Path(env("OPENCODE_CONFIG")).read_text())
 """
+# What Windows needs to start a process and find `opencode.cmd`, plus the home and temp directories.
+WINDOWS_ENV = {k: os.environ[k] for k in ("SYSTEMROOT", "COMSPEC", "PATHEXT", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+                                        "TEMP", "TMP", "APPDATA", "LOCALAPPDATA") if k in os.environ}
 
 
 def _fake_opencode(tmp_path: Path) -> dict[str, str]:
     bindir = tmp_path / "bin"
-    bindir.mkdir()
-    (bindir / "opencode").write_text(FAKE_OPENCODE)
-    (bindir / "opencode").chmod(0o755)
+    fake_executable(bindir, "opencode", FAKE_OPENCODE)
     out = tmp_path / "out"
     out.mkdir()
-    return {"PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin", "OUT": str(out), "PWD": "/somewhere/else"}
+    return {**WINDOWS_ENV, "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin", "OUT": str(out),
+            "PWD": "/somewhere/else"}
 
 
 def test_launch_read_only_strips_the_flag_and_locks_the_session(tmp_path, monkeypatch):
@@ -345,11 +361,11 @@ def test_launch_without_opencode_fails_closed(tmp_path, capsys):
 def test_launcher_as_a_module_runs_the_fake_cli_end_to_end(tmp_path):
     """The exact argv the adapter builds, through a real child process."""
     env = _fake_opencode(tmp_path)
-    (tmp_path / "bin" / "opencode").write_text(
-        "#!/bin/sh\n"
-        'printf \'%s\\n\' \'{"type":"text","part":{"type":"text","messageID":"m1","text":"hi"}}\' '
-        '\'{"type":"step_finish","part":{"type":"step-finish","cost":0.5,"tokens":{"input":7,"output":3,"cache":{"read":1,"write":2}}}}\'\n'
-    )
+    fake_executable(tmp_path / "bin", "opencode", (
+        "print('{\"type\":\"text\",\"part\":{\"type\":\"text\",\"messageID\":\"m1\",\"text\":\"hi\"}}')\n"
+        "print('{\"type\":\"step_finish\",\"part\":{\"type\":\"step-finish\",\"cost\":0.5,"
+        "\"tokens\":{\"input\":7,\"output\":3,\"cache\":{\"read\":1,\"write\":2}}}}')\n"
+    ))
     adapter = CommandAdapter.from_config({"name": "opencode"})
     cmd, stdin = adapter._command(AgentRequest("r", "t", "aristotle", "p", tmp_path, read_only=True))
     done = subprocess.run(cmd, input=stdin, capture_output=True, cwd=tmp_path, check=False,

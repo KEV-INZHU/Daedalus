@@ -318,3 +318,16 @@ def test_a_new_workspace_config_is_not_a_weakened_test(tmp_path):
     branch_with(root, trailer=True, edit=add_package_json)
     rep = run_ci(root, "main")
     assert not rep.test_integrity and "Tests weakened" not in rep.markdown()
+
+
+def test_markdown_out_and_annotations_from_the_cli(tmp_path, capsys):
+    from daedalus.cli import main
+
+    root = make_repo(tmp_path / "r")
+    branch_with(root, trailer=True, edit=lambda r: (r / "app.txt").write_text("nope\n"))  # the check wants "ok"
+    out = tmp_path / "comment.md"
+    code = main(["--dir", str(root), "ci", "--base", "main", "--markdown-out", str(out), "--annotations"])
+    assert code == 1
+    body = out.read_text(encoding="utf-8")
+    assert body.splitlines()[0].startswith("Daedalus CI: ❌ failed") and "<!-- daedalus-ci -->" in body
+    assert "::error title=Daedalus check failed::check tests FAIL" in capsys.readouterr().out

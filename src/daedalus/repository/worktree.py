@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from daedalus.core.errors import IntegrationError
+from daedalus.core.fsutil import remove_tree
 from daedalus.core.paths import match_any, normalize
 from daedalus.repository.candidate import file_sha256, is_git_repo
 
@@ -209,7 +210,7 @@ def remove(root: Path, path: Path) -> bool:
         raise IntegrationError(f"refusing to remove {path}: not a Daedalus workspace")
     _git(root, "worktree", "remove", "--force", str(path), check=False)
     if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
+        remove_tree(path)
     _git(root, "worktree", "prune", check=False)
     for parent in path.parents:  # drop now-empty run and repository directories
         if parent.name == worktree_root().name:

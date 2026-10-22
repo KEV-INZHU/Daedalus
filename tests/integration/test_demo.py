@@ -62,8 +62,7 @@ def test_main_cleans_up_and_keep_prints_path(capsys, monkeypatch):
     demo.main(["--fast", "--keep"])
     out = capsys.readouterr().out
     assert "\033[" not in out and "Kept: " in out and "daedalus init" in out
-    import shutil
     from pathlib import Path
     kept = Path(out.split("Kept: ")[1].splitlines()[0])
     assert (kept / ".daedalus").is_dir()
-    shutil.rmtree(kept.parent)
+    demo.remove_tree(kept.parent)

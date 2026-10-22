@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -194,12 +195,18 @@ def _daedalus_on_path(tmp_path: Path) -> dict[str, str]:
     """A `daedalus` executable that runs this checkout, and an environment where it is found."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
+    env = {k: v for k, v in os.environ.items() if k != AGENT_MARKER}
     if os.name == "nt":
-        pytest.skip("shell shim test is POSIX only")
+        # The extension runs `daedalus` through cmd.exe: use the .exe pip installed for this checkout.
+        installed = shutil.which("daedalus")
+        scripts = Path(sysconfig.get_path("scripts"))
+        if installed is None or Path(installed).parent.resolve() != scripts.resolve():
+            pytest.skip("on Windows this needs this checkout installed in the running interpreter (pip install -e .)")
+        env["PATH"] = f"{scripts}{os.pathsep}{env['PATH']}"
+        return env
     exe = bindir / "daedalus"
     exe.write_text(f'#!/bin/sh\nPYTHONPATH="{SRC}" exec "{sys.executable}" -m daedalus "$@"\n')
     exe.chmod(0o755)
-    env = {k: v for k, v in os.environ.items() if k != AGENT_MARKER}
     env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
     return env
 

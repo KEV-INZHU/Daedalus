@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +22,7 @@ import yaml
 
 from daedalus.core.acceptance import Decision, Disposition
 from daedalus.core.errors import DaedalusError
+from daedalus.core.fsutil import remove_tree
 
 DEMO_ACTOR = "human:demo"
 DOCS_URL = "https://github.com/KEV-INZHU/Daedalus#readme"
@@ -212,7 +212,7 @@ def run(args: argparse.Namespace) -> int:
         return 0 if ok else 1
     finally:
         if not args.keep:
-            shutil.rmtree(root.parent, ignore_errors=True)
+            remove_tree(root.parent)
 
 
 def main(argv: list[str] | None = None) -> int:

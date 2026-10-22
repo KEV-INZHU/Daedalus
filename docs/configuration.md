@@ -49,6 +49,28 @@ that ends without reporting its cost (a timeout, a cancellation) counts as exhau
 since the spend cannot be shown to fit. The budget records spend after the fact; routing
 is what declines a paid route before it is called.
 
+## Presets
+
+`daedalus init --preset solo|standard|strict` writes `preset: <name>` into `.daedalus.yml`. The preset
+is read from Daedalus itself each time the config loads, so upgrading Daedalus updates it, and the
+run's pinned policy hash covers the resolved policy: the preset's `policy` keys, after your overrides.
+
+The hash does **not** cover the other keys a preset can carry: `mode`, `cache` and
+`harness` (for example `strict`'s `require_provenance_on_push`). They come from the installed package
+each time the config loads, so a Daedalus upgrade can change them without changing a run's policy hash.
+To pin one of them, write it in `.daedalus.yml` yourself: keys you write always win over the preset.
+
+| Preset | What it sets |
+|---|---|
+| `solo` | One developer plus agents. `mode: review`; medium needs one reviewer; high needs three and no human approval; the evidence cache is on. Critical still needs a human merge approval. |
+| `standard` | The built-in defaults, unchanged. |
+| `strict` | High and critical both need the full four-perspective council and a `merge` approval, and `harness: {require_provenance_on_push: true}` refuses pushes of commits the gate did not accept. |
+
+Keys you write yourself (`mode`, `cache`, `harness`, `policy`) always win over the preset, so a preset
+never silently lowers a floor you set. A `policy:` key replaces the preset's value for that key
+(`tier_requirements` is replaced as a whole). A preset cannot be combined with `policy_file`.
+`daedalus policy --preset strict --diff` shows what a preset would change in your effective policy.
+
 ## What it guarantees and what it doesn't
 
 - Every mandatory check must PASS on the **current** candidate. A candidate is

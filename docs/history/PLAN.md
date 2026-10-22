@@ -94,7 +94,7 @@ Status: 569 passed, 2 skipped (`python -m pytest`).
 ## Phase 4 — Lightweight factory
 
 A line around the single-run station: committed work orders in, gated commits out. See
-[factory.md](factory.md).
+[factory.md](../factory.md).
 
 - [x] Work orders: contract + routing (`depends_on`, `priority`, `mode`, `rounds`), validated by the
   contract builder; text criteria bound to the required checks — `factory/orders.py`

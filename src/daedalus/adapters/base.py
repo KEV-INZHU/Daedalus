@@ -65,6 +65,9 @@ class AgentRequest:
     # Shell command prefixes a Builder may run (the repository's trusted checks), so it can test its
     # own work before handing it in. Never used for read-only launches.
     run_commands: tuple[str, ...] = ()
+    # The candidate's changed paths, set by Daedalus for review launches. An adapter that adds file
+    # content to a review reads only these: never paths named in the prompt, which agents can write.
+    context_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,9 @@ class AgentResult:
     cost_basis: str = "api_equivalent"
     usage: dict[str, Any] | None = None  # models and token counts the session reported
     quota: dict[str, Any] | None = None  # subscription rate-limit reading, when the harness reports one
+    # The session was billed (cash) but its cost cannot be known (for example a hosted API with no prices
+    # configured). It is recorded like a billed session that ended without reporting: the cash budget fails closed.
+    cost_unknown: bool = False
 
 
 COST_BASES = ("api_equivalent", "cash")

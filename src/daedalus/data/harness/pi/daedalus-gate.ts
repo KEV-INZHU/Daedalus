@@ -4,6 +4,8 @@
 // on any error: it never blocks a tool call and never reports anything as accepted.
 // Docs: https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/extensions.md
 import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 const BOOTSTRAP: string = ""; // @bootstrap (install sets this from harness.bootstrap)
@@ -13,7 +15,22 @@ const EDIT_TOOLS = new Set(["edit", "write"]);
 
 type Out = Record<string, any>;
 
+// Windows runs commands through cmd.exe (shell: true), which never reports a missing one as ENOENT,
+// so look it up on PATH the way cmd does (PATHEXT) before spawning.
+function onWindowsPath(cmd: string): boolean {
+  const exts = (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  for (const entry of (process.env.PATH || "").split(delimiter)) {
+    const dir = entry.replace(/^"(.*)"$/, "$1"); // PATH entries may be quoted
+    if (!dir) continue;
+    for (const ext of ["", ...exts]) {
+      try { if (statSync(join(dir, cmd + ext)).isFile()) return true; } catch {}
+    }
+  }
+  return false;
+}
+
 function run(cmd: string, args: string[], input: string, timeoutMs: number, cwd: string): Promise<{ out: string; missing: boolean }> {
+  if (process.platform === "win32" && !onWindowsPath(cmd)) return Promise.resolve({ out: "", missing: true });
   return new Promise((resolve) => {
     let out = "";
     let done = false;

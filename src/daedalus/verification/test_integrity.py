@@ -624,6 +624,9 @@ def _compare(
     for (_, n), count in cand_asserts.items():
         cand_asserts_by_name[n] = max(count, cand_asserts_by_name.get(n, 0))
 
+    # Tests the base had in any changed file: a new file holding one of them is a move destination.
+    base_names: set[str] = set().union(*(b.names for _, b, _, _, _ in changes if b))
+
     base_total = sum(b.asserts for _, b, _, _, _ in changes if b)
     cand_total = sum(c.asserts for _, _, c, _, _ in changes if c)
     net_drop = base_total - cand_total
@@ -632,7 +635,10 @@ def _compare(
         if b is None:
             # A new file: only the markers that make a test pass without testing anything.
             if c is not None:
-                signals += _new_markers(path, c, None) + _new_test_trivials(path, c, set())
+                # A skip in a brand-new file removes no coverage that existed, unless the file
+                # took in tests the base had elsewhere (a move that skips them on the way).
+                moved_in = bool(c.names & base_names)
+                signals += _new_markers(path, c, None, skips_count=moved_in) + _new_test_trivials(path, c, set())
                 signals += _neutral_signals(path, c, None)
             continue
         if c is None:
@@ -732,10 +738,10 @@ def _new_test_trivials(path: str, c: _Side, known: set[str]) -> list[Signal]:
     ]
 
 
-def _new_markers(path: str, c: _Side, b: _Side | None) -> list[Signal]:
+def _new_markers(path: str, c: _Side, b: _Side | None, *, skips_count: bool = True) -> list[Signal]:
     out = []
     skips = c.skips - (b.skips if b else 0)
-    if skips > 0:
+    if skips > 0 and skips_count:
         out.append(Signal(SKIP_ADDED, path, f"{_plural(skips, 'skip marker')} added"))
     elif b is not None and b.py and c.py:
         # The file-level count held still, but a marker may have moved onto another test.

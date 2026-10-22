@@ -36,7 +36,7 @@ Issues = "https://github.com/KEV-INZHU/Daedalus/issues"
 Changelog = "https://github.com/KEV-INZHU/Daedalus/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "jsonschema>=4", "ruff>=0.5"]
+dev = ["pytest>=7", "pytest-xdist>=3", "jsonschema>=4", "ruff>=0.5", "tomli>=1; python_version < '3.11'"]
 
 [project.scripts]
 daedalus = "daedalus.cli:main"
@@ -48,7 +48,7 @@ version = { attr = "daedalus.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-daedalus = ["data/*.yaml", "data/skills/*/*.md", "data/harness/*/*", "data/demo/**/*"]
+daedalus = ["data/*.yaml", "data/presets/*.yaml","data/skills/*/*.md", "data/harness/*/*", "data/demo/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
