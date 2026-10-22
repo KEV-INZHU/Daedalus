@@ -44,13 +44,35 @@ def test_release_workflow_tests_checks_the_tag_and_confines_the_publish_token():
         assert has == (name == "publish"), name
 
 
-def test_ci_workflow_runs_the_full_suite_on_every_os_and_never_on_pull_request_target():
+def test_ci_workflow_runs_every_suite_and_never_on_pull_request_target():
     text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     wf = yaml.safe_load(text)
     assert "pull_request_target" not in wf[True]
-    assert set(wf["jobs"]["test"]["strategy"]["matrix"]["os"]) == {"ubuntu-latest", "macos-latest", "windows-latest"}
-    runs = [s for s in wf["jobs"]["test"]["steps"] if "pytest" in s.get("run", "")]
-    assert len(runs) == 1 and "if" not in runs[0] and " -m " not in runs[0]["run"].replace("python -m pytest", "")
+    job = wf["jobs"]["test"]
+    assert set(job["strategy"]["matrix"]["os"]) == {"ubuntu-latest", "macos-latest", "windows-latest"}
+    steps = [s for s in job["steps"] if "pytest" in s.get("run", "")]
+    assert len(steps) == 2 and len({s.get("if") for s in steps}) == 2  # no step hidden behind another
+    assert not any(s.get("continue-on-error") for s in steps)
+    runs = {s.get("if"): s["run"] for s in steps}
+    assert set(runs) == {"runner.os != 'Windows'", "runner.os == 'Windows'"}
+    # Linux and macOS: the whole suite, with no marker or path filter.
+    assert runs["runner.os != 'Windows'"].split() == ["python", "-m", "pytest", "-q"]
+    # Windows: everything but the cross-platform integration tests. Every other test file must be
+    # under a listed path, and every Windows-only test (which can run nowhere else) must be too.
+    win = runs["runner.os == 'Windows'"].split()
+    assert win[:4] == ["python", "-m", "pytest", "-q"] and "-m" not in win[4:] and "-k" not in win
+    listed = win[4:]
+    tests = ROOT / "tests"
+    files = [p.relative_to(ROOT).as_posix() for pat in ("test_*.py", "*_test.py") for p in tests.rglob(pat)]
+    assert not [f for f in files if f.count("/") == 1], "a test file directly in tests/ needs a place in CI"
+
+    def covered(f: str) -> bool:
+        return any(f == p or f.startswith(p.rstrip("/") + "/") for p in listed)
+
+    missing = [f for f in files if not f.startswith("tests/integration/") and not covered(f)]
+    assert not missing, f"Windows CI leaves out {missing}"
+    windows_only = [f for f in files if "os.name != \"nt\"" in (ROOT / f).read_text(encoding="utf-8")]
+    assert windows_only and all(covered(f) for f in windows_only), windows_only
     assert "slow" not in text
 
 

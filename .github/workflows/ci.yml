@@ -17,7 +17,8 @@ jobs:
   test:
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Windows runners take several times longer on the subprocess-heavy tests: leave them margin.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 30 }}
     strategy:
       fail-fast: false
       matrix:
@@ -37,7 +38,15 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Lint
         run: ruff check
-      # The full suite (subprocess and integration tests included) runs on every OS in the matrix:
-      # the gate's git, hook and path handling differ per platform.
+      # Linux and macOS run the full suite (subprocess and integration tests included). Windows
+      # runners take about 5s per subprocess-heavy test, so the full suite there needs well over an
+      # hour; they run every suite except tests/integration, which still covers the platform-
+      # specific path, hook, pipe and git handling (unit, acceptance, security, recovery,
+      # state_machine), plus the integration tests that only run on Windows (process-tree
+      # containment). The rest of tests/integration runs on Linux and macOS.
       - name: Tests
+        if: runner.os != 'Windows'
         run: python -m pytest -q
+      - name: Tests (Windows, without the cross-platform integration tests)
+        if: runner.os == 'Windows'
+        run: python -m pytest -q tests/unit tests/acceptance tests/security tests/recovery tests/state_machine tests/integration/test_session_control.py

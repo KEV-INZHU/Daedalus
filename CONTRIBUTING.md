@@ -20,7 +20,7 @@ ruff check                          # lint (must be clean)
 python -m pytest -q                 # the full suite (it spawns git and subprocesses, so it takes a few minutes)
 ```
 
-CI runs the full suite on Linux, macOS and Windows. A gate bug gets a regression test that fails without the fix.
+CI runs the full suite on Linux and macOS. Windows runs every suite except `tests/integration` (too slow on Windows runners), plus the integration tests that only run on Windows. A gate bug gets a regression test that fails without the fix.
 
 ## This repository is gated by Daedalus
 
