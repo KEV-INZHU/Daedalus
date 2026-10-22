@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +30,42 @@ class Clock:
 
     def advance(self, seconds: float) -> None:
         self.t += seconds
+
+
+def fake_executable(directory: Path, name: str, script: str) -> Path:
+    """Put a stand-in `name` command in `directory` that runs the Python `script` (sys.argv as the
+    real CLI would get it). Shell-script fakes cannot run on Windows, where PATH lookup only finds
+    names with a PATHEXT extension, so there it is `name.cmd` calling this interpreter."""
+    directory.mkdir(parents=True, exist_ok=True)
+    body = directory / f"{name}_fake.py"
+    body.write_text(script, encoding="utf-8")
+    if os.name == "nt":
+        exe = directory / f"{name}.cmd"
+        exe.write_text(f'@"{sys.executable}" "{body}" %*\r\n', encoding="utf-8")
+    else:
+        exe = directory / name
+        exe.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{body}" "$@"\n', encoding="utf-8")
+        exe.chmod(0o755)
+    return exe
+
+
+def bash() -> str:
+    """A real bash. On Windows `bash` on PATH is usually the WSL launcher, so use Git's."""
+    if os.name == "nt":
+        git_exe = shutil.which("git")
+        if git_exe:
+            for cand in (Path(git_exe).parent.parent / "bin" / "bash.exe", Path(git_exe).parent / "bash.exe"):
+                if cand.exists():
+                    return str(cand)
+    return "bash"
+
+
+def bash_path(*dirs: str | Path) -> str:
+    """PATH for a bash child: `dirs`, then the system tools (Git's on Windows)."""
+    if os.name == "nt":
+        tools = Path(bash()).parent.parent
+        return os.pathsep.join([*map(str, dirs), str(tools / "bin"), str(tools / "usr" / "bin")])
+    return os.pathsep.join([*map(str, dirs), "/usr/bin", "/bin"])
 
 
 def git(root: Path, *args: str) -> None:

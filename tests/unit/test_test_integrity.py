@@ -28,7 +28,7 @@ def commit(root: Path, files: dict[str, str]) -> str:
     for rel, text in files.items():
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8")
+        p.write_bytes(text.encode())  # exact bytes: Windows text mode would add CR
     run(root, "add", "-A")
     run(root, "commit", "-q", "-m", "base")
     return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
@@ -45,7 +45,7 @@ def change(root: Path, files: dict[str, str | None]) -> dict[str, str | None]:
             out[rel] = None
         else:
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(text, encoding="utf-8")
+            p.write_bytes(text.encode())  # exact bytes: Windows text mode would add CR
             out[rel] = hashlib.sha256(text.encode()).hexdigest()
     return out
 

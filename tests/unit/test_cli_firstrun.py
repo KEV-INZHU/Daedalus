@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -12,6 +13,9 @@ import yaml
 from conftest import git, make_repo
 from daedalus import cli
 from daedalus.core.config import detect_checks, load_config, render_config
+
+# How `init` quotes the commit message for the user's shell: cmd.exe has no single quotes.
+COMMIT_ARG = 'commit -m "Configure Daedalus"' if os.name == "nt" else "commit -m 'Configure Daedalus'"
 
 
 def git_out(root: Path, *args: str) -> str:
@@ -148,7 +152,7 @@ def test_init_without_commit_prints_the_exact_command(tmp_path, capsys):
     root = _fresh_repo(tmp_path)
     assert cli.main(["-C", str(root), "init", "--no-hooks"]) == 0
     out = capsys.readouterr().out
-    assert "git -C" in out and "add .daedalus.yml" in out and "commit -m 'Configure Daedalus'" in out
+    assert "git -C" in out and "add .daedalus.yml" in out and COMMIT_ARG in out
     assert git_out(root, "log", "--oneline").count("\n") == 1  # nothing was committed
 
 

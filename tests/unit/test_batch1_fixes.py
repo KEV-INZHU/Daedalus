@@ -11,6 +11,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 from conftest import git, make_repo
 from daedalus import cli
 from daedalus.core.config import detect_checks, load_config
@@ -51,28 +56,18 @@ def test_ci_workflow_runs_every_suite_and_never_on_pull_request_target():
     job = wf["jobs"]["test"]
     assert set(job["strategy"]["matrix"]["os"]) == {"ubuntu-latest", "macos-latest", "windows-latest"}
     steps = [s for s in job["steps"] if "pytest" in s.get("run", "")]
-    assert len(steps) == 2 and len({s.get("if") for s in steps}) == 2  # no step hidden behind another
-    assert not any(s.get("continue-on-error") for s in steps)
-    runs = {s.get("if"): s["run"] for s in steps}
-    assert set(runs) == {"runner.os != 'Windows'", "runner.os == 'Windows'"}
-    # Linux and macOS: the whole suite, with no marker or path filter.
-    assert runs["runner.os != 'Windows'"].split() == ["python", "-m", "pytest", "-q"]
-    # Windows: everything but the cross-platform integration tests. Every other test file must be
-    # under a listed path, and every Windows-only test (which can run nowhere else) must be too.
-    win = runs["runner.os == 'Windows'"].split()
-    assert win[:4] == ["python", "-m", "pytest", "-q"] and "-m" not in win[4:] and "-k" not in win
-    listed = win[4:]
-    tests = ROOT / "tests"
-    files = [p.relative_to(ROOT).as_posix() for pat in ("test_*.py", "*_test.py") for p in tests.rglob(pat)]
-    assert not [f for f in files if f.count("/") == 1], "a test file directly in tests/ needs a place in CI"
-
-    def covered(f: str) -> bool:
-        return any(f == p or f.startswith(p.rstrip("/") + "/") for p in listed)
-
-    missing = [f for f in files if not f.startswith("tests/integration/") and not covered(f)]
-    assert not missing, f"Windows CI leaves out {missing}"
-    windows_only = [f for f in files if "os.name != \"nt\"" in (ROOT / f).read_text(encoding="utf-8")]
-    assert windows_only and all(covered(f) for f in windows_only), windows_only
+    # One step, on every OS, with nothing filtered out: no path, marker or keyword selection.
+    assert len(steps) == 1, steps
+    (tests,) = steps
+    assert "if" not in tests and not tests.get("continue-on-error")
+    assert tests["run"].split() == ["python", "-m", "pytest", "-q", "-n", "auto"]
+    assert "pytest-xdist" in (ROOT / "pyproject.toml").read_text(encoding="utf-8")  # what `-n` needs
+    # Nor does the pytest configuration filter anything, and collection starts at tests/.
+    opts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]
+    assert opts.get("testpaths") == ["tests"]
+    addopts = opts.get("addopts", "")
+    addopts = addopts.split() if isinstance(addopts, str) else list(addopts)
+    assert not {"-m", "-k", "--ignore", "--deselect", "--ignore-glob"} & {a.split("=")[0] for a in addopts}
     assert "slow" not in text
 
 

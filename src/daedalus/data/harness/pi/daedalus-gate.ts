@@ -28,7 +28,8 @@ function run(cmd: string, args: string[], input: string, timeoutMs: number, cwd:
     timer = setTimeout(() => { try { child.kill(); } catch {} finish(false); }, timeoutMs);
     child.stdout?.on("data", (d: Buffer) => { out += d.toString("utf8"); });
     child.on("error", (e: NodeJS.ErrnoException) => finish(e.code === "ENOENT"));
-    child.on("close", () => finish(false));
+    // On Windows the command runs through cmd.exe, which reports a missing command as exit 9009, not ENOENT.
+    child.on("close", (code: number | null) => finish(process.platform === "win32" && code === 9009 && !out));
     child.stdin?.on("error", () => {});
     child.stdin?.end(input);
   });

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -198,9 +199,18 @@ def _gitignore_only_init_entries(root: Path) -> bool:
 def _commit_command(paths: list[str], root: Path) -> str:
     """The one line that commits exactly what init wrote. `git -C <root>` unless cwd is the root,
     so it works from a subdirectory too (the paths are relative to the root)."""
-    prefix = "git" if root.resolve() == Path.cwd().resolve() else f"git -C {shlex.quote(str(root))}"
-    quoted = " ".join(shlex.quote(p) for p in paths)
-    return f"{prefix} add {quoted} && {prefix} commit -m {shlex.quote(COMMIT_MESSAGE)}"
+    prefix = "git" if root.resolve() == Path.cwd().resolve() else f"git -C {_quote(str(root))}"
+    quoted = " ".join(_quote(p) for p in paths)
+    return f"{prefix} add {quoted} && {prefix} commit -m {_quote(COMMIT_MESSAGE)}"
+
+
+def _quote(arg: str) -> str:
+    """Quote for the user's shell. On Windows always double quotes, which cmd, PowerShell and Git
+    Bash all read as one argument with backslashes kept (cmd.exe has no single quotes). An
+    embedded double quote is backslash-escaped; `%` and `$` in a path are not supported there."""
+    if os.name == "nt":
+        return '"' + arg.replace('"', '\\"') + '"'
+    return shlex.quote(arg)
 
 
 def _commit_setup(root: Path, paths: list[str]) -> str:

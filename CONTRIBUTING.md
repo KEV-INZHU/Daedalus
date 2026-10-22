@@ -17,10 +17,10 @@ Python 3.10 or newer. The only runtime dependency is PyYAML.
 
 ```bash
 ruff check                          # lint (must be clean)
-python -m pytest -q                 # the full suite (it spawns git and subprocesses, so it takes a few minutes)
+python -m pytest -q -n auto         # the full suite, in parallel (it spawns git and subprocesses)
 ```
 
-CI runs the full suite on Linux and macOS. Windows runs every suite except `tests/integration` (too slow on Windows runners), plus the integration tests that only run on Windows. A gate bug gets a regression test that fails without the fix.
+CI runs the full suite on Linux, macOS and Windows, in parallel. Test fakes for command-line tools go through `fake_executable` in `tests/conftest.py`, which works on Windows too. A gate bug gets a regression test that fails without the fix.
 
 ## This repository is gated by Daedalus
 

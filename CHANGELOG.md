@@ -54,8 +54,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
   scene 1 the agent replaces a failing test with `assert True`: the checks pass, yet the gate refuses
   with a `test_integrity` reason. In scene 2 the agent fixes the code and is accepted, with a receipt
   and a verified audit chain.
-- **Packaging and CI.** PyPI metadata and a trusted-publishing release workflow, repository CI (the full suite on Linux
-  and macOS; on Windows every suite except `tests/integration`, plus its Windows-only tests), and a composite GitHub Action (`action.yml`) that runs `daedalus ci`.
+- **Packaging and CI.** PyPI metadata and a trusted-publishing release workflow, repository CI (the full suite on Linux,
+  macOS and Windows, in parallel), and a composite GitHub Action (`action.yml`) that runs `daedalus ci`.
 - Community files: contributing guide, security policy, code of conduct, issue and pull request templates.
 - `docs/index.md`; the long README sections now live in `docs/` pages.
 

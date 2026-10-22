@@ -4,7 +4,6 @@ escaping, hosted-reviewer cost, base_url hygiene, symlinks and the context budge
 from __future__ import annotations
 
 import io
-import os
 import re
 import stat
 import subprocess
@@ -16,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from conftest import HUMAN, fix, git, make_repo
+from conftest import HUMAN, bash, bash_path, fix, git, make_repo
 from daedalus import cli
 from daedalus.adapters import make_adapter
 from daedalus.adapters.base import AgentResult
@@ -112,13 +111,13 @@ def run_gate_step(tmp_path, fake_daedalus: str, *, code_env: dict | None = None)
     outputs = tmp_path / "out.txt"
     outputs.write_text("")
     env = {
-        "PATH": f"{bindir}{os.pathsep}{Path(sys.executable).parent}{os.pathsep}/usr/bin:/bin",
+        "PATH": bash_path(bindir, Path(sys.executable).parent),
         "BASE_INPUT": "", "BASE_REF": "main", "REQUIRE_PROVENANCE": "false", "EXTRA_ARGS": "",
         "ANNOTATIONS": "false", "WANT_COMMENT": "true", "EVENT_NAME": "pull_request",
         "RUNNER_TEMP_DIR": str(tmp_path), "PR_HEAD_SHA": "f" * 40, "GITHUB_OUTPUT": str(outputs),
         **(code_env or {}),
     }
-    r = subprocess.run(["bash", "-eo", "pipefail", "-c", step("Gate")["run"]], env=env, capture_output=True, text=True)
+    r = subprocess.run([bash(), "-eo", "pipefail", "-c", step("Gate")["run"]], env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     lines = [ln.split("=", 1) for ln in outputs.read_text().splitlines()]
     return {k: v for k, v in lines}  # the last write of a key wins
@@ -143,8 +142,8 @@ def test_gate_step_trusts_the_result_file_not_exit_code_one(tmp_path):
 
 
 def run_verdict_step(verdict: str, fail_on: str = "blocked") -> int:
-    env = {"PATH": "/usr/bin:/bin", "VERDICT": verdict, "FAIL_ON": fail_on, "EXIT_CODE": "1"}
-    return subprocess.run(["bash", "-eo", "pipefail", "-c", step("Verdict")["run"]], env=env,
+    env = {"PATH": bash_path(), "VERDICT": verdict, "FAIL_ON": fail_on, "EXIT_CODE": "1"}
+    return subprocess.run([bash(), "-eo", "pipefail", "-c", step("Verdict")["run"]], env=env,
                           capture_output=True, text=True).returncode
 
 
@@ -158,14 +157,14 @@ def test_comment_step_replaces_a_stale_pass_with_an_error_body(tmp_path):
     run = step("Pull request comment")["run"]
     head = run.split('if [ "$IS_FORK"')[0]  # the part that decides the body
     comment = tmp_path / "c.md"
-    comment.write_text("Daedalus CI: ✅ passed\n" + COMMENT_MARKER + "\n")  # as if left over
-    env = {"PATH": "/usr/bin:/bin", "VERDICT": "error", "COMMENT_FILE": str(comment), "PR_HEAD_SHA": "abcdef0123456789"}
-    subprocess.run(["bash", "-eo", "pipefail", "-c", head], env=env, check=True)
+    comment.write_text("Daedalus CI: ✅ passed\n" + COMMENT_MARKER + "\n", encoding="utf-8")  # as if left over
+    env = {"PATH": bash_path(), "VERDICT": "error", "COMMENT_FILE": str(comment), "PR_HEAD_SHA": "abcdef0123456789"}
+    subprocess.run([bash(), "-eo", "pipefail", "-c", head], env=env, check=True)
     body = comment.read_text(encoding="utf-8")
     assert "error running the gate" in body and "abcdef0123" in body and COMMENT_MARKER in body
     assert "passed" not in body
     comment.unlink()  # a missing report is an error body too, even when the verdict claims otherwise
-    subprocess.run(["bash", "-eo", "pipefail", "-c", head], env={**env, "VERDICT": "passed"}, check=True)
+    subprocess.run([bash(), "-eo", "pipefail", "-c", head], env={**env, "VERDICT": "passed"}, check=True)
     assert "error running the gate" in comment.read_text(encoding="utf-8")
 
 
@@ -183,7 +182,7 @@ def test_first_marker_comment_is_taken_without_head_under_pipefail():
     assert "| head -n 1" not in code
     assert "ids=" in run and "${ids%%$'\\n'*}" in run
     # the shell expansion takes the first of several ids
-    out = subprocess.run(["bash", "-c", "ids=$'11\\n22\\n33'; id=\"${ids%%$'\\n'*}\"; echo $id"],
+    out = subprocess.run([bash(), "-c", "ids=$'11\\n22\\n33'; id=\"${ids%%$'\\n'*}\"; echo $id"],
                          capture_output=True, text=True).stdout.strip()
     assert out == "11"
 
