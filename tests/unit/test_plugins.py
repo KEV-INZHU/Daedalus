@@ -295,7 +295,7 @@ def test_commit_advice_names_the_harness_files(entry_points, tmp_path, capsys):
     assert cli.main(["-C", str(root), "init", "--harness", "pi"]) == 0
     out = capsys.readouterr().out  # init now ends with the exact commit command for what it wrote
     add = next(line for line in out.splitlines() if " add " in line)
-    paths = add.split(" add ", 1)[1].split(" && ")[0].split()
+    paths = [q.strip("'\"") for q in add.split(" add ", 1)[1].split(" && ")[0].split()]  # quoted on Windows
     assert any(p.startswith(".pi/") for p in paths) and ".claude" not in add
     # exactly the files init wrote: the pi files, plus the config and .gitignore when it wrote those
     assert all(p.startswith(".pi/") or p in (".daedalus.yml", ".gitignore") for p in paths), paths

@@ -197,20 +197,35 @@ def _gitignore_only_init_entries(root: Path) -> bool:
 
 
 def _commit_command(paths: list[str], root: Path) -> str:
-    """The one line that commits exactly what init wrote. `git -C <root>` unless cwd is the root,
+    """The command that commits exactly what init wrote. `git -C <root>` unless cwd is the root,
     so it works from a subdirectory too (the paths are relative to the root)."""
     prefix = "git" if root.resolve() == Path.cwd().resolve() else f"git -C {_quote(str(root))}"
     quoted = " ".join(_quote(p) for p in paths)
-    return f"{prefix} add {quoted} && {prefix} commit -m {_quote(COMMIT_MESSAGE)}"
+    add, commit = f"{prefix} add {quoted}", f"{prefix} commit -m {_quote(COMMIT_MESSAGE)}"
+    # Windows PowerShell 5.1 has no `&&`: there, two lines (the caller indents the first).
+    return f"{add}\n  {commit}" if os.name == "nt" else f"{add} && {commit}"
 
 
 def _quote(arg: str) -> str:
-    """Quote for the user's shell. On Windows always double quotes, which cmd, PowerShell and Git
-    Bash all read as one argument with backslashes kept (cmd.exe has no single quotes). An
-    embedded double quote is backslash-escaped; `%` and `$` in a path are not supported there."""
-    if os.name == "nt":
-        return '"' + arg.replace('"', '\\"') + '"'
-    return shlex.quote(arg)
+    """Quote one argument for the user's shell. On Windows, always one double-quoted argument
+    (cmd.exe has no single quotes), escaped by the CommandLineToArgvW rules: backslashes are
+    doubled only before a quote, so `C:\\` and `D:\\repo\\` survive. `%` or `$` in a path is not
+    escaped."""
+    if os.name != "nt":
+        return shlex.quote(arg)
+    out: list[str] = []
+    slashes = 0
+    for ch in arg:
+        if ch == "\\":
+            slashes += 1
+            continue
+        if ch == '"':
+            out.append("\\" * (slashes * 2 + 1) + '"')
+        else:
+            out.append("\\" * slashes + ch)
+        slashes = 0
+    out.append("\\" * (slashes * 2))  # before the closing quote
+    return '"' + "".join(out) + '"'
 
 
 def _commit_setup(root: Path, paths: list[str]) -> str:

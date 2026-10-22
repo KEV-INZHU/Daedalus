@@ -11,6 +11,11 @@ import pytest
 
 from daedalus import demo
 
+# Root ignores POSIX permission bits, so these would pass without testing anything.
+needs_permissions = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores permission bits"
+)
+
 
 def test_remove_tree_deletes_read_only_files(tmp_path):
     d = tmp_path / "project" / ".git" / "objects" / "05"
@@ -22,6 +27,7 @@ def test_remove_tree_deletes_read_only_files(tmp_path):
     assert not (tmp_path / "project").exists()
 
 
+@needs_permissions
 def test_remove_tree_deletes_files_in_read_only_directories(tmp_path):
     d = tmp_path / "project" / ".git" / "objects" / "05"
     d.mkdir(parents=True)
@@ -33,6 +39,7 @@ def test_remove_tree_deletes_files_in_read_only_directories(tmp_path):
     assert not (tmp_path / "project").exists()
 
 
+@needs_permissions
 @pytest.mark.skipif(os.name == "nt", reason="Windows has no unreadable-directory permission bits")
 def test_remove_tree_deletes_the_contents_of_unreadable_directories(tmp_path):
     d = tmp_path / "project" / "locked"
@@ -43,6 +50,7 @@ def test_remove_tree_deletes_the_contents_of_unreadable_directories(tmp_path):
     assert not (tmp_path / "project").exists()
 
 
+@needs_permissions
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
 def test_remove_tree_never_changes_the_directory_that_holds_it(tmp_path):
     holder = tmp_path / "holder"

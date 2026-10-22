@@ -339,7 +339,8 @@ def test_init_commit_command_from_a_subdirectory_uses_git_dash_c(tmp_path, capsy
     monkeypatch.chdir(sub)
     assert cli.main(["init", "--no-hooks"]) == 0
     out = capsys.readouterr().out
-    assert any(f"git -C {lifecycle._quote(str(r))} add" in out for r in (root, root.resolve())), out
+    quote = (lambda a: f'"{a}"') if os.name == "nt" else shlex.quote  # tmp paths need no escaping
+    assert any(f"git -C {quote(str(r))} add" in out for r in (root, root.resolve())), out
     monkeypatch.chdir(root)
     capsys.readouterr()
     assert cli.main(["init", "--no-hooks", "--force"]) == 0
@@ -362,6 +363,9 @@ def test_commit_command_quoting_survives_spaces_backslashes_and_ampersands(monke
     if name == "nt":
         assert q == '"C:\\Users\\A B\\R&D"'  # one double-quoted argument, backslashes kept
         assert lifecycle._quote('say "hi"') == '"say \\"hi\\""'
+        # Backslashes are doubled only before a quote, so a trailing one cannot escape the closing quote.
+        assert lifecycle._quote("D:\\") == '"D:\\\\"'
+        assert lifecycle._quote("D:\\repo\\") == '"D:\\repo\\\\"'
     else:
         assert shlex.split(q) == [root]
     cmd = lifecycle._commit_command([".daedalus.yml"], Path(root))

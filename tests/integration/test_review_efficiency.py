@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from conftest import HUMAN, fix, make_repo
@@ -125,7 +127,7 @@ def builder_then_fix(repo):
 
     def second(req):
         calls.append(req.prompt)
-        (repo / "src" / "lib.py").write_text("x = 1  # handles empty input\n")
+        (repo / "src" / "lib.py").write_bytes(b"x = 1  # handles empty input\n")
         return AgentResult("COMPLETED", structured=DONE)
 
     return calls, SimulatedAdapter({"brunel": [first, second]})
@@ -342,7 +344,7 @@ def test_restore_command_undoes_a_follow_up_at_the_stop_hook(review_repo, clock,
     claude_code.pre_edit_hook(dict(payload, tool_input={"file_path": "app.txt"}), ari=a)
     fix(review_repo)
     assert claude_code.stop_hook(payload, ari=a)["decision"] == "block"  # the one follow-up pass
-    (review_repo / "src" / "lib.py").write_text("x = 'made it worse'\n")
+    (review_repo / "src" / "lib.py").write_bytes(b"x = 'made it worse'\n")
     res = claude_code.stop_hook(payload, ari=a)
     assert res["decision"] == "block" and "daedalus restore" in res["reason"]
     a.close()
@@ -488,7 +490,7 @@ def test_a_failed_restore_command_exits_non_zero(review_repo, monkeypatch):
     cand = a.capture(a.state(rid))
     snap.save(review_repo, a.state_dir / "runs" / rid, cand.candidate_id, cand.manifest)
     a.request_followup(rid, [], cand.candidate_id)
-    (review_repo / "app.txt").write_text("ok later\n")
+    (review_repo / "app.txt").write_bytes(b"ok later\n")
     a.close()
     monkeypatch.setattr(snap, "restore", lambda *x, **k: False)
     assert cli.main(["-C", str(review_repo), "restore"]) == 2
@@ -506,7 +508,7 @@ def test_a_rollback_that_cannot_put_paths_back_names_them(review_repo, tmp_path,
     (review_repo / "src" / "lib.py").write_text("x = 2\n")
     c1 = capture(review_repo, base)
     assert snapshot.save(review_repo, run_dir, c1.candidate_id, c1.manifest)
-    (review_repo / "app.txt").write_text("ok later\n")
+    (review_repo / "app.txt").write_bytes(b"ok later\n")
     (review_repo / "src" / "lib.py").write_text("x = 3\n")
     c2 = capture(review_repo, base)
     real, writes = Path.write_bytes, {"app.txt": 0}
@@ -536,7 +538,7 @@ def test_a_partly_rewritten_tree_is_reported_with_its_paths(review_repo, monkeyp
     cand = a.record_candidate(rid, actor=HUMAN)
     snapshot.save(review_repo, a.state_dir / "runs" / rid, cand.candidate_id, cand.manifest)
     a.request_followup(rid, [], cand.candidate_id)
-    (review_repo / "app.txt").write_text("ok later\n")
+    (review_repo / "app.txt").write_bytes(b"ok later\n")
 
     def partial(*_a, **_k):
         raise snapshot.PartialRestore(["app.txt"])
@@ -607,7 +609,8 @@ def test_a_rollback_puts_back_modes_and_only_what_it_touched(review_repo, tmp_pa
     monkeypatch.setattr(Path, "write_bytes", flaky)
     assert not snapshot.restore(review_repo, run_dir, c1.candidate_id, c1.manifest, c2.manifest)
     assert (review_repo / "app.txt").read_text() == "later\n"
-    assert stat.S_IMODE((review_repo / "app.txt").stat().st_mode) == 0o755  # the mode is put back too
+    if os.name != "nt":  # Windows has no executable bit to put back
+        assert stat.S_IMODE((review_repo / "app.txt").stat().st_mode) == 0o755  # the mode is put back too
     assert (review_repo / "zz.txt").read_text() == "added later\n" and "zz.txt" not in seen
     assert capture(review_repo, base).candidate_id == c2.candidate_id
 

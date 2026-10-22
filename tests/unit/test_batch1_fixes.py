@@ -60,7 +60,7 @@ def test_ci_workflow_runs_every_suite_and_never_on_pull_request_target():
     assert len(steps) == 1, steps
     (tests,) = steps
     assert "if" not in tests and not tests.get("continue-on-error")
-    assert tests["run"].split() == ["python", "-m", "pytest", "-q", "-n", "auto"]
+    assert tests["run"].split() == ["python", "-m", "pytest", "-q", "-n", "auto", "-rs"]  # -rs: every skip, with why
     assert "pytest-xdist" in (ROOT / "pyproject.toml").read_text(encoding="utf-8")  # what `-n` needs
     # Nor does the pytest configuration filter anything, and collection starts at tests/.
     opts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]

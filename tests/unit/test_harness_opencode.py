@@ -314,8 +314,9 @@ env = os.environ.get
 if env("OPENCODE_CONFIG"):
     (out / "cfgfile").write_text(Path(env("OPENCODE_CONFIG")).read_text())
 """
-# What Windows needs to start any process at all, plus how it finds `opencode.cmd` on PATH.
-WINDOWS_ENV = {k: os.environ[k] for k in ("SYSTEMROOT", "COMSPEC", "PATHEXT") if k in os.environ}
+# What Windows needs to start a process and find `opencode.cmd`, plus the home and temp directories.
+WINDOWS_ENV = {k: os.environ[k] for k in ("SYSTEMROOT", "COMSPEC", "PATHEXT", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+                                        "TEMP", "TMP", "APPDATA", "LOCALAPPDATA") if k in os.environ}
 
 
 def _fake_opencode(tmp_path: Path) -> dict[str, str]:

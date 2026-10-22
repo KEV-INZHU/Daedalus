@@ -44,4 +44,4 @@ jobs:
       # The full suite on every OS. In parallel (pytest-xdist): Windows runners take about 5s per
       # subprocess-heavy test, so one process would need well over an hour there.
       - name: Tests
-        run: python -m pytest -q -n auto
+        run: python -m pytest -q -n auto -rs
