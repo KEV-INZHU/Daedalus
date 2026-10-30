@@ -22,6 +22,7 @@ import yaml
 
 from daedalus.adapters.base import COST_BASES, Adapter, AgentResult
 from daedalus.audit.store import EventStore
+from daedalus.coordination.identity import REVIEWER_ROLES, parse_agent_name
 from daedalus.core import run as ev
 from daedalus.core.acceptance import Decision, Observation, evaluate, observed_violations
 from daedalus.core.authorization import ApprovalRecord, authorization_status
@@ -441,6 +442,53 @@ class Ariadne:
         self._append(run_id, ev.UNRESOLVABLE, actor, {"reason": reason})
         return self.finish(run_id, actor=actor)
 
+    # ========================================================== agent identity
+    def register_agent(self, run_id: str, *, name: str, task_id: str, role: str, principal: str) -> dict[str, Any]:
+        """Bind a generated agent name to this run's task, role and principal. Registering the same
+        binding again (a resumed agent) is a no-op; rebinding a name to anything else is refused, so a
+        name cannot be moved to a principal with a cleaner record."""
+        state = self._running(run_id)
+        _require_principal(name)
+        _require_principal(principal)
+        if not is_agent(name):
+            raise AuthorizationError("generated agent names must start with agent:")
+        if not is_agent(principal):
+            raise AuthorizationError("an agent name stands for an agent principal, never a human or system one")
+        if principal in state.agents:
+            raise ContractError(f"{principal} is itself a generated alias; register against the principal it stands for")
+        if not task_id or not role:
+            raise ContractError("task_id and role are required")
+        have = state.agents.get(name)
+        want = {"task_id": task_id, "role": role, "principal": principal}
+        if have is not None:
+            if {k: have[k] for k in want} != want:
+                raise AuthorizationError(f"{name} is already registered to {have['principal']} ({have['role']}, {have['task_id']})")
+            if have["retired_at"] is not None:
+                raise ContractError(f"{name} was retired; a finished agent does not resume")
+            return have
+        # Registering after the fact would re-point its earlier work at another principal.
+        if name in state.candidate_authors:
+            raise AuthorizationError(f"{name} already authored a candidate; register agents before they work")
+        if any(r.reviewer == name for r in state.reviews) or any(
+            (f.ruling or {}).get("by") == name for f in state.findings.values()
+        ):
+            raise AuthorizationError(f"{name} already reviewed or arbitrated; register agents before they work")
+        if any(a["principal"] == name for a in state.agents.values()):
+            raise ContractError(f"{name} is the principal of registered aliases; it cannot become one")
+        parsed = parse_agent_name(name)
+        if parsed and any((parse_agent_name(n) or ("", ""))[1] == parsed[1] for n in state.agents):
+            raise ContractError(f"the id in {name} is already in use in this run")
+        self._append(run_id, ev.AGENT_REGISTERED, SYSTEM, {"name": name, **want})
+        return self.state(run_id).agents[name]
+
+    def retire_agent(self, run_id: str, name: str) -> None:
+        state = self._running(run_id)
+        a = state.agents.get(name)
+        if a is None:
+            raise ContractError(f"unknown agent {name}")
+        if a["retired_at"] is None:
+            self._append(run_id, ev.AGENT_RETIRED, SYSTEM, {"name": name})
+
     # ======================================================== reviews/findings
     def submit_review(
         self,
@@ -469,8 +517,12 @@ class Ariadne:
             raise ContractError("source must be launched or submitted")
         if reviewer.startswith("system:"):
             raise AuthorizationError("system principals do not review")
-        if reviewer in state.candidate_authors:
+        if state.authored_by(reviewer):
             raise AuthorizationError(f"{reviewer} authored this candidate and cannot review it")
+        registered = state.agents.get(reviewer)
+        if registered is not None and registered["role"] not in REVIEWER_ROLES:
+            # Its role decides what the channel showed it; a builder-role name saw others' findings.
+            raise AuthorizationError(f"{reviewer} is registered as {registered['role']}, not a reviewer")
         cid = candidate_id or self.capture(state).candidate_id
         if scope not in ("full", "delta"):
             raise ContractError("review scope must be full or delta")
@@ -566,7 +618,7 @@ class Ariadne:
         state = self._running(run_id)
         if not arbiter.startswith("agent:plato:"):
             raise AuthorizationError("only a Daedalus-launched Plato session arbitrates")
-        if arbiter in state.candidate_authors:
+        if state.authored_by(arbiter):
             raise AuthorizationError(f"{arbiter} authored this candidate and cannot arbitrate it")
         f = state.findings.get(finding_id)
         if f is None or f.resolved_by is not None:

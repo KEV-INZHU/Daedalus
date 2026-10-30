@@ -146,7 +146,7 @@ def _reuse_review(ari: Ariadne, state: Any, perspective: str, keyed: tuple[str, 
         return None
     r, source = found
     reviewer, findings = r["reviewer"], r.get("findings", ())
-    if reviewer.startswith("system:") or reviewer in state.candidate_authors:
+    if reviewer.startswith("system:") or state.authored_by(reviewer):
         return None  # the reviewer authored this run's candidate: launch a fresh one
     if not _well_formed(findings) or ari.capture(state).candidate_id != cand_id:
         return None  # a malformed source, or the tree moved since the lookup

@@ -53,7 +53,7 @@ GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Daily", ("start", "run", "verify", "finish", "review", "cancel", "runs", "log", "audit", "on", "off")),
     ("Human decisions", ("approve", "deny", "attest", "amend", "risk-exception", "resolve", "abandon")),
     ("Factory", ("factory",)),
-    ("Integrations", ("install", "plugins", "ci", "metrics", "report", "policy")),
+    ("Integrations", ("install", "plugins", "ci", "metrics", "report", "policy", "bus")),
     ("Advanced / internal", ("dispute", "arbitrate", "blocker", "restore", "hook", "statusline", "reconcile", "act")),
 )
 FALLBACK_GROUP = "Advanced / internal"

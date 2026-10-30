@@ -69,6 +69,8 @@ HARNESS_STOP_BLOCKED = "harness.stop_blocked"
 FOLLOWUP_REQUESTED = "followup.requested"  # non-blocking findings offered for one fix round
 FOLLOWUP_REVERTED = "followup.reverted"  # the follow-up's candidates were undone; an earlier one restored
 RECOVERY = "recovery.performed"
+AGENT_REGISTERED = "agent.registered"  # a subagent's generated name, bound to its task, role and principal
+AGENT_RETIRED = "agent.retired"  # that agent finished; its coordination subscription may be dropped
 
 
 @dataclass
@@ -174,6 +176,9 @@ class RunState:
     followup_from: str | None = None  # the acceptable candidate the follow-up started from
     followup_reviews_before: int = 0
     reverted_candidates: set[str] = field(default_factory=set)  # follow-up candidates that were undone
+    # Generated agent names (agent:<role>:<uuid>) -> {task_id, role, principal, registered_at, retired_at}.
+    # `principal` is who the name stands for: every alias of one principal is the same reviewer.
+    agents: dict[str, dict[str, Any]] = field(default_factory=dict)
     last_seq: int = 0
 
     # ----------------------------------------------------------- derived views
@@ -201,6 +206,17 @@ class RunState:
     @property
     def is_finished(self) -> bool:
         return self.execution is ExecutionState.FINISHED
+
+    def identity_of(self, name: str) -> str:
+        """The principal a name stands for: a registered alias resolves to the principal it was
+        registered against; any other name is its own identity."""
+        a = self.agents.get(name)
+        return a["principal"] if a else name
+
+    def authored_by(self, name: str) -> bool:
+        """Whether `name`, or any alias sharing its principal, authored a candidate in this run."""
+        who = self.identity_of(name)
+        return any(self.identity_of(a) == who for a in self.candidate_authors)
 
 
 # --------------------------------------------------------------------- reducer
@@ -410,6 +426,16 @@ def _apply(s: RunState, ev: Event) -> None:
                 f.resolved_by = f.resolution = f.resolved_in = None
     elif t == HARNESS_STOP_BLOCKED:
         s.stop_blocks += 1
+    elif t == AGENT_REGISTERED:
+        s.agents[p["name"]] = {
+            "task_id": p["task_id"],
+            "role": p["role"],
+            "principal": p["principal"],
+            "registered_at": ev.ts,
+            "retired_at": None,
+        }
+    elif t == AGENT_RETIRED:
+        s.agents[p["name"]]["retired_at"] = ev.ts
     elif t == RECOVERY:
         pass  # the individual corrective events carry the state changes
     else:

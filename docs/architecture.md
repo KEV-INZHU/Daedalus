@@ -29,6 +29,7 @@ engineering lifecycle.
 | Verification     | `daedalus.verification`       | Proof Gate: runs trusted checks, binds results to candidates |
 | Repository       | `daedalus.repository`         | Candidate manifests and diffs; isolated worker worktrees |
 | Adapters         | `daedalus.adapters`           | Harness translation with declared capabilities           |
+| Coordination     | `daedalus.coordination`       | Agent names, the per-run bus channel, context bootstrap, receipts ([coordination.md](coordination.md)); never run state |
 | Factory          | `daedalus.factory`            | Work orders, the sequential line (branch, run, ship or park), planner, ledger |
 | Harness shims    | `daedalus.harness`            | Claude Code hooks and skill installation                 |
 | Skills           | `daedalus/data/skills`        | Instruction packages; never enforcement                  |
