@@ -262,7 +262,7 @@ def _kill_on_close_job(proc: subprocess.Popen[bytes]) -> Any:
     return job
 
 
-def agent_env() -> dict[str, str]:
+def agent_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """Environment for a launched agent: a fresh harness session, marked as an agent.
 
     Launched agents must not inherit the parent harness session's markers (the
@@ -270,7 +270,8 @@ def agent_env() -> dict[str, str]:
     commands refuse inside it.
     """
     env = {k: v for k, v in os.environ.items() if k not in HARNESS_SESSION_VARS}
-    env[AGENT_MARKER] = "1"
+    env.update(extra or {})
+    env[AGENT_MARKER] = "1"  # last: a request can never unmark its session
     return env
 
 
@@ -670,7 +671,7 @@ class CommandAdapter(Adapter):
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(request.cwd),
-                env=agent_env(),
+                env=agent_env(request.env),
                 stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

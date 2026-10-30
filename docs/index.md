@@ -14,6 +14,7 @@ Start with the [README](../README.md) for the pitch and the 60-second demo.
 - [report.md](report.md): `daedalus report`, a shareable verdict page for a run (Markdown, HTML, JSON)
 - [adapters.md](adapters.md): reviewers on any model: OpenAI-compatible APIs, Ollama, Anthropic
 - [factory.md](factory.md): the factory line, work orders and what it guarantees
+- [coordination.md](coordination.md): agents coordinating over the shared bus: identity, context, receipts
 
 ## How it works
 

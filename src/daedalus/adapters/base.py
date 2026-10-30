@@ -68,6 +68,9 @@ class AgentRequest:
     # The candidate's changed paths, set by Daedalus for review launches. An adapter that adds file
     # content to a review reads only these: never paths named in the prompt, which agents can write.
     context_paths: tuple[str, ...] = ()
+    # Extra environment for the session, on top of the adapter's own (coordination.surface sets the
+    # bus location, run and agent name here so the session's `daedalus bus` commands find them).
+    env: dict[str, str] = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True)

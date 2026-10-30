@@ -3,6 +3,26 @@
 All notable changes are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Upgrading
+- A run that registers coordination agents records `agent.registered` and `agent.retired` events. Earlier
+  versions do not know these events and refuse to replay such a run, so read it with this version or later.
+
+### Added
+- Agent coordination over the shared filesystem bus, as a library API that orchestrators opt into
+  (`daedalus.coordination`, `daedalus bus`, [docs/coordination.md](docs/coordination.md)). `Channel.spawn` mints
+  an `agent:<role>:<uuid>` name and has Ariadne register it against the run, task, role and principal.
+  `surface.attach` puts the run's context and unread messages into a launch request, fenced as peer data. The
+  per-run channel has threaded messages, a context bootstrap for late joiners, restart recovery with message-id
+  deduplication, and published/delivered/seen/acted receipts. Reviewers do not see each other's findings on a
+  candidate before submitting their own review of it. Daedalus's own launch paths do not call these yet.
+- `AgentRequest.env`: extra environment for a launched session (the command adapter passes it through).
+
+### Changed
+- Every authorship check (review, arbitration, acceptance, review reuse) follows a name's registered
+  principal, so a new alias does not let a builder review its own candidate.
+
 ## 0.2.0
 
 ### Upgrading

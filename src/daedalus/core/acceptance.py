@@ -149,7 +149,7 @@ def review_satisfied(
             r.perspective == perspective
             and r.candidate_id == candidate_id
             and r.contract_version == state.contract.contract_version
-            and r.reviewer not in state.candidate_authors
+            and not state.authored_by(r.reviewer)
             and (not independent or (r.source == "launched" and not r.exposed_to))
         ):
             if r.scope != "delta":
