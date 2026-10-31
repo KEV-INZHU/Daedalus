@@ -275,8 +275,10 @@ def test_risk_skips_paths_that_are_never_part_of_a_candidate(repo, capsys):
     assert "no files to assess" in out and "never part of a candidate" in out
 
 
-def test_a_broken_budget_or_adapter_never_crashes_status(tmp_path):
+def test_a_broken_budget_or_adapter_never_crashes_status(tmp_path, monkeypatch):
     from daedalus.cli._common import review_blocker
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")  # billed, so the cash budget is read
 
     root = make_repo(tmp_path / "r", {"adapter": "claude-code"})
     cfg = (root / ".daedalus.yml").read_text(encoding="utf-8")
@@ -340,8 +342,10 @@ def test_status_judges_billed_reviews_by_the_runs_budget(tmp_path, monkeypatch):
         ari.close()
 
 
-def test_a_negative_cash_budget_does_not_load(tmp_path):
+def test_a_negative_cash_budget_does_not_load(tmp_path, monkeypatch):
     from daedalus.cli._common import review_blocker
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")  # billed, so the cash budget is read
 
     root = make_repo(tmp_path / "r", {"adapter": "claude-code", "policy": {"default_budget": {"max_cash": -1}}})
     assert "does not load" in review_blocker(root)
@@ -374,3 +378,13 @@ def test_next_on_a_mode_review_offers_no_risk_exception(repo, ari):
     ari.verify(rid)
     step = next_step(ari, rid)
     assert step["who"] == "human" and "risk-exception" not in step["action"]
+
+
+def test_a_bad_cash_budget_does_not_matter_when_nothing_is_billed(tmp_path, monkeypatch):
+    from daedalus.adapters.command import BILLING_ENV_VARS
+    from daedalus.cli._common import review_blocker
+
+    for v in BILLING_ENV_VARS:
+        monkeypatch.delenv(v, raising=False)
+    root = make_repo(tmp_path / "r", {"adapter": "claude-code", "policy": {"default_budget": {"max_cash": -1}}})
+    assert review_blocker(root) is None
