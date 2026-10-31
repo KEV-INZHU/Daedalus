@@ -250,10 +250,10 @@ def _http_findings(name: str, adapter: object) -> list[Finding]:
 
 def _cash(cfg: RepoConfig, adapter: object) -> Finding | None:
     expected = getattr(adapter, "expected_cost_basis", None)
-    if expected is None or expected() != "cash":
-        return None
-    name = "cash budget for billed reviews"
+    billed = expected is not None and expected() == "cash"
+    name = "cash budget for billed reviews" if billed else "cash budget"
     fix = f"set `max_cash` to a positive amount in {CONFIG_FILE}, e.g. `policy: {{default_budget: {{max_cash: 5}}}}`"
+    # A malformed cap stops every run from starting, billed or not, so it is reported either way.
     try:
         max_cash = float((cfg.policy.default_budget or {}).get("max_cash", 0) or 0)
     except (TypeError, ValueError):
@@ -262,6 +262,8 @@ def _cash(cfg: RepoConfig, adapter: object) -> Finding | None:
         return Finding(name, False, "max_cash is not a finite amount, so every run rejects it", fix)
     if max_cash < 0:
         return Finding(name, False, f"max_cash is negative ({max_cash:g}), so every run rejects it", fix)
+    if not billed:
+        return None
     if not max_cash > 0:
         return Finding(name, False, "reviews would be billed in cash and max_cash is 0, so every review is refused",
                        fix)

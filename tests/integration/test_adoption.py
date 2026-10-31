@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 
+import pytest
+
 from conftest import CHECK, HUMAN, fix, git, make_repo
 from daedalus.cli import main
 from daedalus.cli._common import disposition_lines
@@ -380,11 +382,32 @@ def test_next_on_a_mode_review_offers_no_risk_exception(repo, ari):
     assert step["who"] == "human" and "risk-exception" not in step["action"]
 
 
-def test_a_bad_cash_budget_does_not_matter_when_nothing_is_billed(tmp_path, monkeypatch):
+def test_a_bad_cash_budget_is_reported_even_when_nothing_is_billed(tmp_path, monkeypatch):
     from daedalus.adapters.command import BILLING_ENV_VARS
     from daedalus.cli._common import review_blocker
+    from daedalus.doctor import diagnose
 
     for v in BILLING_ENV_VARS:
         monkeypatch.delenv(v, raising=False)
     root = make_repo(tmp_path / "r", {"adapter": "claude-code", "policy": {"default_budget": {"max_cash": -1}}})
-    assert review_blocker(root) is None
+    assert "does not load" in review_blocker(root)  # every run start rejects this cap
+    bad = [f for f in diagnose(root) if f.name == "cash budget"]
+    assert bad and not bad[0].ok and "negative" in bad[0].detail
+
+
+def test_an_unloadable_adapter_is_reported(tmp_path):
+    from daedalus.cli._common import BROKEN, review_blocker
+
+    root = make_repo(tmp_path / "r", {"adapter": {"name": "no-such-adapter"}})
+    assert review_blocker(root) == BROKEN
+
+
+@pytest.mark.parametrize("cap", [".inf", ".nan"])
+def test_a_billed_non_finite_cash_budget_does_not_load(tmp_path, monkeypatch, cap):
+    from daedalus.cli._common import review_blocker
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    root = make_repo(tmp_path / "r", {"adapter": "claude-code"})
+    cfg = (root / ".daedalus.yml").read_text(encoding="utf-8")
+    (root / ".daedalus.yml").write_text(cfg + f"policy:\n  default_budget: {{max_cash: {cap}}}\n", encoding="utf-8")
+    assert "does not load" in review_blocker(root)

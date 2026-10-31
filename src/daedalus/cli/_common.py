@@ -229,6 +229,12 @@ def review_blocker(root: Path | None, state: Any = None) -> str | None:
         if adapter.name == "inline":  # what an unset `adapter:` means
             return f"No adapter here can launch reviews: {fix}"
         return f"The `{adapter.name}` adapter cannot launch independent reviews: {fix}"
+    try:  # a bad cap stops every run from starting, billed or not
+        max_cash = float(cfg.policy.default_budget.get("max_cash") or 0)
+    except (TypeError, ValueError):
+        return BROKEN
+    if not math.isfinite(max_cash) or max_cash < 0:
+        return BROKEN
     if basis == "cash" and state is not None:
         from daedalus.core.errors import BudgetExhausted
         from daedalus.orchestration.lifecycle import refuse_unaffordable
@@ -238,13 +244,6 @@ def review_blocker(root: Path | None, state: Any = None) -> str | None:
         except BudgetExhausted as exc:
             return str(exc)
         return None
-    if basis == "cash":
-        try:
-            max_cash = float(cfg.policy.default_budget.get("max_cash") or 0)
-        except (TypeError, ValueError):
-            return BROKEN
-        if not math.isfinite(max_cash) or max_cash < 0:
-            return BROKEN
     if basis == "cash" and not max_cash:
         return (f"`{adapter.name}` sessions here would be billed, and the budget allows no billed spend: set "
                 "`policy: {default_budget: {max_cash: <dollars>}}` in .daedalus.yml")
