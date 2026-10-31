@@ -11,6 +11,7 @@ The user-facing file is deliberately small:
     cache: {checks: true, reviews: true, max_age_s: 86400}  # reuse verified evidence across runs (default on)
     harness:
       auto_finish: true    # `daedalus verify` records acceptance when every condition holds
+    plan_review: false     # `daedalus run`: a reviewer critiques the Builder's plan before it codes
     coordination: true     # launched agents coordinate over a message bus (default on); or
                            # {enabled: true, bus_dir: path} to share a bus with other tools
     preset: solo           # solo | standard | strict: a named overlay on the default policy
@@ -35,8 +36,8 @@ from typing import Any
 import yaml
 
 from daedalus.core.contracts import MODES
-from daedalus.core.paths import MAKEFILE_NAMES
 from daedalus.core.errors import PolicyError
+from daedalus.core.paths import MAKEFILE_NAMES
 from daedalus.core.policy import (
     DEFAULT_MAX_AGE_S,
     Policy,
@@ -68,6 +69,9 @@ class RepoConfig:
     # the bus never decides acceptance, so turning it off changes no run's outcome rules.
     coordination: bool = True
     bus_dir: str | None = None  # bus root, relative to the repository; default .daedalus/bus
+    # `daedalus run` has the Builder plan first and a reviewer critique the plan before any code is
+    # written (two extra read-only sessions). Advice only: it never decides acceptance.
+    plan_review: bool = False
 
     @property
     def policy(self) -> Policy:
@@ -316,6 +320,9 @@ def load_config(root: str | Path, *, preset: str | None = None) -> RepoConfig:
     if "auto_finish" in harness and not isinstance(harness["auto_finish"], bool):
         raise PolicyError("`harness: auto_finish` must be true or false")
     coordination, bus_dir = _coordination(cfg.get("coordination", True))
+    plan_review = cfg.get("plan_review", False)
+    if not isinstance(plan_review, bool):
+        raise PolicyError("`plan_review:` must be true or false")
     if bus_dir is not None:
         where, top = (root / bus_dir).resolve(), root.resolve()
         state = top / STATE_DIR
@@ -337,6 +344,7 @@ def load_config(root: str | Path, *, preset: str | None = None) -> RepoConfig:
         preset=preset,
         coordination=coordination,
         bus_dir=bus_dir,
+        plan_review=plan_review,
     )
 
 

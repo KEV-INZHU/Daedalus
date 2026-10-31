@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from daedalus.cli._common import SEV_ABBR, _ari, _print, _run_id, add_command
+from daedalus.cli._common import SEV_ABBR, _ari, _print, _run_id, add_command, display_name, hidden_checks
 from daedalus.core.config import PRESETS, find_root, load_config
 from daedalus.core.errors import DaedalusError
 from daedalus.core.policy import default_policy_text
@@ -59,10 +59,18 @@ def cmd_metrics(args: argparse.Namespace) -> int:
 
     ari = _ari(args)
     try:
+        from daedalus.repository.escapes import escaped_runs
+
         runs, errors = collect(ari.store)
         agg = aggregate(runs)
+        escaped = escaped_runs(ari.root, [m.run_id for m in runs if m.accepted])
+        escape_rate = round(len(escaped) / agg.accepted, 4) if agg.accepted else None
         if args.json:
-            out = {"runs": [m.to_dict() for m in runs], "errors": errors, "aggregate": agg.to_dict()}
+            out = {
+                "runs": [{**m.to_dict(), "escaped_by": escaped.get(m.run_id, [])} for m in runs],
+                "errors": errors,
+                "aggregate": {**agg.to_dict(), "escaped": len(escaped), "escape_rate": escape_rate},
+            }
             _print(json.dumps(out, indent=2))
             return 0 if not errors else 1
 
@@ -115,6 +123,22 @@ def cmd_metrics(args: argparse.Namespace) -> int:
             f"evidence cache: {agg.cache_hits} hit(s) ({agg.cache_check_hits} check, {agg.cache_review_hits} review) "
             f"· saved {agg.cache_seconds_saved / 60:.1f}m and {agg.cache_cost_saved:.2f} "
             f"(cash {agg.cache_cash_saved:.2f}; the rest is API-equivalent estimate)"
+        )
+        if agg.review_spend:
+            parts = []
+            for p, row in agg.review_spend.items():
+                per = "no findings" if row["cost_per_finding"] is None else f"{row['cost_per_finding']:.2f}/finding"
+                parts.append(f"{display_name(p)} {row['cost']:.2f} for {int(row['findings'])} ({per})")
+            _print("review spend: " + " · ".join(parts))
+        if agg.parallel_runs:
+            _print(
+                f"parallel work: {agg.parallel_runs} run(s) · saved {agg.parallel_saved_s / 60:.1f}m against running "
+                f"the packages one by one · integration took {agg.integration_s / 60:.1f}m · "
+                f"{agg.integration_failures} integration failure(s)"
+            )
+        _print(
+            f"escaped defects {len(escaped)} of {agg.accepted} accepted · escape rate {pct(escape_rate)} "
+            "(accepted runs a later `Fixes-Run: <run id>` commit says it fixes)"
         )
         if any(m.findings for m in runs):
             _print("findings: B=BLOCKER M=MAJOR m=MINOR A=ADVISORY")
@@ -175,12 +199,19 @@ def cmd_log(args: argparse.Namespace) -> int:
             _print(f"audit chain intact: {n} events verified")
         rid = _run_id(ari, args, any_run=True)
         events = ari.store.events(rid)
+        hidden = hidden_checks(ari.state(rid))
         if args.json:
+            if hidden:  # every event's raw payload, the pinned policy (with the holdout's command) included
+                raise DaedalusError("this run has held-out checks; `daedalus log --json` is for a person to run")
             _print(json.dumps([e.to_dict() for e in events], indent=2))
             return 0
         for e in events:
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e.ts))
-            _print(f"{e.seq:>5} {ts} {e.actor:<28} {e.type:<22} {_brief(e.type, e.payload)}")
+            brief = _brief(e.type, e.payload)
+            check = e.payload.get("check_id") or (e.payload.get("record") or {}).get("check_id")
+            if check in hidden:
+                brief = "a held-out check"
+            _print(f"{e.seq:>5} {ts} {e.actor:<28} {e.type:<22} {brief}")
         return 0
     finally:
         ari.close()

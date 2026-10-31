@@ -90,6 +90,6 @@ def register(sub: Any) -> None:
     sp = add_command(sub, "act", cmd_act, "perform an approved restricted action", run=True)
     sp.add_argument("action")
     sp = add_command(sub, "hook", cmd_hook, "harness hook entry point (reads the hook payload on stdin)")
-    sp.add_argument("name", choices=("stop", "session-start", "prompt", "pre-edit", "commit-msg", "pre-push"))
+    sp.add_argument("name", choices=("stop", "session-start", "prompt", "pre-edit", "bus", "commit-msg", "pre-push"))
     sp.add_argument("args", nargs="*", help="arguments a git hook passes through")
     add_command(sub, "statusline", cmd_statusline, "one status line for Claude Code (reads its JSON on stdin)")

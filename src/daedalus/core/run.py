@@ -41,6 +41,7 @@ REVIEW_RECORDED = "review.recorded"
 REVIEW_FAILED = "review.failed"
 FINDING_RESOLVED = "finding.resolved"
 FINDING_DISPUTED = "finding.disputed"
+FINDING_ANSWERED = "finding.answered"  # the builder says what it changed; the re-review checks the claim
 ARBITRATION_RECORDED = "arbitration.recorded"
 ARBITRATION_FAILED = "arbitration.failed"
 BLOCKER_RAISED = "blocker.raised"
@@ -69,6 +70,8 @@ HARNESS_STOP_BLOCKED = "harness.stop_blocked"
 FOLLOWUP_REQUESTED = "followup.requested"  # non-blocking findings offered for one fix round
 FOLLOWUP_REVERTED = "followup.reverted"  # the follow-up's candidates were undone; an earlier one restored
 RECOVERY = "recovery.performed"
+CONTRACT_PROPOSED = "contract.proposed"  # an agent's suggested objective and criteria; changes nothing
+PROPOSAL_REJECTED = "contract.proposal_rejected"
 AGENT_REGISTERED = "agent.registered"  # a subagent's generated name, bound to its task, role and principal
 AGENT_RETIRED = "agent.retired"  # that agent finished; its coordination subscription may be dropped
 
@@ -90,6 +93,7 @@ class Finding:
     resolved_in: str | None = None  # candidate of the review that resolved it, if a review did
     disputes: list[dict[str, Any]] = field(default_factory=list)
     ruling: dict[str, Any] | None = None  # latest Plato ruling: decision, rationale, ...
+    answers: list[dict[str, Any]] = field(default_factory=list)  # builder's "fixed" notes: by, note, at
 
 
 @dataclass
@@ -179,6 +183,8 @@ class RunState:
     # Generated agent names (agent:<role>:<uuid>) -> {task_id, role, principal, registered_at, retired_at}.
     # `principal` is who the name stands for: every alias of one principal is the same reviewer.
     agents: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Contract proposals by id: {objective, criteria, attest, proposed_by, based_on, rejected, confirmed}.
+    proposals: dict[str, dict[str, Any]] = field(default_factory=dict)
     last_seq: int = 0
 
     # ----------------------------------------------------------- derived views
@@ -206,6 +212,16 @@ class RunState:
     @property
     def is_finished(self) -> bool:
         return self.execution is ExecutionState.FINISHED
+
+    @property
+    def pending_proposal(self) -> dict[str, Any] | None:
+        """The newest proposal for the current contract version that nobody confirmed or rejected.
+        Any amendment moves the version on, which retires every earlier proposal."""
+        for pid in reversed(list(self.proposals)):
+            p = self.proposals[pid]
+            if p["based_on"] == self.contract.contract_version and not p["rejected"] and not p["confirmed"]:
+                return {"proposal_id": pid, **p}
+        return None
 
     def identity_of(self, name: str) -> str:
         """The principal a name stands for: a registered alias resolves to the principal it was
@@ -264,6 +280,8 @@ def _apply(s: RunState, ev: Event) -> None:
         s.contract_file_hash = p.get("contract_file_hash", s.contract_file_hash)
         for wid in p.get("superseded_workers", ()):
             _worker_to(s, wid, WorkerState.SUPERSEDED, "contract amended")
+        if p.get("proposal_id") in s.proposals:
+            s.proposals[p["proposal_id"]]["confirmed"] = {"by": ev.actor, "version": p["contract"]["contract_version"]}
     elif t == CANDIDATE_RECORDED:
         cid = p["candidate_id"]
         s.candidates.setdefault(cid, {"manifest": p["manifest"], "by": ev.actor, "at": ev.ts})
@@ -319,6 +337,8 @@ def _apply(s: RunState, ev: Event) -> None:
                 s.findings[fid].resolved_in = review.candidate_id
     elif t == REVIEW_FAILED:
         s.failed_reviews.append({**p, "at": ev.ts})
+    elif t == FINDING_ANSWERED:
+        s.findings[p["finding_id"]].answers.append({"by": ev.actor, "note": p["note"], "at": ev.ts})
     elif t == FINDING_DISPUTED:
         s.findings[p["finding_id"]].disputes.append({"by": ev.actor, "reason": p["reason"], "at": ev.ts})
     elif t == ARBITRATION_RECORDED:
@@ -426,6 +446,19 @@ def _apply(s: RunState, ev: Event) -> None:
                 f.resolved_by = f.resolution = f.resolved_in = None
     elif t == HARNESS_STOP_BLOCKED:
         s.stop_blocks += 1
+    elif t == CONTRACT_PROPOSED:
+        s.proposals[p["proposal_id"]] = {
+            "objective": p["objective"],
+            "criteria": list(p.get("criteria", ())),
+            "attest": list(p.get("attest", ())),
+            "rationale": p.get("rationale", ""),
+            "proposed_by": ev.actor,
+            "based_on": p["based_on"],
+            "rejected": None,
+            "confirmed": None,
+        }
+    elif t == PROPOSAL_REJECTED:
+        s.proposals[p["proposal_id"]]["rejected"] = {"by": ev.actor, "reason": p.get("reason", "")}
     elif t == AGENT_REGISTERED:
         s.agents[p["name"]] = {
             "task_id": p["task_id"],

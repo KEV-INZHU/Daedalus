@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 import time
 import uuid
@@ -32,6 +33,7 @@ from daedalus.core.contracts import (
     PERSPECTIVES,
     TaskContract,
     amend_contract,
+    bind_text_criteria,
     build_contract,
     removed_hard_constraints,
 )
@@ -62,9 +64,8 @@ from daedalus.orchestration.scheduler import WorkPackage, dispatch_blockers, liv
 from daedalus.repository import worktree
 from daedalus.repository.candidate import CandidateManifest, capture, file_sha256, git_head
 from daedalus.verification.evidence_cache import EvidenceCache
-from daedalus.verification.test_integrity import IntegrityReport
+from daedalus.verification.test_integrity import IntegrityReport, check_runner_specs
 from daedalus.verification.test_integrity import analyze as analyze_tests
-from daedalus.verification.test_integrity import check_runner_specs
 
 DEFAULT_VERIFIER = "daedalus-proof-gate@local"
 CLEANUP_ATTEMPTS = 3  # workspace removals tried before leaving it to a human
@@ -87,6 +88,14 @@ SEVERITY_SYNONYMS = {
 
 def _uid(prefix: str) -> str:
     return prefix + uuid.uuid4().hex[:10]
+
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _one_line(text: Any) -> str:
+    """Printable, single-line text: control and bidirectional-override characters become spaces."""
+    return " ".join(_CONTROL.sub(" ", str(text or "")).split())
 
 
 def _require_principal(actor: str) -> None:
@@ -599,6 +608,23 @@ class Ariadne:
             )
         self._append(run_id, ev.FINDING_RESOLVED, actor, {"finding_id": finding_id, "note": note})
 
+    MAX_ANSWER = 1000
+
+    def answer_finding(self, run_id: str, finding_id: str, *, actor: str, note: str) -> None:
+        """Record what was changed for an open finding. It resolves nothing: the next review of that
+        perspective sees the note and decides whether the change is real."""
+        state = self._running(run_id)
+        _require_principal(actor)
+        f = state.findings.get(finding_id)
+        if f is None or f.resolved_by is not None:
+            raise ContractError(f"{finding_id} is not an open finding")
+        note = " ".join(str(note).split())
+        if not note:
+            raise ContractError("say what changed")
+        if len(note) > self.MAX_ANSWER:
+            raise ContractError(f"keep the note under {self.MAX_ANSWER} characters")
+        self._append(run_id, ev.FINDING_ANSWERED, actor, {"finding_id": finding_id, "note": note})
+
     def dispute(self, run_id: str, finding_id: str, *, actor: str, reason: str) -> None:
         """Contest an open finding. Anyone may dispute; only arbitration or the
         finding's own rules can resolve it."""
@@ -814,7 +840,14 @@ class Ariadne:
         )
 
     def amend(
-        self, run_id: str, changes: dict[str, Any], *, actor: str, rationale: str, interactive: bool = False
+        self,
+        run_id: str,
+        changes: dict[str, Any],
+        *,
+        actor: str,
+        rationale: str,
+        interactive: bool = False,
+        proposal_id: str | None = None,
     ) -> TaskContract:
         state = self._running(run_id)
         if not state.policy.has_authority(actor, "contract_change"):
@@ -850,9 +883,105 @@ class Ariadne:
                     w.task_id for w in state.workers.values() if w.state is WorkerState.PENDING
                 ],
                 "contract_file_hash": fhash,
+                **({"proposal_id": proposal_id} if proposal_id else {}),
             },
         )
         return new
+
+    # ==================================================== contract proposals
+    MAX_OBJECTIVE = 600
+    MAX_CRITERION = 300
+    MAX_CRITERIA = 12
+    MAX_RATIONALE = 600
+
+    def propose_contract(
+        self,
+        run_id: str,
+        *,
+        objective: str,
+        criteria: Iterable[str] = (),
+        attest: Iterable[str] = (),
+        rationale: str = "",
+        actor: str,
+    ) -> str:
+        """Record a suggested objective and acceptance criteria. Anyone may propose, an agent
+        included; nothing changes until a person with `contract_change` authority confirms it.
+        `criteria` are proved by the run's required checks, `attest` ones by a person."""
+        state = self._running(run_id)
+        _require_principal(actor)
+        # Agent-written text a person reads before authorising it: one line each, printable, bounded.
+        objective = _one_line(objective)
+        if not objective:
+            raise ContractError("a proposal needs an objective")
+        if len(objective) > self.MAX_OBJECTIVE:
+            raise ContractError(f"keep the objective under {self.MAX_OBJECTIVE} characters; put detail in criteria")
+        crit = [_one_line(c) for c in criteria]
+        att = [_one_line(c) for c in attest]
+        rationale = _one_line(rationale)
+        if any(not c for c in crit + att):
+            raise ContractError("a criterion cannot be empty")
+        if not crit and not att:
+            raise ContractError("propose at least one acceptance criterion: what must be true when this is done")
+        if len(crit) + len(att) > self.MAX_CRITERIA:
+            raise ContractError(f"propose at most {self.MAX_CRITERIA} criteria")
+        if any(len(c) > self.MAX_CRITERION for c in crit + att):
+            raise ContractError(f"keep each criterion under {self.MAX_CRITERION} characters")
+        if len(rationale) > self.MAX_RATIONALE:
+            raise ContractError(f"keep the rationale under {self.MAX_RATIONALE} characters")
+        pid = f"P{len(state.proposals) + 1}"
+        self._append(
+            run_id,
+            ev.CONTRACT_PROPOSED,
+            actor,
+            {
+                "proposal_id": pid,
+                "objective": objective,
+                "criteria": crit,
+                "attest": att,
+                "rationale": rationale,
+                "based_on": state.contract.contract_version,
+            },
+        )
+        return pid
+
+    def _proposal(self, state: RunState, proposal_id: str | None) -> dict[str, Any]:
+        pending = state.pending_proposal
+        if pending is None:
+            raise ContractError("no pending contract proposal for the current contract version")
+        if proposal_id and proposal_id != pending["proposal_id"]:
+            raise ContractError(f"{proposal_id} is not the pending proposal ({pending['proposal_id']} is)")
+        return pending
+
+    def confirm_proposal(
+        self, run_id: str, proposal_id: str | None = None, *, actor: str, interactive: bool = False
+    ) -> TaskContract:
+        """Apply the pending proposal as a contract amendment (needs `contract_change` authority)."""
+        state = self._running(run_id)
+        p = self._proposal(state, proposal_id)
+        spec = bind_text_criteria({"acceptance_criteria": p["criteria"]}, state.policy) if p["criteria"] else {}
+        crits = list(spec.get("acceptance_criteria", [])) + [{"description": c, "checks": []} for c in p["attest"]]
+        changes = {
+            "objective": p["objective"],
+            "acceptance_criteria": [{**c, "id": f"C{i}"} for i, c in enumerate(crits, 1)],
+        }
+        why = f"confirmed {p['proposal_id']} from {p['proposed_by']}" + (f": {p['rationale']}" if p["rationale"] else "")
+        return self.amend(
+            run_id, changes, actor=actor, rationale=why, interactive=interactive, proposal_id=p["proposal_id"]
+        )
+
+    def reject_proposal(
+        self, run_id: str, proposal_id: str | None = None, *, actor: str, reason: str = "", interactive: bool = False
+    ) -> None:
+        state = self._running(run_id)
+        if not state.policy.has_authority(actor, "contract_change"):
+            raise AuthorizationError(f"{actor} lacks `contract_change` authority")
+        p = self._proposal(state, proposal_id)
+        self._append(
+            run_id,
+            ev.PROPOSAL_REJECTED,
+            actor,
+            {"proposal_id": p["proposal_id"], "reason": _one_line(reason), "interactive": interactive},
+        )
 
     # ==================================================== restricted actions
     def execute_action(

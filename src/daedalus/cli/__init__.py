@@ -49,11 +49,11 @@ def _interactive() -> bool:
 # Where each command is listed in `--help`. A command that is not named here still works and is
 # listed under "Advanced / internal", so a new module cannot vanish from the help.
 GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Start here", ("init", "demo", "status", "doctor")),
-    ("Daily", ("start", "run", "verify", "finish", "review", "cancel", "runs", "log", "audit", "on", "off")),
-    ("Human decisions", ("approve", "deny", "attest", "amend", "risk-exception", "resolve", "abandon")),
+    ("Start here", ("init", "demo", "status", "next", "doctor")),
+    ("Daily", ("start", "propose", "plan-review", "run", "verify", "finish", "review", "findings", "cancel", "runs", "log", "audit", "on", "off")),
+    ("Human decisions", ("confirm", "approve", "deny", "attest", "amend", "risk-exception", "resolve", "abandon")),
     ("Factory", ("factory",)),
-    ("Integrations", ("install", "plugins", "ci", "metrics", "report", "policy", "bus")),
+    ("Integrations", ("install", "plugins", "ci", "metrics", "report", "policy", "bus", "mutate")),
     ("Advanced / internal", ("dispute", "arbitrate", "blocker", "restore", "hook", "statusline", "reconcile", "act")),
 )
 FALLBACK_GROUP = "Advanced / internal"

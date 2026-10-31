@@ -152,7 +152,17 @@ def check_status(state: RunState, obs: Observation, check_id: str) -> tuple[Chec
         )
     if e.result == "PASS":
         return CheckState.PASS, f"`{check_id}` passed on candidate {cand[:12]}."
+    if defn.holdout:
+        # Its name and output would tell the Builder what the held-out tests look for. A person reads
+        # the log, and sees which check it was in the reason code (`check:<id>`).
+        state_ = CheckState.FAIL if e.result == "FAIL" else CheckState.ERROR
+        return state_, (
+            f"a holdout check did not pass on candidate {cand[:12]}. Its name and output are kept from the "
+            "builder: make the work meet the contract's criteria. A person sees which check it was with "
+            "`daedalus status` outside an agent session; its log is kept outside the repository."
+        )
     if e.result == "FAIL":
         where = f" Log: {e.log_path}" if e.log_path else ""
-        return CheckState.FAIL, f"`{check_id}` failed (exit {e.exit_code}) on candidate {cand[:12]}.{where}"
+        why = f" {e.error}." if e.error else ""
+        return CheckState.FAIL, f"`{check_id}` failed (exit {e.exit_code}) on candidate {cand[:12]}.{why}{where}"
     return CheckState.ERROR, f"`{check_id}` errored on candidate {cand[:12]}: {e.error}"

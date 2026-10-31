@@ -30,5 +30,6 @@ Start with the [README](../README.md) for the pitch and the 60-second demo.
 
 ## Project
 
+- [roadmap.md](roadmap.md): what is planned, shipped and blocked, by impact
 - [history/PLAN.md](history/PLAN.md): the original build plan (history, not current behaviour)
 - [CONTRIBUTING.md](../CONTRIBUTING.md), [SECURITY.md](../SECURITY.md), [CHANGELOG.md](../CHANGELOG.md)

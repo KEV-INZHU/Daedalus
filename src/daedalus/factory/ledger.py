@@ -36,6 +36,7 @@ OUTCOME = "order.outcome"
 REQUEUED = "order.requeued"
 LINE_STARTED = "line.started"
 LINE_STOPPED = "line.stopped"
+LINE_PUSHED = "line.pushed"  # the optional ship step: the integration branch pushed (and a PR opened)
 
 OUTCOMES = ("shipped", "parked", "rejected", "cancelled", "waiting")
 DONE = ("shipped",)

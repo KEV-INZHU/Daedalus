@@ -20,25 +20,9 @@ from daedalus.core.acceptance import Decision
 from daedalus.core.config import find_root
 from daedalus.core.contracts import bind_text_criteria
 from daedalus.core.errors import AuthorizationError, DaedalusError
+from daedalus.core.names import DISPLAY_NAMES as DISPLAY_NAMES  # re-exported for callers
+from daedalus.core.names import display_name
 from daedalus.core.state_machine import Disposition
-
-# Plain-words names for the roles, for display only. Persisted ids, reason codes and event payloads
-# keep the short ids: the audit log refers to them.
-DISPLAY_NAMES = {
-    "aristotle": "quality review (Aristotle)",
-    "socrates": "validation review (Socrates)",
-    "james": "functionality review (James)",
-    "mozi": "simplicity review (Mozi)",
-    "plato": "arbiter (Plato)",
-    "brunel": "builder (Brunel)",
-    "vitruvius": "planner (Vitruvius)",
-}
-
-
-def display_name(role: str) -> str:
-    """How a person reads a role id; an id with no entry (a custom review) is shown as it is."""
-    return DISPLAY_NAMES.get(role, role)
-
 
 SEV_ABBR = {"BLOCKER": "B", "MAJOR": "M", "MINOR": "m", "ADVISORY": "A"}
 EXIT = {Disposition.ACCEPTED: 0, Disposition.BLOCKED: 1, Disposition.REJECTED: 3, Disposition.CANCELLED: 4}
@@ -145,12 +129,22 @@ def _spec_from_args(args: argparse.Namespace, policy: Any = None) -> dict[str, A
     return spec
 
 
-def render_decision(d: Decision, *, verbose: bool = True, root: Path | None = None) -> list[str]:
+def hidden_checks(state: Any) -> frozenset[str]:
+    """Holdout check ids, when the reader is an agent session: those it must not be shown."""
+    from daedalus.core.policy import holdout_ids
+
+    return holdout_ids(state.policy) if in_agent_session() else frozenset()
+
+
+def render_decision(
+    d: Decision, *, verbose: bool = True, root: Path | None = None, hidden: frozenset[str] = frozenset()
+) -> list[str]:
     lines = [f"Candidate: {d.candidate_id[:12]} · risk {d.risk.explain()}"]
     if d.check_states:
         lines.append("Checks:")
-        w = max(len(k) for k in d.check_states)
-        for cid, (st, detail) in d.check_states.items():
+        shown = {("(held out)" if cid in hidden else cid): v for cid, v in d.check_states.items()}
+        w = max(len(k) for k in shown)
+        for cid, (st, detail) in shown.items():
             lines.append(f"  {cid.ljust(w)}  {st.value:<7} {detail if verbose else ''}".rstrip())
     if d.required_reviews:
         lines.append("Required reviews: " + ", ".join(display_name(r) for r in d.required_reviews))
