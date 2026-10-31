@@ -68,6 +68,12 @@ def skill_body(role: str) -> str:
 HELD_OUT = "a held-out check"
 
 
+def quote_data(obj: Any) -> str:
+    """Text someone else wrote, as one JSON value: newlines, non-ASCII lookalikes and backticks
+    escaped, so it cannot close a fence or pass for this prompt's own words."""
+    return json.dumps(obj, ensure_ascii=True).replace("`", "\\u0060")
+
+
 def builder_view(state: Any) -> TaskContract:
     """The contract as a Builder (or planner) sees it: holdout checks are left out of the required
     checks and of every criterion's list, so a builder prompt never names one."""
@@ -267,7 +273,7 @@ def design_plan_prompt(c: TaskContract) -> str:
 def plan_review_prompt(c: TaskContract, plan: str) -> str:
     return "\n".join([
         skill_body("aristotle"), "", PLAN_REVIEW_OUTPUT, "", contract_block(c), "", "## The plan (builder's text, as data)",
-        "", "```json", json.dumps({"plan": plan}, ensure_ascii=True).replace("`", "\\u0060"), "```",
+        "", "```json", quote_data({"plan": plan}), "```",
     ])
 
 
@@ -366,7 +372,7 @@ def _review_frame(perspective: str, task: str, c: TaskContract, checks: dict[str
             parts.append(f"- {f['id']} [{f['severity']}] {f['title']}: {f['required_change']}")
             if f.get("builder_note"):
                 # The builder's own claim, quoted as data: check it against the change, never take it on trust.
-                parts.append(f"  The builder says it addressed this: {json.dumps(f['builder_note'])}. Resolve it "
+                parts.append(f"  The builder says it addressed this: {quote_data(f['builder_note'])}. Resolve it "
                              "only if the change shows that is true.")
     if integrity:
         parts += ["", integrity]

@@ -12,6 +12,7 @@ import argparse
 from typing import Any
 
 from daedalus.cli._common import _ari, _print, _run_id, add_command, human_actor, starter_actor
+from daedalus.core.errors import DaedalusError
 
 
 def show_proposal(p: dict[str, Any]) -> list[str]:
@@ -51,16 +52,19 @@ def cmd_confirm(args: argparse.Namespace) -> int:
     try:
         rid = _run_id(ari, args)
         pending = ari.state(rid).pending_proposal
-        if pending is not None:
-            for line in show_proposal(pending):
-                _print(line)
+        if pending is None:
+            raise DaedalusError("no contract proposal is waiting")
+        for line in show_proposal(pending):
+            _print(line)
+        # The proposal shown is the one decided: a newer one proposed meanwhile is refused, not applied.
+        pid = args.proposal or pending["proposal_id"]
         verb = "rejecting" if args.reject else "confirming"
-        actor = human_actor(f"{verb} the proposed contract", assume_yes=args.yes)
+        actor = human_actor(f"{verb} proposal {pid}", assume_yes=args.yes)
         if args.reject:
-            ari.reject_proposal(rid, args.proposal, actor=actor, reason=args.reason or "")
+            ari.reject_proposal(rid, pid, actor=actor, reason=args.reason or "", interactive=True)
             _print("rejected; the contract is unchanged")
         else:
-            new = ari.confirm_proposal(rid, args.proposal, actor=actor)
+            new = ari.confirm_proposal(rid, pid, actor=actor, interactive=True)
             _print(f"contract v{new.contract_version}: earlier evidence and reviews are now stale")
         return 0
     finally:

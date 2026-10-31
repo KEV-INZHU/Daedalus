@@ -20,6 +20,7 @@ from daedalus.cli._common import (
     add_command,
     contract_args,
     disposition_lines,
+    hidden_checks,
     human_actor,
     is_ready,
     rel,
@@ -27,6 +28,7 @@ from daedalus.cli._common import (
     shorten,
     starter_actor,
 )
+from daedalus.cli.integrations import HARNESS_PATHS, _init_harnesses, _install_harness, snapshot_paths
 from daedalus.core.config import (
     CONFIG_FILE,
     PRESETS,
@@ -37,8 +39,8 @@ from daedalus.core.config import (
     render_config,
     set_gate,
 )
-from daedalus.cli.integrations import HARNESS_PATHS, _init_harnesses, _install_harness, snapshot_paths
 from daedalus.core.errors import DaedalusError
+from daedalus.orchestration.prompts import builder_view as prompts_view
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -306,7 +308,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         _print()
         _print(f"run {report.run_id} after {report.rounds} round(s)")
-        for line in render_decision(report.decision, root=ari.root):
+        for line in render_decision(report.decision, root=ari.root, hidden=hidden_checks(ari.state(report.run_id))):
             _print(line)
         for n in report.notes:
             _print(f"note: {n}")
@@ -335,6 +337,15 @@ def cmd_status(args: argparse.Namespace) -> int:
             _print("warning: the last orchestrator stopped mid-operation; run `daedalus reconcile`")
         d = ari.evaluate(rid)
         if args.json:
+            decision = d.to_dict()
+            hidden = hidden_checks(state)
+            if hidden:  # an agent session: held-out checks lose their names
+                checks = decision.get("checks", {})
+                decision["checks"] = {("held-out" if k in hidden else k): v for k, v in checks.items()}
+                decision["reasons"] = [
+                    {**r, "code": "check:held-out"} if r.get("code", "").removeprefix("check:") in hidden else r
+                    for r in decision.get("reasons", [])
+                ]
             _print(
                 json.dumps(
                     {
@@ -342,8 +353,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "run": rid,
                         "execution": state.execution.value,
                         "mode": state.mode,
-                        "contract": state.contract.to_dict(),
-                        "decision": d.to_dict(),
+                        "contract": prompts_view(state).to_dict() if hidden else state.contract.to_dict(),
+                        "decision": decision,
                     },
                     indent=2,
                 )
@@ -359,7 +370,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             for line in show_proposal(state.pending_proposal):
                 _print(line)
             _print("  Needs you: `daedalus confirm` to apply it, or `daedalus confirm --reject`.")
-        for line in render_decision(d, verbose=not args.brief, root=ari.root):
+        for line in render_decision(d, verbose=not args.brief, root=ari.root, hidden=hidden_checks(state)):
             _print(line)
         return 0
     finally:
@@ -407,8 +418,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def cmd_finish(args: argparse.Namespace) -> int:
     ari = _ari(args)
     try:
-        d = ari.finish(_run_id(ari, args))
-        for line in render_decision(d, root=ari.root):
+        rid = _run_id(ari, args)
+        d = ari.finish(rid)
+        for line in render_decision(d, root=ari.root, hidden=hidden_checks(ari.state(rid))):
             _print(line)
         return EXIT[d.disposition]
     finally:

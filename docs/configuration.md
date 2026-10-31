@@ -74,13 +74,23 @@ checks:
 Builder, worker and planner prompts leave it out of the required checks, and say only that a
 criterion is "verified by a held-out check". It is never granted as a command the builder may
 run. When it fails, the builder is told that a holdout check failed, without its name, output or
-log path. You see which check it was in `daedalus status` (`check:<id>`), and the output in
-`daedalus log`.
+log path.
 
-Keep the held-out tests **outside the repository** (as above). An agent can read anything in the
-repository, `.daedalus.yml` included, so a holdout whose tests sit next to the code hides less.
-Launched builders work in the repository (or a worktree) and cannot browse outside it. An
-interactive session can, if you allow it.
+Inside an agent session (`DAEDALUS_AGENT` or `CLAUDECODE` set):
+- `daedalus status` shows its row as `(held out)` (and `held-out` in `--json`);
+- `daedalus log` shows its events as "a held-out check";
+- `daedalus log --json` and `daedalus report` refuse, because they would show the pinned policy
+  and the check by name.
+
+You see everything outside an agent session. Its logs are written **outside the repository**,
+under `~/.daedalus/holdout/` (or `$DAEDALUS_HOLDOUT_DIR`), not next to the other check logs.
+
+This hides the holdout from what Daedalus shows the builder. It is not a sandbox. The builder
+runs as you, and can read anything you can: `.daedalus.yml` (which holds the check's command),
+the held-out tests if they sit in the repository, and the log directory above. Launched
+reviewers are confined to their working directory, but launched builders are not. So keep the
+held-out tests **outside the repository**, somewhere only the check's command points to (as
+above). Treat a holdout as a check the builder is not *told* about, not one it *cannot* find.
 
 Budgets keep two currencies apart. `max_cost` caps everything a run is charged, including
 API-equivalent estimates from subscription sessions; `max_cash` caps money actually billed and

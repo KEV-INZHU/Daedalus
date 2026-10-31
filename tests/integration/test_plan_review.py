@@ -119,3 +119,53 @@ def test_cli_wants_exactly_one_plan(repo, ari, tmp_path):
     assert main(["-C", str(repo), "plan-review"]) == 2
     (tmp_path / "p.md").write_text("plan", encoding="utf-8")
     assert main(["-C", str(repo), "plan-review", "text", "--file", str(tmp_path / "p.md")]) == 2
+
+
+def test_fan_out_runs_say_the_plan_review_was_skipped(tmp_path, clock):
+    root = make_repo(
+        tmp_path / "r",
+        {
+            "plan_review": True,
+            "policy": {
+                "default_budget": {
+                    "max_attempts": 40,
+                    "max_wall_seconds": 86400,
+                    "max_cost": 50.0,
+                    "max_workers": 2,
+                }
+            },
+        },
+    )
+    notes: list[str] = []
+
+    def build(req):
+        if req.read_only:
+            return AgentResult(
+                "COMPLETED", structured={"packages": [{"id": "only", "owned_paths": ["app.txt"]}]}
+            )
+        (req.cwd / "app.txt").write_text("ok\n", encoding="utf-8")
+        return AgentResult("COMPLETED", structured={"status": "done", "summary": "s"})
+
+    ari = Ariadne(root, clock=clock)
+    try:
+        run_task(
+            ari,
+            {"objective": "o", "budget": {"max_workers": 2}},
+            actor=HUMAN,
+            adapter=SimulatedAdapter({"brunel": [build, build, build]}),
+            max_rounds=1,
+            notify=notes.append,
+        )
+        assert any("plan review skipped" in n for n in notes)
+    finally:
+        ari.close()
+
+
+def test_an_unreadable_plan_file_is_a_clear_error(repo, ari, tmp_path, capsys):
+    from daedalus.cli import main
+
+    ari.start({"objective": "o"}, actor=HUMAN)
+    assert main(["-C", str(repo), "plan-review", "--file", str(tmp_path / "missing.md")]) == 2
+    assert "cannot read the plan from" in capsys.readouterr().err
+    (tmp_path / "bad.md").write_bytes(b"\xff\xfe\x00bad")
+    assert main(["-C", str(repo), "plan-review", "--file", str(tmp_path / "bad.md")]) == 2

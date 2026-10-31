@@ -169,6 +169,10 @@ class Policy:
 
 
 # ---------------------------------------------------------------------- loading
+def holdout_ids(policy: Any) -> frozenset[str]:
+    return frozenset(cid for cid, d in policy.checks.items() if d.holdout)
+
+
 def _holdout(cid: str, v: Any) -> bool:
     if not isinstance(v, bool):
         raise PolicyError(f"check {cid!r} holdout must be true or false")

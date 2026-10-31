@@ -42,7 +42,8 @@ costs a rebuild. A plan review catches them first, for the price of two short re
 
 - `plan_review: true` in `.daedalus.yml` makes `daedalus run` start by having the Builder write a
   plan (read-only). An independent reviewer then critiques it, and its concerns become round 1's
-  "Before you build" section. Off by default.
+  "Before you build" section. Off by default. It is skipped (and says so) for runs that may fan
+  out to parallel workers (`max_workers` above 1), which plan their packages instead.
 - `daedalus plan-review "the plan"` (or `--file PLAN.md`) does the same for an interactive
   session. An agent may ask for one of its own plan.
 

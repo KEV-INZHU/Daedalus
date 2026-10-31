@@ -381,9 +381,12 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
                 return {"decision": "block", "reason": "Daedalus gate:\n- " + "\n- ".join(followup_feedback(followup))
                         + "\nThen stop again; the gate reviews only what you change."}
             final = ari.finish(run_id)
-            note = proposal_note(ari.state(run_id))
-            if note:  # accepted against the contract as it stood; the proposal was never applied
-                return {"systemMessage": summary_line(final) + "\n" + note.replace("[human] ", "Unconfirmed: ")}
+            pending = ari.state(run_id).pending_proposal
+            if pending:  # information only: the run is finished, there is nothing left to confirm
+                return {"systemMessage": summary_line(final) + "\n" + (
+                    f"Accepted against the original contract: proposal {pending['proposal_id']} "
+                    f"(\"{pending['objective']}\") was never applied."
+                )}
             return {"systemMessage": summary_line(final)}
 
         if decision.disposition is Disposition.REJECTED:  # nothing the agent does can change it
@@ -543,8 +546,8 @@ def bus_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[str
     try:
         ari = ari or Ariadne(Path(repo))
         msgs = Channel(ari, run_id, FileBus(Path(where))).read(name)
-    except (DaedalusError, OSError, ValueError):
-        return {}  # coordination never gets in the way of the work
+    except Exception:  # noqa: BLE001 — whatever happens here, it never reaches the session
+        return {}
     finally:
         if own and ari is not None:
             ari.close()

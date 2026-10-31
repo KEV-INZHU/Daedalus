@@ -68,8 +68,12 @@ class MutationError(Exception):
 def changed_lines(root: Path, base: str) -> dict[str, set[int]]:
     """Python source files (not tests) -> the line numbers that differ from `base`. An unknown base is
     an error, never an empty change: "nothing to mutate" must mean nothing changed."""
-    probe = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
-                           capture_output=True, text=True, check=False)
+    probe = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if probe.returncode != 0:
         raise MutationError(f"base revision {base!r} is not a commit in {root}")
     out: dict[str, set[int]] = {}
@@ -146,21 +150,32 @@ class _Replace(ast.NodeTransformer):
         return self.replacement if node is self.target else super().generic_visit(node)
 
 
-def mutants_of(source: str, path: str, lines: set[int]) -> list[tuple[Mutant, str]]:
-    """Each mutant of `source` on `lines`, with the mutated source."""
+def sites_of(source: str, lines: set[int]) -> list[tuple[int, str]]:
+    """(line, description) of each mutation available on `lines`, in a fixed order. Cheap: one parse."""
     try:
-        count = sum(1 for _ in _sites(ast.parse(source), lines))
+        return [(node.lineno, what) for node, what, _ in _sites(ast.parse(source), lines)]
     except SyntaxError:
         return []
-    out = []
-    for k in range(count):
-        tree = ast.parse(source)  # a fresh tree per mutant: mutations never stack
-        node, what, apply = list(_sites(tree, lines))[k]
-        replacement = apply()
-        if replacement is not None:
-            tree = _Replace(node, replacement).visit(tree)
-        out.append((Mutant(path, node.lineno, what), ast.unparse(ast.fix_missing_locations(tree)) + "\n"))
-    return out
+
+
+def build_mutant(source: str, lines: set[int], k: int) -> str:
+    """`source` with only its k-th mutation (in `sites_of` order) applied."""
+    tree = ast.parse(source)  # a fresh tree per mutant: mutations never stack
+    for i, (node, _what, apply) in enumerate(_sites(tree, lines)):
+        if i == k:
+            replacement = apply()
+            if replacement is not None:
+                tree = _Replace(node, replacement).visit(tree)
+            return ast.unparse(ast.fix_missing_locations(tree)) + "\n"
+    raise IndexError(k)
+
+
+def mutants_of(source: str, path: str, lines: set[int]) -> list[tuple[Mutant, str]]:
+    """Each mutant of `source` on `lines`, with the mutated source (every one: for small inputs)."""
+    return [
+        (Mutant(path, line, what), build_mutant(source, lines, k))
+        for k, (line, what) in enumerate(sites_of(source, lines))
+    ]
 
 
 def _copy_tree(root: Path, dest: Path) -> None:
@@ -189,31 +204,38 @@ def run(
     timeout_s: float = 300.0,
 ) -> Result:
     base = base or os.environ.get(ENV_BASE) or "HEAD"
-    work: list[tuple[Mutant, str]] = []
+    if max_mutants < 1:
+        raise MutationError("max_mutants must be at least 1")
+    # Enumerate cheaply, sample, then build only the chosen mutants.
+    sources: dict[str, tuple[str, set[int]]] = {}
+    sites: list[tuple[str, int, Mutant]] = []  # (path, index within its file, mutant)
     for rel, lines in sorted(changed_lines(root, base).items()):
         try:
             source = (root / rel).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        work += mutants_of(source, rel, lines)
-    if len(work) > max_mutants:  # an even spread over the change, the same every time
-        step = len(work) / max_mutants
-        work = [work[int(i * step)] for i in range(max_mutants)]
-    if not work:
+        sources[rel] = (source, lines)
+        sites += [(rel, k, Mutant(rel, line, what)) for k, (line, what) in enumerate(sites_of(source, lines))]
+    if len(sites) > max_mutants:  # an even spread over the change, the same every time
+        step = len(sites) / max_mutants
+        sites = [sites[int(i * step)] for i in range(max_mutants)]
+    if not sites:
         return Result((), ())
+    mutants = tuple(m for _, _, m in sites)
     with tempfile.TemporaryDirectory(prefix="daedalus-mutate-") as tmp:
         copy = Path(tmp)
         _copy_tree(root, copy)
         if not _passes(test_cmd, copy, timeout_s):
-            return Result(tuple(m for m, _ in work), (), "the tests fail without any mutation")
+            return Result(mutants, (), "the tests fail without any mutation")
         survived = []
-        for mutant, mutated in work:
-            target = copy / mutant.path
+        for rel, k, mutant in sites:
+            source, lines = sources[rel]
+            target = copy / rel
             original = target.read_bytes()
             try:
-                target.write_text(mutated, encoding="utf-8")
+                target.write_text(build_mutant(source, lines, k), encoding="utf-8")
                 if _passes(test_cmd, copy, timeout_s):
                     survived.append(mutant)
             finally:
                 target.write_bytes(original)
-    return Result(tuple(m for m, _ in work), tuple(survived))
+    return Result(mutants, tuple(survived))

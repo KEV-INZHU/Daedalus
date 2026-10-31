@@ -183,7 +183,10 @@ daedalus bus ack msg-...
 **Live delivery.** A launched `claude-code` builder also gets a `PostToolUse` hook (passed with
 `--settings`, so the repository's own settings are untouched). After each tool call it reads the
 agent's unread messages and adds them to the session's context, fenced as peer data like the
-bootstrap. Each message is handed over once, and errors never reach the session. Adapters that
+bootstrap. Delivery is at most once: a message counts as seen when the hook hands it over. If the
+session never gets that hook's output (it ends first, or the harness drops it), the message is
+still in history, and `daedalus bus join` shows it in the context it returns. Errors never reach
+the session. Adapters that
 send only a prompt (the OpenAI-compatible adapter, for example) get the context through the
 prompt, but they cannot run `daedalus bus` mid-session.
 

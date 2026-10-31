@@ -12,7 +12,6 @@ import json
 from typing import Any
 
 from daedalus.cli._common import _ari, _print, _run_id, add_command
-from daedalus.core.errors import DaedalusError
 from daedalus.core.state_machine import ExecutionState
 
 ORDER = ("agent", "system", "human")
@@ -41,9 +40,15 @@ def next_step(ari: Any, run_id: str | None) -> dict[str, Any]:
                 f'`daedalus findings answer {f.finding_id} --fixed "..."`, or `--dispute`',
             )
         )
+    answered = {f.finding_id for f in state.open_findings if f.answers or f.disputes}
     for r in decision.reasons:
-        if r.code.startswith("finding:") and unanswered:
+        fid = r.code.removeprefix("finding:") if r.code.startswith("finding:") else None
+        if fid and unanswered:
             continue  # the worklist line above says it more usefully
+        if fid in answered:
+            # The agent answered it: what is left is a re-review (or an arbiter, or a person).
+            items.append(("system", f"finding {fid} was answered; it awaits re-review (or arbitration)"))
+            continue
         items.append((r.fixable_by, r.message))
     if state.pending_proposal is not None:
         items.append(
@@ -63,10 +68,10 @@ def next_step(ari: Any, run_id: str | None) -> dict[str, Any]:
 def cmd_next(args: argparse.Namespace) -> int:
     ari = _ari(args)
     try:
-        try:
-            rid = _run_id(ari, args)
-        except DaedalusError:
-            rid = None
+        if getattr(args, "run", None):
+            rid = _run_id(ari, args)  # an explicit run that does not resolve is an error, not "no run"
+        else:
+            rid = ari.active_run_id()
         step = next_step(ari, rid)
         if args.json:
             _print(json.dumps({"run": rid, **step}))

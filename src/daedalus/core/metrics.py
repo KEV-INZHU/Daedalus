@@ -213,8 +213,10 @@ def _parallel(state: Any, events: list[Event]) -> dict[str, Any]:
     """Isolated (fan-out) packages only: in-place builders are not parallel work."""
     isolated = {t for t, w in state.workers.items() if not w.package.get("in_place")}
     start: dict[str, float] = {}
-    end: dict[str, float] = {}
+    end: dict[str, float] = {}  # the session's end: its first terminal transition
+    completed: set[str] = set()  # sessions that finished with a result to integrate
     integrated: dict[str, float] = {}
+    active = {w.value for w in WORKER_ACTIVE} | {WorkerState.PENDING.value}
     for e in events:
         tid = e.payload.get("task_id")
         if tid not in isolated:
@@ -223,22 +225,24 @@ def _parallel(state: Any, events: list[Event]) -> dict[str, Any]:
             to = e.payload.get("to")
             if to == WorkerState.DISPATCHED.value:
                 start.setdefault(tid, e.ts)
-            elif to not in (s.value for s in WORKER_ACTIVE) and to != WorkerState.PENDING.value and tid in start:
-                end[tid] = e.ts
+            elif to not in active and tid in start:
+                end.setdefault(tid, e.ts)
+                if to == WorkerState.COMPLETED.value:
+                    completed.add(tid)
         elif e.type == ev.WORKER_INTEGRATED:
-            integrated[tid] = e.ts
+            integrated.setdefault(tid, e.ts)
     ran = [t for t in start if t in end]
     if not ran:
         return {}
     serial = sum(end[t] - start[t] for t in ran)
     span = max(end[t] for t in ran) - min(start[t] for t in ran)
-    done = [t for t in ran if state.workers[t].state is WorkerState.COMPLETED]
     return {
         "parallel_workers": len(ran),
         "parallel_serial_s": round(serial, 3),
         "parallel_span_s": round(span, 3),
-        "integration_s": round(sum(integrated[t] - end[t] for t in done if t in integrated), 3),
-        "integration_failures": sum(1 for t in done if t not in integrated),
+        "integration_s": round(sum(integrated[t] - end[t] for t in completed if t in integrated and t in end), 3),
+        # Whatever state the worker ended in: a finished session whose result never landed.
+        "integration_failures": sum(1 for t in completed if t not in integrated),
     }
 
 

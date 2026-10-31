@@ -116,3 +116,56 @@ def test_cli_propose_in_an_agent_session_and_confirm_needs_a_person(repo, ari, r
     monkeypatch.setattr(cli, "_interactive", lambda: True)
     assert main(["-C", str(repo), "confirm", "-y"]) == 0
     assert ari.state(run).contract.objective == "Ship the bus"
+
+
+def test_confirm_applies_only_the_proposal_it_showed(repo, ari, run, monkeypatch, capsys):
+    from daedalus import cli
+    from daedalus.cli import main, proposals
+
+    propose(ari, run, objective="the one shown")
+
+    def sneaky(what, assume_yes=False):  # a newer proposal lands while the person reads the first
+        other = type(ari)(repo)
+        try:
+            other.propose_contract(run, objective="swapped in", criteria=["x"], actor=AGENT)
+        finally:
+            other.close()
+        return HUMAN
+
+    monkeypatch.setattr(proposals, "human_actor", sneaky)
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    assert main(["-C", str(repo), "confirm", "-y"]) == 2
+    assert ari.state(run).contract.objective != "swapped in"
+
+
+def test_proposal_text_is_cleaned_and_bounded(ari, run):
+    pid = propose(ari, run, objective="Ship it\x1b[31m now‮", criteria=["works\n\tfine"], rationale="a\nb")
+    p = ari.state(run).proposals[pid]
+    assert (
+        p["objective"] == "Ship it [31m now" and p["criteria"] == ["works fine"] and p["rationale"] == "a b"
+    )
+    with pytest.raises(ContractError):
+        propose(ari, run, criteria=[f"c{i}" for i in range(13)])
+    with pytest.raises(ContractError):
+        propose(ari, run, criteria=["x" * 301])
+    with pytest.raises(ContractError):
+        propose(ari, run, rationale="y" * 601)
+
+
+def test_interactivity_is_recorded_as_it_was(ari, run):
+    propose(ari, run)
+    ari.confirm_proposal(run, actor=HUMAN)
+    [amended] = [e for e in ari.store.events(run) if e.type == "contract.amended"]
+    assert amended.payload["interactive"] is False
+
+
+def test_a_finished_run_reports_an_unapplied_proposal_as_information(repo, ari, run):
+    from conftest import fix
+    from daedalus.harness.claude_code import stop_hook
+
+    fix(repo)
+    ari.verify(run)
+    propose(ari, run)
+    out = stop_hook({"cwd": str(repo)}, ari=ari)
+    msg = out["systemMessage"]
+    assert "never applied" in msg and "daedalus confirm" not in msg

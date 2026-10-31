@@ -117,3 +117,34 @@ def test_checks_are_told_the_run_base(tmp_path, clock):
         assert out.read_text() == ari.state(rid).contract.base_revision
     finally:
         ari.close()
+
+
+def test_bad_limits_are_refused(tmp_path, monkeypatch, capsys):
+    from daedalus.cli import main
+
+    monkeypatch.chdir(project(tmp_path, WEAK))
+    for bad in (["--max", "0"], ["--max", "-3"], ["--timeout", "0"]):
+        assert main(["mutate", *bad, "--", *TEST_CMD]) == 2, bad
+
+
+def test_the_tests_import_the_mutated_copy_not_the_original(tmp_path, monkeypatch):
+    # The original tree first on the path (as an editable install would put it): the copy must still win.
+    root = project(tmp_path, WEAK)
+    monkeypatch.setenv("PYTHONPATH", str(root))
+    cmd = [
+        sys.executable,
+        "-c",
+        "import lib, sys; from pathlib import Path; "
+        "sys.exit(0 if Path(lib.__file__).resolve().parent == Path.cwd().resolve() else 1)",
+    ]
+    assert run(root, cmd).baseline_error == ""  # the baseline imported lib.py from the copy
+
+
+def test_only_sampled_mutants_are_built(tmp_path, monkeypatch):
+    from daedalus.verification import mutation
+
+    built = []
+    real = mutation.build_mutant
+    monkeypatch.setattr(mutation, "build_mutant", lambda *a: (built.append(a[2]), real(*a))[1])
+    run(project(tmp_path, WEAK), TEST_CMD, max_mutants=2)
+    assert len(built) == 2

@@ -70,3 +70,21 @@ def test_launched_builders_get_the_hook_and_reviewers_do_not():
         AgentRequest("r", "t", "aristotle", "p", ".", read_only=True, bus_commands=(BUS_COMMAND,))
     )
     assert "--settings" not in review
+
+
+def test_no_error_of_any_kind_reaches_the_session(repo, ari, monkeypatch):
+    run_id = ari.start({"objective": "o"}, actor=HUMAN)
+    name = Channel(ari, run_id, FileBus(repo / ".daedalus" / "bus")).spawn("brunel", "t", "agent:brunel")
+    for k, v in {
+        ENV_AGENT: name,
+        ENV_RUN: run_id,
+        ENV_BUS_DIR: str(repo / ".daedalus" / "bus"),
+        ENV_REPO: str(repo),
+    }.items():
+        monkeypatch.setenv(k, v)
+
+    def boom(*a, **kw):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(Channel, "read", boom)
+    assert bus_hook({}, ari=ari) == {}

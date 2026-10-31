@@ -27,10 +27,9 @@ state, so a shipped commit is always a fast-forward of what was accepted.
 
 from __future__ import annotations
 
-import subprocess
-
+import os
 import shutil
-
+import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -69,6 +68,8 @@ Notify = Callable[[str], None]
 def _quiet(_: str) -> None:
     pass
 
+
+SHIP_TIMEOUT_S = 120.0  # each push or pull-request step of the optional ship step
 
 # ------------------------------------------------------------------ config
 @dataclass(frozen=True)
@@ -113,6 +114,11 @@ def factory_config(root: Any) -> FactoryConfig:
         raise FactoryError("factory.ship.pull_request needs factory.ship.push (the branch must be on the remote)")
     if not isinstance(ship.get("pull_request", False), bool):
         raise FactoryError("factory.ship.pull_request must be true or false")
+    for key in ("push", "base"):
+        v = ship.get(key)
+        # Passed to git and gh as arguments: never something they would read as an option.
+        if v is not None and (not isinstance(v, str) or not v.strip() or v.strip().startswith("-")):
+            raise FactoryError(f"factory.ship.{key} must be a name that does not start with '-'")
     try:
         out = FactoryConfig(
             push=str(ship["push"]) if ship.get("push") else None,
@@ -249,10 +255,20 @@ class Line:
         """Push the integration branch, and open a pull request when configured. A failure here is
         reported and never undoes what shipped: the orders are on the integration branch either way."""
         remote, branch = self.cfg.push or "", self.into or ""
-        r = subprocess.run(["git", "-C", str(self.root), "push", "-u", remote, branch],
-                           capture_output=True, text=True, check=False)
-        if r.returncode != 0:
-            report.notes.append(f"push to {remote} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+        # Never wait on a person: no terminal prompts, no inherited stdin, and a bound on each step.
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+        def call(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str] | None:
+            try:
+                return subprocess.run(cmd, capture_output=True, text=True, check=False, env=env,
+                                      stdin=subprocess.DEVNULL, timeout=SHIP_TIMEOUT_S, **kw)
+            except subprocess.TimeoutExpired:
+                return None
+
+        r = call(["git", "-C", str(self.root), "push", "-u", "--", remote, branch])
+        if r is None or r.returncode != 0:
+            why = f"timed out after {SHIP_TIMEOUT_S:g}s" if r is None else (r.stderr or r.stdout).strip()[-300:]
+            report.notes.append(f"push to {remote} failed: {why}")
             self.notify(report.notes[-1])
             return
         pr = ""
@@ -262,14 +278,15 @@ class Line:
                 report.notes.append("pushed; no pull request opened: the `gh` CLI is not installed")
             else:
                 body = "Orders shipped by the Daedalus factory line:\n\n" + "\n".join(f"- {o}" for o in report.shipped)
-                p = subprocess.run(
-                    ["gh", "pr", "create", "--head", branch, "--base", base,
-                     "--title", f"Factory: {len(report.shipped)} order(s) from {branch}", "--body", body],
-                    cwd=str(self.root), capture_output=True, text=True, check=False,
+                p = call(
+                    ["gh", "pr", "create", f"--head={branch}", f"--base={base}",
+                     f"--title=Factory: {len(report.shipped)} order(s) from {branch}", f"--body={body}"],
+                    cwd=str(self.root),
                 )
-                pr = p.stdout.strip() if p.returncode == 0 else ""
+                pr = p.stdout.strip() if p is not None and p.returncode == 0 else ""
                 if not pr:
-                    report.notes.append(f"pushed; opening a pull request failed: {(p.stderr or p.stdout).strip()[-300:]}")
+                    why = f"timed out after {SHIP_TIMEOUT_S:g}s" if p is None else (p.stderr or p.stdout).strip()[-300:]
+                    report.notes.append(f"pushed; opening a pull request failed: {why}")
         self.ledger.append(LINE_PUSHED, into=branch, remote=remote, shipped=report.shipped, pull_request=pr or None)
         msg = f"pushed {branch} to {remote}" + (f"; pull request {pr}" if pr else "")
         report.notes.append(msg)

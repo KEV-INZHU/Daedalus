@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from daedalus.cli._common import display_name, SEV_ABBR, _ari, _print, _run_id, add_command
+from daedalus.cli._common import SEV_ABBR, _ari, _print, _run_id, add_command, display_name, hidden_checks
 from daedalus.core.config import PRESETS, find_root, load_config
 from daedalus.core.errors import DaedalusError
 from daedalus.core.policy import default_policy_text
@@ -199,12 +199,19 @@ def cmd_log(args: argparse.Namespace) -> int:
             _print(f"audit chain intact: {n} events verified")
         rid = _run_id(ari, args, any_run=True)
         events = ari.store.events(rid)
+        hidden = hidden_checks(ari.state(rid))
         if args.json:
+            if hidden:  # every event's raw payload, the pinned policy (with the holdout's command) included
+                raise DaedalusError("this run has held-out checks; `daedalus log --json` is for a person to run")
             _print(json.dumps([e.to_dict() for e in events], indent=2))
             return 0
         for e in events:
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e.ts))
-            _print(f"{e.seq:>5} {ts} {e.actor:<28} {e.type:<22} {_brief(e.type, e.payload)}")
+            brief = _brief(e.type, e.payload)
+            check = e.payload.get("check_id") or (e.payload.get("record") or {}).get("check_id")
+            if check in hidden:
+                brief = "a held-out check"
+            _print(f"{e.seq:>5} {ts} {e.actor:<28} {e.type:<22} {brief}")
         return 0
     finally:
         ari.close()

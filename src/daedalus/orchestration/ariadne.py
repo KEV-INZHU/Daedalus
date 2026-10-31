@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 import time
 import uuid
@@ -29,10 +30,10 @@ from daedalus.core.authorization import ApprovalRecord, authorization_status
 from daedalus.core.config import STATE_DIR, RepoConfig, find_root, load_config, uncommitted_policy_files
 from daedalus.core.contracts import (
     MODES,
-    bind_text_criteria,
     PERSPECTIVES,
     TaskContract,
     amend_contract,
+    bind_text_criteria,
     build_contract,
     removed_hard_constraints,
 )
@@ -63,9 +64,8 @@ from daedalus.orchestration.scheduler import WorkPackage, dispatch_blockers, liv
 from daedalus.repository import worktree
 from daedalus.repository.candidate import CandidateManifest, capture, file_sha256, git_head
 from daedalus.verification.evidence_cache import EvidenceCache
-from daedalus.verification.test_integrity import IntegrityReport
+from daedalus.verification.test_integrity import IntegrityReport, check_runner_specs
 from daedalus.verification.test_integrity import analyze as analyze_tests
-from daedalus.verification.test_integrity import check_runner_specs
 
 DEFAULT_VERIFIER = "daedalus-proof-gate@local"
 CLEANUP_ATTEMPTS = 3  # workspace removals tried before leaving it to a human
@@ -88,6 +88,14 @@ SEVERITY_SYNONYMS = {
 
 def _uid(prefix: str) -> str:
     return prefix + uuid.uuid4().hex[:10]
+
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _one_line(text: Any) -> str:
+    """Printable, single-line text: control and bidirectional-override characters become spaces."""
+    return " ".join(_CONTROL.sub(" ", str(text or "")).split())
 
 
 def _require_principal(actor: str) -> None:
@@ -882,6 +890,9 @@ class Ariadne:
 
     # ==================================================== contract proposals
     MAX_OBJECTIVE = 600
+    MAX_CRITERION = 300
+    MAX_CRITERIA = 12
+    MAX_RATIONALE = 600
 
     def propose_contract(
         self,
@@ -898,17 +909,25 @@ class Ariadne:
         `criteria` are proved by the run's required checks, `attest` ones by a person."""
         state = self._running(run_id)
         _require_principal(actor)
-        objective = " ".join(str(objective).split())
+        # Agent-written text a person reads before authorising it: one line each, printable, bounded.
+        objective = _one_line(objective)
         if not objective:
             raise ContractError("a proposal needs an objective")
         if len(objective) > self.MAX_OBJECTIVE:
             raise ContractError(f"keep the objective under {self.MAX_OBJECTIVE} characters; put detail in criteria")
-        crit = [" ".join(str(c).split()) for c in criteria]
-        att = [" ".join(str(c).split()) for c in attest]
+        crit = [_one_line(c) for c in criteria]
+        att = [_one_line(c) for c in attest]
+        rationale = _one_line(rationale)
         if any(not c for c in crit + att):
             raise ContractError("a criterion cannot be empty")
         if not crit and not att:
             raise ContractError("propose at least one acceptance criterion: what must be true when this is done")
+        if len(crit) + len(att) > self.MAX_CRITERIA:
+            raise ContractError(f"propose at most {self.MAX_CRITERIA} criteria")
+        if any(len(c) > self.MAX_CRITERION for c in crit + att):
+            raise ContractError(f"keep each criterion under {self.MAX_CRITERION} characters")
+        if len(rationale) > self.MAX_RATIONALE:
+            raise ContractError(f"keep the rationale under {self.MAX_RATIONALE} characters")
         pid = f"P{len(state.proposals) + 1}"
         self._append(
             run_id,
@@ -919,7 +938,7 @@ class Ariadne:
                 "objective": objective,
                 "criteria": crit,
                 "attest": att,
-                "rationale": rationale.strip(),
+                "rationale": rationale,
                 "based_on": state.contract.contract_version,
             },
         )
@@ -933,7 +952,9 @@ class Ariadne:
             raise ContractError(f"{proposal_id} is not the pending proposal ({pending['proposal_id']} is)")
         return pending
 
-    def confirm_proposal(self, run_id: str, proposal_id: str | None = None, *, actor: str) -> TaskContract:
+    def confirm_proposal(
+        self, run_id: str, proposal_id: str | None = None, *, actor: str, interactive: bool = False
+    ) -> TaskContract:
         """Apply the pending proposal as a contract amendment (needs `contract_change` authority)."""
         state = self._running(run_id)
         p = self._proposal(state, proposal_id)
@@ -944,14 +965,23 @@ class Ariadne:
             "acceptance_criteria": [{**c, "id": f"C{i}"} for i, c in enumerate(crits, 1)],
         }
         why = f"confirmed {p['proposal_id']} from {p['proposed_by']}" + (f": {p['rationale']}" if p["rationale"] else "")
-        return self.amend(run_id, changes, actor=actor, rationale=why, interactive=True, proposal_id=p["proposal_id"])
+        return self.amend(
+            run_id, changes, actor=actor, rationale=why, interactive=interactive, proposal_id=p["proposal_id"]
+        )
 
-    def reject_proposal(self, run_id: str, proposal_id: str | None = None, *, actor: str, reason: str = "") -> None:
+    def reject_proposal(
+        self, run_id: str, proposal_id: str | None = None, *, actor: str, reason: str = "", interactive: bool = False
+    ) -> None:
         state = self._running(run_id)
         if not state.policy.has_authority(actor, "contract_change"):
             raise AuthorizationError(f"{actor} lacks `contract_change` authority")
         p = self._proposal(state, proposal_id)
-        self._append(run_id, ev.PROPOSAL_REJECTED, actor, {"proposal_id": p["proposal_id"], "reason": reason})
+        self._append(
+            run_id,
+            ev.PROPOSAL_REJECTED,
+            actor,
+            {"proposal_id": p["proposal_id"], "reason": _one_line(reason), "interactive": interactive},
+        )
 
     # ==================================================== restricted actions
     def execute_action(

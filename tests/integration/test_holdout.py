@@ -85,3 +85,32 @@ def test_a_failing_holdout_blocks_acceptance(tmp_path, clock):
         )
     finally:
         ari.close()
+
+
+def test_agent_sessions_do_not_see_the_holdout_in_status_log_or_report(tmp_path, clock, monkeypatch, capsys):
+    from daedalus.cli import main
+    from daedalus.verification.check_runner import holdout_log_dir
+
+    monkeypatch.setenv("DAEDALUS_HOLDOUT_DIR", str(tmp_path / "holdout-logs"))
+    root = make_repo(tmp_path / "r", CHECKS)
+    ari = Ariadne(root, clock=clock)
+    try:
+        rid = ari.start({"objective": "o"}, actor=HUMAN)
+        ari.verify(rid)
+        logs = list(holdout_log_dir(root, rid).glob("*"))
+        assert logs and not list((root / ".daedalus" / "runs" / rid / "logs").glob("secret*"))
+    finally:
+        ari.close()
+    r = str(root)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("DAEDALUS_AGENT", raising=False)
+    assert main(["-C", r, "status"]) in (0, 1)
+    assert "secret" in capsys.readouterr().out  # a person sees it
+
+    monkeypatch.setenv("DAEDALUS_AGENT", "1")
+    for argv in (["status"], ["status", "--json"], ["log"]):
+        assert main(["-C", r, *argv]) in (0, 1)
+        out = capsys.readouterr().out
+        assert "secret" not in out and SECRET not in out, argv
+    assert main(["-C", r, "log", "--json"]) == 2
+    assert main(["-C", r, "report"]) == 2

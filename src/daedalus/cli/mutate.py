@@ -26,6 +26,10 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         )
     if not 0 <= args.min_score <= 1:
         raise DaedalusError("--min-score must be between 0 and 1")
+    if args.max < 1:
+        raise DaedalusError("--max must be at least 1")
+    if args.timeout <= 0:
+        raise DaedalusError("--timeout must be positive")
     from daedalus.verification.mutation import MutationError
 
     try:

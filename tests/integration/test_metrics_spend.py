@@ -31,10 +31,12 @@ def test_review_spend_by_perspective(repo, ari):
     assert agg.review_spend["mozi"]["cost_per_finding"] is None  # spend that bought no findings
 
 
-INDEPENDENT = {"packages": [
-    {"id": "a", "description": "module a", "owned_paths": ["src/a/**"]},
-    {"id": "b", "description": "the app", "owned_paths": ["app.txt"]},
-]}
+INDEPENDENT = {
+    "packages": [
+        {"id": "a", "description": "module a", "owned_paths": ["src/a/**"]},
+        {"id": "b", "description": "the app", "owned_paths": ["app.txt"]},
+    ]
+}
 INDEPENDENT_WORK = {"a": {"src/a/x.py": "x = 1\n"}, "b": {"app.txt": "ok\n"}}
 
 
@@ -63,6 +65,13 @@ def test_a_dependency_chain_can_cost_more_than_it_saves(tmp_path):
     m, _ = fan_out_metrics(tmp_path, PLAN, WORK, {"a", "b"})
     assert m.parallel_workers == 3
     assert m.parallel_saved_s == round(m.parallel_serial_s - m.parallel_span_s, 3)
+
+
+def test_a_result_that_cannot_be_integrated_is_counted(tmp_path):
+    # b writes outside the paths it owns, so its finished session's result is refused at integration.
+    bad = {**INDEPENDENT_WORK, "b": {"app.txt": "ok\n", "src/a/stray.py": "y = 1\n"}}
+    m, agg = fan_out_metrics(tmp_path, INDEPENDENT, bad, set())
+    assert m.integration_failures == 1 and agg.integration_failures == 1
 
 
 def test_in_place_runs_report_no_parallel_work(repo, ari):

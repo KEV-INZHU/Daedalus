@@ -25,7 +25,10 @@ def cmd_plan_review(args: argparse.Namespace) -> int:
 
     if bool(args.plan) == bool(args.file):
         raise DaedalusError("give the plan as text or with --file, not both")
-    plan = Path(args.file).read_text(encoding="utf-8") if args.file else args.plan
+    try:
+        plan = Path(args.file).read_text(encoding="utf-8") if args.file else args.plan
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DaedalusError(f"cannot read the plan from {args.file}: {exc}") from exc
     ari = _ari(args, adapter=True)
     try:
         if ari.adapter is None:

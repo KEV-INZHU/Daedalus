@@ -17,7 +17,7 @@ from daedalus.core import run as ev
 from daedalus.core.acceptance import budget_exhausted
 from daedalus.core.evidence import EvidenceRecord, environment_fingerprint
 from daedalus.core.policy import CheckDefinition
-from daedalus.verification.check_runner import CheckOutcome, run_check
+from daedalus.verification.check_runner import CheckOutcome, holdout_log_dir, run_check
 from daedalus.verification.evidence_cache import check_key, inputs_digest, reused_record
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -105,7 +105,8 @@ def verify(ari: Ariadne, run_id: str, *, only: set[str] | None = None) -> list[E
                 if trusted:
                     base = state.contract.base_revision
                     out = run_check(
-                        defn, ari.root, log_dir, clock=ari.clock, log_name=f"{check_id}-{key.split('#')[1]}",
+                        defn, ari.root, holdout_log_dir(ari.root, run_id) if defn.holdout else log_dir,
+                        clock=ari.clock, log_name=f"{check_id}-{key.split('#')[1]}",
                         run_env={"DAEDALUS_BASE_REVISION": base} if base else None,
                     )
                     error = out.error
