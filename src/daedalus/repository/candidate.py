@@ -110,6 +110,12 @@ def _hash_entry(root: Path, rel: str, reasons: list[str]) -> str | None:
         return "unreadable"
 
 
+def changed_paths(root: Path, base: str | None) -> list[str]:
+    """Paths that differ from `base` in the working tree, untracked ones included; every tracked
+    and untracked path when `base` is None."""
+    return _changed_paths_git(root, base)
+
+
 def _changed_paths_git(root: Path, base: str | None) -> list[str]:
     untracked = _split_z(_git(root, "ls-files", "-o", "--exclude-standard", "-z").stdout)
     if base is None:

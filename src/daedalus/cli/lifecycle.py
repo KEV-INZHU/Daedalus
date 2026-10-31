@@ -20,6 +20,7 @@ from daedalus.cli._common import (
     add_command,
     contract_args,
     disposition_lines,
+    general_criteria_note,
     hidden_checks,
     human_actor,
     is_ready,
@@ -40,6 +41,7 @@ from daedalus.core.config import (
     set_gate,
 )
 from daedalus.core.errors import DaedalusError
+from daedalus.core.state_machine import Disposition
 from daedalus.orchestration.prompts import builder_view as prompts_view
 
 
@@ -77,9 +79,11 @@ def cmd_init(args: argparse.Namespace) -> int:
                 if ".gitignore" not in written:
                     written.append(".gitignore")
         checks = detect_checks(root)
-        adapter = args.adapter or _default_adapter(root, args)
+        adapter, why = (args.adapter, None) if args.adapter else _choose_adapter(root, args)
         if adapter and not args.adapter:
             _print(f"adapter: {adapter} (found the `claude` binary; independent reviews can launch)")
+        elif why:
+            _print(f"adapter: none, so risky changes (auth, migrations, weakened tests) will wait for a person. {why}")
         cfg.write_text(render_config(checks, adapter, args.preset), encoding="utf-8")
         _print(f"wrote {CONFIG_FILE} with checks: {', '.join(checks) or 'NONE — add one before starting a run'}")
         if args.preset:
@@ -146,20 +150,28 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def _default_adapter(root: Path, args: argparse.Namespace) -> str | None:
-    """`claude-code` when init installs that harness and its binary is on PATH, so the reviews a
+def _choose_adapter(root: Path, args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """The adapter init writes, and when it writes none, why (with the fix).
+
+    `claude-code` when init installs that harness and its binary is on PATH, so the reviews a
     high-tier change needs can be launched. Not when reviews would be billed in cash (then a person
-    sets a budget first)."""
-    if args.no_hooks or "claude-code" not in _init_harnesses(root, args.harness) or not shutil.which("claude"):
-        return None
+    sets a budget first). No reason is given when harness setup is off: the user chose that."""
+    if args.no_hooks or "claude-code" not in _init_harnesses(root, args.harness):
+        return None, None
+    if not shutil.which("claude"):
+        return None, ("Install Claude Code (`claude`) and set `adapter: claude-code`, or pick another reviewer: "
+                      "`daedalus plugins` lists them.")
     try:
         from daedalus.adapters import make_adapter
 
-        if make_adapter({"name": "claude-code"}).expected_cost_basis() == "cash":
-            return None
-    except DaedalusError:
-        return None
-    return "claude-code"
+        billed = make_adapter({"name": "claude-code"}).expected_cost_basis() == "cash"
+    except DaedalusError as exc:
+        return None, f"Found `claude`, but the claude-code adapter cannot be set up: {exc}"
+    if billed:
+        return None, ("Found `claude`, but its sessions here would be billed (an API key, gateway or cloud "
+                      "provider is set), and runs allow no billed spend by default. To allow it, set "
+                      "`adapter: claude-code` and `policy: {default_budget: {max_cash: <dollars>}}` in .daedalus.yml.")
+    return "claude-code", None
 
 
 COMMIT_MESSAGE = "Configure Daedalus"
@@ -285,6 +297,16 @@ def cmd_start(args: argparse.Namespace) -> int:
         _print(f"contract: {rel(ari.root, state.contract_file)}")
         for c in state.contract.acceptance_criteria:
             _print(f"  {c.criterion_id}: {c.description}")
+        if note := general_criteria_note(state.contract):
+            _print(note)
+        shared: dict[tuple[str, ...], list[str]] = {}
+        for c in state.contract.acceptance_criteria:
+            if c.checks and not c.general:
+                shared.setdefault(c.checks, []).append(c.criterion_id)
+        for checks, ids in shared.items():
+            if len(ids) > 1:  # one dedicated check is taken as proof of each of them
+                _print(f"note: {', '.join(ids)} share the checks {', '.join(checks)}: each passes or fails with them "
+                       "together. Give a criterion its own check in a contract file to prove it alone.")
         _print("Work, then `daedalus verify` and `daedalus status`.")
         return 0
     finally:
@@ -308,7 +330,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         _print()
         _print(f"run {report.run_id} after {report.rounds} round(s)")
-        for line in render_decision(report.decision, root=ari.root, hidden=hidden_checks(ari.state(report.run_id))):
+        for line in render_decision(report.decision, root=ari.root, hidden=hidden_checks(ari.state(report.run_id)),
+                                   state=ari.state(report.run_id)):
             _print(line)
         for n in report.notes:
             _print(f"note: {n}")
@@ -370,7 +393,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             for line in show_proposal(state.pending_proposal):
                 _print(line)
             _print("  Needs you: `daedalus confirm` to apply it, or `daedalus confirm --reject`.")
-        for line in render_decision(d, verbose=not args.brief, root=ari.root, hidden=hidden_checks(state)):
+        for line in render_decision(d, verbose=not args.brief, root=ari.root, hidden=hidden_checks(state), state=state):
             _print(line)
         return 0
     finally:
@@ -408,8 +431,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if (is_ready(d) and not args.no_finish and not args.only and not launched_by_daedalus()
                 and ari.config().harness.get("auto_finish", True)):
             d = ari.finish(rid)
-        for line in disposition_lines(d, ari.root):
+        for line in disposition_lines(d, ari.root, ari.state(rid)):
             _print(line)
+        if d.disposition in (Disposition.ACCEPTED, Disposition.BLOCKED) and (
+            note := general_criteria_note(ari.state(rid).contract)
+        ):
+            _print(note)
         return 0 if passed else 1
     finally:
         ari.close()
@@ -420,7 +447,7 @@ def cmd_finish(args: argparse.Namespace) -> int:
     try:
         rid = _run_id(ari, args)
         d = ari.finish(rid)
-        for line in render_decision(d, root=ari.root, hidden=hidden_checks(ari.state(rid))):
+        for line in render_decision(d, root=ari.root, hidden=hidden_checks(ari.state(rid)), state=ari.state(rid)):
             _print(line)
         return EXIT[d.disposition]
     finally:
@@ -445,7 +472,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
         rid = _run_id(ari, args)
         for n in restore_followup(ari, rid, notify=lambda m: _print(f"· {m}")):
             _print(n)
-        for line in disposition_lines(ari.evaluate(rid), ari.root):
+        for line in disposition_lines(ari.evaluate(rid), ari.root, ari.state(rid)):
             _print(line)
         return 0
     finally:

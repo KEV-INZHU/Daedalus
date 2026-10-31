@@ -407,10 +407,7 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
             reasons.append(
                 Reason(
                     f"review:{p}",
-                    f"{why} requires {needed} of candidate {cid[:12]}. With a launching adapter "
-                    "(`adapter:` in .daedalus.yml), Daedalus launches it once the checks pass (`daedalus "
-                    f"verify`, or when the agent stops); otherwise `daedalus review {p}`. The author never "
-                    "reviews its own work.",
+                    f"{why} requires {needed} of candidate {cid[:12]}.",
                     SYSTEM,
                 )
             )
@@ -422,11 +419,9 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
         reasons.append(
             Reason(
                 "test_integrity",
-                f"tests weakened: {integrity.summary()}; restore the assertion or fix the code. If this test "
-                f"change is deliberate, a human acknowledges these signals for this candidate with `daedalus "
-                f"risk-exception {rest} --rationale ...` (`{rest}` is the tier every other floor yields, so "
-                "the exception waives the test-integrity floor and nothing else), or the independent "
-                "reviews of the flagged hunks clear it.",
+                f"tests weakened: {integrity.summary()}; restore the assertion or fix the code. If the "
+                f"change is deliberate, a human runs `daedalus risk-exception {rest} --rationale ...` (it "
+                "waives the test-integrity floor and nothing else), or reviews of the flagged hunks clear it.",
                 AGENT,
             )
         )

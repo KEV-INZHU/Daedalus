@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import math
 import os
 import re
 import subprocess
@@ -137,7 +138,8 @@ def hidden_checks(state: Any) -> frozenset[str]:
 
 
 def render_decision(
-    d: Decision, *, verbose: bool = True, root: Path | None = None, hidden: frozenset[str] = frozenset()
+    d: Decision, *, verbose: bool = True, root: Path | None = None, hidden: frozenset[str] = frozenset(),
+    state: Any = None,
 ) -> list[str]:
     lines = [f"Candidate: {d.candidate_id[:12]} · risk {d.risk.explain()}"]
     if d.check_states:
@@ -150,7 +152,7 @@ def render_decision(
         lines.append("Required reviews: " + ", ".join(display_name(r) for r in d.required_reviews))
     if d.required_approvals:
         lines.append("Required approvals: " + ", ".join(d.required_approvals))
-    lines += disposition_lines(d, root)
+    lines += disposition_lines(d, root, state)
     return lines
 
 
@@ -160,16 +162,106 @@ def is_ready(d: Decision) -> bool:
     return d.disposition is Disposition.BLOCKED and d.acceptable and not d.terminal
 
 
-def disposition_lines(d: Decision, root: Path | None = None) -> list[str]:
+def disposition_lines(d: Decision, root: Path | None = None, state: Any = None) -> list[str]:
     """The 'Disposition' line and the reasons under it. Presentation only: the decision itself
     is untouched."""
     if is_ready(d):
         return ["Disposition: READY - every condition holds; `daedalus finish` records the acceptance"]
     lines = [f"Disposition: {d.disposition.value}" + (" (final)" if d.terminal else "")]
+    # Reviews still needed: one line per reason they are needed (`tier high`, `review mode`), not one
+    # each, shown where the first of them was, with what happens to them said once.
+    reviews: dict[tuple[str, bool], list[str]] = {}
+    at = None
     for r in d.reasons:
+        if r.code.startswith("review:"):
+            key = (r.message.split(" requires ", 1)[0], "independent" in r.message)
+            reviews.setdefault(key, []).append(display_name(r.code.removeprefix("review:")))
+            at = len(lines) if at is None else at
+            continue
         lines.append(f"  [{r.fixable_by}] {r.message}")
+    if reviews and at is not None:
+        blocked = review_blocker(root, state)
+        who = "human" if blocked else "system"  # with nothing to launch them, a person has to act
+        group = [f"  [{who}] {why} requires {'independent reviews' if ind else 'reviews'} of candidate "
+                 f"{d.candidate_id[:12]}: {', '.join(names)}" for (why, ind), names in reviews.items()]
+        whys = [why for why, _ in reviews]
+        group.append("  " + review_remedy(blocked, any(w.startswith("tier ") for w in whys),
+                                          any(w.endswith(" mode") for w in whys)))
+        lines[at:at] = group
     # Check logs and the like are named by absolute path; show them from the repository root.
     return [shorten(root, ln) for ln in lines] if root is not None else lines
+
+
+def general_criteria_note(contract: Any) -> str | None:
+    """Say so when criteria are covered only by the general checks, which pass or fail whatever the
+    criteria say. The gate still requires the checks; this keeps a reader from taking them as proof."""
+    general = [c for c in contract.acceptance_criteria if c.general and c.checks]
+    if not general:
+        return None
+    ids = [c.criterion_id for c in general]
+    checks = ", ".join(dict.fromkeys(k for c in general for k in c.checks))
+    return (f"note: no check tests {', '.join(ids)} specifically; only the general checks ({checks}) run. "
+            "Add a test for each one, or bind it to its own check with `--check <id>`.")
+
+
+def review_blocker(root: Path | None, state: Any = None) -> str | None:
+    """Why this repository cannot launch independent reviews by itself, with the fix; None when it can.
+    With a run's `state`, billed launches are judged against that run's budget and spend (the rule the
+    launcher applies); without one, against the repository's default budget."""
+    fix = ("set a launching `adapter:` in .daedalus.yml (claude-code, or see `daedalus plugins`; "
+           "`daedalus doctor` checks it)")
+    if root is None:  # no repository to look at
+        return "Reviews launch only through a configured adapter (`daedalus doctor` checks it)"
+    try:
+        from daedalus.adapters import make_adapter
+        from daedalus.core.config import load_config
+
+        cfg = load_config(root)
+        adapter = make_adapter(cfg.adapter)
+        caps = adapter.capabilities
+        basis = getattr(adapter, "expected_cost_basis", lambda: None)()
+        max_cash = float(cfg.policy.default_budget.get("max_cash") or 0)
+        if not math.isfinite(max_cash) or max_cash < 0:
+            raise ValueError("max_cash must be a finite, non-negative number")
+    except Exception:  # noqa: BLE001 - any broken config or adapter means nothing launches
+        return "Reviews cannot launch: the configuration or adapter does not load (`daedalus doctor` says why)"
+    if not (caps.launch_agent and caps.structured_results and caps.identity == "launched"):
+        if adapter.name == "inline":  # what an unset `adapter:` means
+            return f"No adapter here can launch reviews: {fix}"
+        return f"The `{adapter.name}` adapter cannot launch independent reviews: {fix}"
+    if basis == "cash" and state is not None:
+        from daedalus.core.errors import BudgetExhausted
+        from daedalus.orchestration.lifecycle import refuse_unaffordable
+
+        try:
+            refuse_unaffordable(state, adapter, "a review")
+        except BudgetExhausted as exc:
+            return str(exc)
+        return None
+    if basis == "cash" and not max_cash:
+        return (f"`{adapter.name}` sessions here would be billed, and the budget allows no billed spend: set "
+                "`policy: {default_budget: {max_cash: <dollars>}}` in .daedalus.yml")
+    return None
+
+
+def can_launch_reviews(root: Path | None) -> bool:
+    """Whether the repository's configured adapter can launch independent reviews."""
+    return review_blocker(root) is None
+
+
+def review_remedy(blocked: str | None, tier_driven: bool = True, mode_driven: bool = False) -> str:
+    """What happens to the reviews a decision still needs, in one line. A risk exception lowers the
+    tier, so it is offered only when the tier asks for reviews; reviews the run's mode asks for go
+    away only in `gate` mode."""
+    if blocked is None:
+        return ("Daedalus launches the missing reviews once the checks pass (`daedalus verify`, or when the "
+                "agent stops). The author never reviews its own work.")
+    other = []
+    if tier_driven:
+        other.append("a human lowers the tier with `daedalus risk-exception`")
+    if mode_driven:
+        other.append("the run's mode asks for some of them (a `gate`-mode run does not)")
+    return blocked + ("; or " + ", and ".join(other) if other else "") + "."
 
 
 def rel(root: Path, path: str | Path) -> str:
@@ -205,7 +297,7 @@ def add_command(
 def contract_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("goal", nargs="?", help="the objective, in plain words")
     sp.add_argument("--contract", help="YAML file with contract fields")
-    sp.add_argument("-c", "--criterion", action="append", help="acceptance criterion, proved by the required checks (repeatable)")
+    sp.add_argument("-c", "--criterion", action="append", help="acceptance criterion; the required checks must pass, so add a test that checks it (repeatable)")
     sp.add_argument("--attest", action="append", metavar="CRITERION",
                     help="acceptance criterion only a person can judge; needs `daedalus attest` (repeatable)")
     sp.add_argument("--scope", action="append", help="path glob the change may touch (repeatable)")

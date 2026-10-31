@@ -99,7 +99,11 @@ def contract_block(c: TaskContract) -> str:
         "**Acceptance criteria:**",
     ]
     for crit in c.acceptance_criteria:
-        via = f" (verified by checks: {', '.join(crit.checks)})" if crit.checks else " (human attestation)"
+        if crit.general and crit.checks:  # the general checks pass or fail whatever this says: a test has to pin it down
+            via = (f" (no check tests this yet; only the general checks ({', '.join(crit.checks)}) run: "
+                   "add a test that fails unless it holds)")
+        else:
+            via = f" (verified by checks: {', '.join(crit.checks)})" if crit.checks else " (human attestation)"
         lines.append(f"- {crit.criterion_id}: {crit.description}{via}")
     lines += ["", f"**Scope (you may only change these paths):** {', '.join(c.scope)}"]
     if c.invariants:

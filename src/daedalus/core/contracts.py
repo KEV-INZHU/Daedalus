@@ -47,9 +47,16 @@ class Criterion:
     criterion_id: str
     description: str
     checks: tuple[str, ...] = ()
+    # Bound from plain text to the checks every run must pass anyway: they pass or fail whatever this
+    # criterion says, so nothing checks it in particular. Recorded only when true (older contracts
+    # serialize unchanged).
+    general: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.criterion_id, "description": self.description, "checks": list(self.checks)}
+        d: dict[str, Any] = {"id": self.criterion_id, "description": self.description, "checks": list(self.checks)}
+        if self.general:
+            d["general"] = True
+        return d
 
 
 @dataclass(frozen=True)
@@ -139,7 +146,8 @@ def _criteria(items: Any, required: tuple[str, ...]) -> tuple[Criterion, ...]:
             desc = item.get("description") or item.get("text")
             if not desc:
                 raise ContractError(f"acceptance criterion {i} needs a description")
-            c = Criterion(str(item.get("id", f"C{i}")), str(desc), _str_tuple(item.get("checks"), "checks"))
+            c = Criterion(str(item.get("id", f"C{i}")), str(desc), _str_tuple(item.get("checks"), "checks"),
+                          general=item.get("general") is True and bool(item.get("checks")))
         else:
             raise ContractError(f"acceptance criterion {i} must be a string or mapping")
         if c.criterion_id in seen:
@@ -246,7 +254,8 @@ def contract_from_dict(d: dict[str, Any]) -> TaskContract:
         objective=d["objective"],
         scope=tuple(d["scope"]),
         acceptance_criteria=tuple(
-            Criterion(c["id"], c["description"], tuple(c.get("checks", ()))) for c in d["acceptance_criteria"]
+            Criterion(c["id"], c["description"], tuple(c.get("checks", ())), general=c.get("general") is True and bool(c.get("checks")))
+            for c in d["acceptance_criteria"]
         ),
         invariants=tuple(d.get("invariants", ())),
         risk_tier=d["risk_tier"],
@@ -282,17 +291,23 @@ def removed_hard_constraints(old: TaskContract, new: TaskContract) -> list[str]:
 
 
 def bind_text_criteria(spec: dict[str, Any], policy: Policy) -> dict[str, Any]:
-    """Text criteria become criteria proved by the run's required checks.
+    """Text criteria become criteria bound to the run's required checks.
 
     A bare string criterion otherwise needs a human attestation, which no automated flow
     can give. Front ends that collect criteria as text (`daedalus start -c`, factory orders)
     bind them; a criterion that genuinely needs a person is written as a mapping with
-    `checks: []` (or passed with `--attest`)."""
+    `checks: []` (or passed with `--attest`). When no check beyond the mandatory ones is named,
+    the criteria are marked `general`: the gate still requires those checks, but says plainly that
+    nothing checks these criteria in particular."""
     crits = spec.get("acceptance_criteria")
     if not isinstance(crits, list) or not any(isinstance(c, str) for c in crits):
         return spec
     requested = [str(c) for c in spec.get("required_checks") or []]
-    checks = list(dict.fromkeys(policy.mandatory_checks() + tuple(requested)))
+    mandatory = policy.mandatory_checks()
+    checks = list(dict.fromkeys(mandatory + tuple(requested)))
+    bound: dict[str, Any] = {"checks": checks}
+    if checks and set(checks) <= set(mandatory):  # no check named for these criteria: only the general ones cover them
+        bound["general"] = True
     out = dict(spec)
-    out["acceptance_criteria"] = [{"description": c, "checks": checks} if isinstance(c, str) else c for c in crits]
+    out["acceptance_criteria"] = [{"description": c, **bound} if isinstance(c, str) else c for c in crits]
     return out

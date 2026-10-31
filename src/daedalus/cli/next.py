@@ -11,7 +11,7 @@ import argparse
 import json
 from typing import Any
 
-from daedalus.cli._common import _ari, _print, _run_id, add_command
+from daedalus.cli._common import _ari, _print, _run_id, add_command, review_blocker, review_remedy
 from daedalus.core.state_machine import ExecutionState
 
 ORDER = ("agent", "system", "human")
@@ -41,6 +41,7 @@ def next_step(ari: Any, run_id: str | None) -> dict[str, Any]:
             )
         )
     answered = {f.finding_id for f in state.open_findings if f.answers or f.disputes}
+    blocked = review_blocker(ari.root, state) if any(r.code.startswith("review:") for r in decision.reasons) else None
     for r in decision.reasons:
         fid = r.code.removeprefix("finding:") if r.code.startswith("finding:") else None
         if fid and unanswered:
@@ -48,6 +49,10 @@ def next_step(ari: Any, run_id: str | None) -> dict[str, Any]:
         if fid in answered:
             # The agent answered it: what is left is a re-review (or an arbiter, or a person).
             items.append(("system", f"finding {fid} was answered; it awaits re-review (or arbitration)"))
+            continue
+        if r.code.startswith("review:") and blocked:  # it would never launch itself
+            tier = r.message.startswith("tier ")
+            items.append(("human", f"{r.message} {review_remedy(blocked, tier, not tier)}"))
             continue
         items.append((r.fixable_by, r.message))
     if state.pending_proposal is not None:

@@ -68,7 +68,8 @@ status`. Without a title, the objective's first sentence (cut to 72 characters a
 the contract's verification plan says each criterion must be demonstrated by a test those checks run.
 That keeps the line lights-out. In `review` mode a reviewer also judges whether the tests really prove
 the criteria. If a criterion genuinely needs a person, write it as a mapping with `checks: []`. The
-order will then wait for a human attestation.
+order will then wait for a human attestation. A criterion bound only to the mandatory checks is
+marked as not checked specifically, in the builder's prompt and in the run's report.
 
 **Orders are trusted input, like policy.** The line refuses a dirty working tree, so everything it
 builds was committed and could be reviewed. `factory plan` writes drafts and stops. A human reads them,

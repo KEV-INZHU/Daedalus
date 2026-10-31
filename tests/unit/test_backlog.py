@@ -69,7 +69,7 @@ def test_review_reason_uses_correct_article(ari, repo):
     rid = ari.start({"objective": "o"}, actor=HUMAN, mode="review")
     msg = next(r.message for r in ari.evaluate(rid).reasons if r.code == "review:aristotle")
     assert "requires a quality review (Aristotle)" in msg  # plain name, with its article
-    assert "`daedalus review aristotle`" in msg  # commands keep the id
+    assert msg.endswith(".") and "`adapter:`" not in msg  # the remedy is said once, by the renderer
 
 
 def test_plain_names_take_the_right_article():

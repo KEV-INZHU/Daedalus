@@ -61,6 +61,14 @@ as you would out of commit messages. Set `harness: {auto_start: false}` to open 
 | Contract | `daedalus start "goal" -c "criterion"`    | Versioned contract, scope, required checks, budget      |
 | Status   | `daedalus status`                         | Full state machine, evidence, risk floors, authorization |
 | Next     | `daedalus next`                           | One line: what the run needs now, and from whom (agent, Daedalus, or you) |
+| Risk     | `daedalus risk [PATH ...]`                | Before a run: the tier your changes reach, the floors and files behind it, and what it requires |
+
+A criterion given with `-c` is bound to the required checks, so the gate still requires them to pass.
+But when no check beyond the mandatory ones is named, those checks pass or fail whatever the criterion
+says. Daedalus says so: `start`, `verify` and the report mark the criterion as not checked
+specifically, and the builder is told to add a test that fails unless it holds. Bind a criterion to a
+dedicated check with `--check <id>` (a non-mandatory check from `.daedalus.yml`), or use `--attest`
+for one a person judges.
 
 Everything else stays out of the way until it matters: `daedalus log` and
 `daedalus audit` for the hash-chained audit trail, `daedalus metrics` for

@@ -11,6 +11,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
   versions do not know these events and refuse to replay such a run, so read it with this version or later.
 
 ### Added
+- `daedalus risk [PATH ...]`: preview the tier your uncommitted changes (or the paths you name) reach, which risk
+  floors and files set it, any weakened tests, and the reviews and approvals it requires. It records nothing.
 - `daedalus/coordination/buslock.py`: the bus's writer lock as one standard-library-only file, so the shared
   `bus.py` can copy it and take the same lock as Daedalus (docs/coordination.md shows the two-line change).
 - Factory ship step: `factory: {ship: {push: origin, pull_request: true, base: main}}` pushes the integration
@@ -59,6 +61,15 @@ and versions follow [Semantic Versioning](https://semver.org/).
   launched session (the command adapter passes both through; read-only sessions never get the grant).
 
 ### Changed
+- Criteria nothing checks in particular are no longer shown as proved. A `-c` criterion bound only to the mandatory
+  checks is marked `general`: `start`, `verify` and the report say no check tests it specifically, and the
+  builder's prompt asks for a test that fails unless it holds. Naming a dedicated check with `--check` makes it
+  specific. Acceptance is unchanged.
+- Block output is shorter: the reviews a candidate still needs are one line, and what happens to them (launched
+  automatically, or no adapter can launch them) is said once. The test-integrity reason is shorter too.
+  `daedalus next` hands reviews no adapter can launch to a person, with the fix.
+- `daedalus init` says why it set no reviewer: `claude` is missing, or its sessions would be billed and runs allow
+  no billed spend by default (with the `max_cash` setting that allows it).
 - A check that fails because a Python module is not installed says it looks like a missing tool (never for a
   module the repository itself provides), with the bootstrap fix for fresh containers.
 - Messages people read name roles by what they do: "a quality review (Aristotle)", "the arbiter (Plato)", in gate
