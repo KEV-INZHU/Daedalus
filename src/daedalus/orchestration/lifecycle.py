@@ -216,10 +216,16 @@ def track_record_for(ari: Ariadne, perspective: str, run_id: str) -> str:
     from daedalus.core.calibration import load_states, track_record
 
     try:
-        states, _ = load_states(ari.store, TRACK_RUNS)
-        return track_record(states, perspective, exclude_run=run_id)
+        key = (str(ari.state_dir), ari.store.head_seq())
+        if _TRACK_MEMO.get("key") != key:  # replay recent runs only when the log has grown
+            _TRACK_MEMO.clear()
+            _TRACK_MEMO.update(key=key, states=load_states(ari.store, TRACK_RUNS)[0])
+        return track_record(_TRACK_MEMO["states"], perspective, exclude_run=run_id)
     except Exception:  # noqa: BLE001 — advice for the prompt only
         return ""
+
+
+_TRACK_MEMO: dict[str, Any] = {}
 
 
 def _well_formed(findings: Any) -> bool:

@@ -200,7 +200,9 @@ def track_record(states: Iterable[RunState], perspective: str, exclude_run: str 
     held = sum(o for _, o, _ in rows)
     lines = ["## Your track record in this repository (the outside view: start from it)", "",
              f"Of your last {len(rows)} findings with a known outcome, {held} held up and {len(rows) - held} "
-             f"were false alarms ({held / len(rows):.0%} held up)."]
+             f"were false alarms ({held / len(rows):.0%} held up). \"Held up\" means fixed when asked and the fix "
+             "confirmed, upheld by the arbiter, or judged valid by a person, so it flatters a little: a builder "
+             "may fix what was not wrong."]
     stated = [f.confidence for f, _, _ in rows if f.confidence is not None]
     scored = [(f.confidence, o) for f, o, _ in rows if f.confidence is not None]
     if len(stated) >= MIN_TRACK:

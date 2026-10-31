@@ -54,7 +54,7 @@ def cmd_findings(args: argparse.Namespace) -> int:
     try:
         rid = _run_id(ari, args, any_run=True)
         if args.findings_cmd == "judge":
-            actor = human_actor(f"judging {args.finding} {args.verdict}", assume_yes=True)
+            actor = human_actor(f"judging {args.finding} {args.verdict}", assume_yes=args.yes)
             ari.judge_finding(rid, args.finding, actor=actor, verdict=args.verdict, note=args.note or "")
             _print(f"{args.finding}: judged {args.verdict}; `daedalus calibration` scores the reviewer with it")
             return 0
@@ -106,3 +106,4 @@ def register(sub: Any) -> None:
     j.add_argument("finding")
     j.add_argument("verdict", choices=("valid", "invalid"))
     j.add_argument("note", nargs="?", help="why, e.g. 'the test was already failing on main'")
+    j.add_argument("-y", "--yes", action="store_true", help="skip the confirmation")

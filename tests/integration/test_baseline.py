@@ -27,7 +27,7 @@ def test_a_failure_already_on_the_base_is_labelled_and_checked_once(tmp_path, cl
     a.verify(rid)
     d = a.evaluate(rid)
     msg = next(r.message for r in d.reasons if r.code == "check:tests")
-    assert NOTE in msg and "it must still pass before acceptance" in msg
+    assert NOTE in msg and "It must still pass before acceptance" in msg and "base log:" in msg
     assert not d.acceptable  # advice, not a waiver
     a.verify(rid)
     assert len(_base_events(a, rid)) == 1  # same base and check: not run again

@@ -211,8 +211,11 @@ def split_diff(text: str) -> list[tuple[str, str]]:
     """A `git diff` as (path, that file's part), in order."""
     out: list[tuple[str, str]] = []
     for part in ("\n" + text).split("\ndiff --git ")[1:]:
-        head = part.split("\n", 1)[0]
-        path = head.split(" b/", 1)[1] if " b/" in head else head
+        lines = part.split("\n")
+        path = next((ln[6:] for ln in lines if ln.startswith("+++ b/")), None) or next(
+            (ln[6:] for ln in lines if ln.startswith("--- a/")), None)
+        if path is None:  # no content lines (a mode change, a binary file): the header names it
+            path = lines[0].rsplit(" b/", 1)[-1]
         out.append((path, "diff --git " + part.rstrip("\n")))
     if not out and text.strip():
         out.append(("", text.rstrip("\n")))
@@ -230,7 +233,7 @@ def fit_diff(chunks: list[tuple[str, str]], limit: int) -> str:
     total = sum(len(c) for _, c in chunks) + len(chunks)
     if total <= limit:
         return "\n".join(c for _, c in chunks)
-    budget = max(0, limit - 200 - 120 * len(chunks))  # room for the notes below
+    budget = max(0, limit - 400 - 2 * max(200, limit // 8))  # room for the notes below
     order = sorted(range(len(chunks)), key=lambda i: len(chunks[i][1]))
     kept: dict[int, str] = {}
     cut: list[str] = []
@@ -246,18 +249,35 @@ def fit_diff(chunks: list[tuple[str, str]], limit: int) -> str:
         if share < MIN_SHARE:
             omitted.append(f"{path or '(diff)'} ({len(body)} chars)")
             continue
-        head = body[:share]
+        marker = f"\n... {path}: shown {{}} of {len(body)} chars; read the file for the rest ..."
+        room = share - len(marker) - 8
+        head = body[:room]
         at = head.rfind("\n@@")
-        if at < share // 2:  # no hunk boundary in the back half: cut at a line instead
+        if at < room // 2:  # no hunk boundary in the back half: cut at a line instead
             at = head.rfind("\n")
-        head = head[: at if at > 0 else share]
-        kept[i] = head + f"\n... {path}: shown {len(head)} of {len(body)} chars; read the file for the rest ..."
+        head = head[: at if at > 0 else room]
+        kept[i] = head + marker.format(len(head))
         cut.append(path)
-        left -= len(head)
+        left -= len(kept[i]) + 1
     text = "\n".join(kept[i] for i in range(len(chunks)) if i in kept)
     notes = [f"... diff over {limit} chars: every file kept a share instead of the end being dropped."]
+    room = max(200, limit // 8)  # the lists of names may take at most this much each
     if cut:
-        notes.append("Cut short (read these in the repository before judging them): " + ", ".join(cut))
+        notes.append("Cut short (read these in the repository before judging them): " + _names(cut, room))
     if omitted:
-        notes.append("Not shown at all (read these in the repository): " + ", ".join(omitted))
-    return text + "\n" + "\n".join(notes)
+        notes.append("Not shown at all (read these in the repository): " + _names(omitted, room))
+    tail = "\n" + "\n".join(notes)
+    return text[: max(0, limit - len(tail))] + tail  # the notes always fit, whatever the paths add up to
+
+
+def _names(paths: list[str], room: int) -> str:
+    """As many of `paths` as fit in `room` characters, then how many more there are."""
+    out: list[str] = []
+    used = 0
+    for p in paths:
+        if out and used + len(p) + 2 > room:
+            break
+        out.append(p[:room])
+        used += len(p) + 2
+    rest = len(paths) - len(out)
+    return ", ".join(out) + (f", and {rest} more" if rest else "")

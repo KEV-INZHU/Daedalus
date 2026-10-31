@@ -6,9 +6,12 @@ lite), in a scratch git repository holding just that change, and scored:
 
 - **recall**: planted bugs a finding names (the bug's file, plus its line or the words a finding
   about it would use);
-- **false alarms**: MAJOR-or-worse findings that name no planted bug, and clean controls that drew one;
-- **calibration**: the Brier score of each finding's `confidence` against whether it named the bug,
-  and of the review's `residual_risk` against whether the bug was missed;
+- **false alarms**: MAJOR-or-worse findings on clean controls (findings that only say tests are missing
+  are counted apart: the cases have no tests by design). Serious findings on a planted case that are about
+  something else are listed, not scored: they may be real;
+- **calibration**: the Brier score of each finding's `confidence` where the truth is known (a finding that
+  names the bug, or a serious one on a clean control), and of the review's `residual_risk` against whether
+  the bug was missed;
 - **cost** and time per review.
 
 Any reviewer can be benchmarked: the configured adapter, or `--reviewer-cmd`, a shell command that
@@ -36,7 +39,7 @@ from daedalus.core.errors import DaedalusError
 
 CASES = Path(__file__).resolve().parent / "data" / "bench" / "cases.yaml"
 SERIOUS = ("BLOCKER", "MAJOR")
-LINE_SLACK = 3  # a finding within this many lines of the planted bug names it
+LINE_SLACK = 2  # a finding within this many lines of the planted bug names it
 REVIEW_TIMEOUT_S = 600.0
 
 
@@ -68,19 +71,51 @@ def load_cases(path: Path | None = None) -> list[Case]:
     if not isinstance(doc, dict) or not isinstance(doc.get("cases"), list):
         raise DaedalusError(f"{p}: expected a mapping with a `cases:` list")
     out = []
+    names: set[str] = set()
     for i, c in enumerate(doc["cases"]):
         if not isinstance(c, dict) or not {"name", "objective", "before", "after"} <= set(c):
             raise DaedalusError(f"{p}: case {i + 1} needs name, objective, before and after")
+        name = c["name"]
+        if not isinstance(name, str) or not _NAME.fullmatch(name) or name in names:
+            raise DaedalusError(f"{p}: case {i + 1}: name must be a unique slug (letters, digits, - and _)")
+        names.add(name)
+        before, after = _files(p, name, "before", c["before"]), _files(p, name, "after", c["after"])
         bug = c.get("bug")
-        if bug is not None and (not isinstance(bug, dict) or not {"file", "line"} <= set(bug)):
-            raise DaedalusError(f"{p}: case {c['name']}: `bug` needs file and line (or is null)")
-        case = Case(str(c["name"]), str(c["objective"]), tuple(str(x) for x in c.get("criteria") or ()),
-                    {str(k): str(v) for k, v in (c["before"] or {}).items()},
-                    {str(k): str(v) for k, v in (c["after"] or {}).items()}, bug)
+        if bug is not None and (not isinstance(bug, dict) or not isinstance(bug.get("file"), str)
+                                or not isinstance(bug.get("line"), str) or not bug["line"].strip()
+                                or not isinstance(bug.get("words", []), list)):
+            raise DaedalusError(f"{p}: case {name}: `bug` needs a file and a line (strings), or is null")
+        case = Case(name, str(c["objective"]), tuple(str(x) for x in c.get("criteria") or ()), before, after, bug)
         if bug is not None and case.bug_line() is None:
             raise DaedalusError(f"{p}: case {case.name}: bug line {bug['line']!r} is not in {bug['file']}")
         out.append(case)
     return out
+
+
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+
+def _files(src: Path, case: str, key: str, v: Any) -> dict[str, str]:
+    """A case's files: relative paths inside the scratch repository, mapped to their text."""
+    if v is None:
+        return {}
+    if not isinstance(v, dict) or not all(isinstance(k, str) and isinstance(b, str) for k, b in v.items()):
+        raise DaedalusError(f"{src}: case {case}: `{key}` must map file paths to their text")
+    for rel in v:
+        parts = Path(rel).parts
+        if not rel.strip() or Path(rel).is_absolute() or ".." in parts or (parts and parts[0] == ".git"):
+            raise DaedalusError(f"{src}: case {case}: {rel!r} must be a relative path inside the case")
+    return dict(v)
+
+
+_TEST_GAP = re.compile(r"\b(no|missing|without|lacks?|add(ed)?)\b[^.]{0,40}\btests?\b|\buntested\b|"
+                       r"\btests?\b[^.]{0,30}\b(missing|cover|pin|added)\b", re.IGNORECASE)
+
+
+def test_gap(f: dict[str, Any]) -> bool:
+    """A finding that only says tests are missing. The cases ship without tests on purpose, so such a
+    finding is fair but says nothing about the planted bug: it is counted apart."""
+    return bool(_TEST_GAP.search(str(f.get("title", ""))))
 
 
 _LOC = re.compile(r"([\w./-]+\.\w+)(?::|\s+line\s+|#L)(\d+)")
@@ -94,15 +129,30 @@ def names_bug(case: Case, f: dict[str, Any]) -> bool:
     text = " ".join(str(f.get(k, "")) for k in ("title", "evidence", "required_change", "verification"))
     low = text.lower()
     path = case.bug["file"]
-    if path.lower() not in low and Path(path).name.lower() not in low:
+    # A change to one file needs no file name to say which one is meant.
+    if len(case.after) > 1 and path.lower() not in low and Path(path).name.lower() not in low:
         return False
     line = case.bug_line() or 0
-    for m in _LOC.finditer(text):
-        if Path(m.group(1)).name == Path(path).name and abs(int(m.group(2)) - line) <= LINE_SLACK:
-            return True
-    if case.bug["line"].lower() in low:
+    locs = [(Path(m.group(1)).name, int(m.group(2))) for m in _LOC.finditer(text)]
+    if locs and all(name != Path(path).name for name, _ in locs):
+        return False  # it points somewhere else
+    if any(name == Path(path).name and abs(n - line) <= LINE_SLACK for name, n in locs):
         return True
-    return any(str(w).lower() in low for w in case.bug.get("words") or ())
+    if case.bug["line"].strip().lower() in low:
+        return True
+    return any(_word(str(w).lower(), low) for w in case.bug.get("words") or ())
+
+
+def _word(w: str, text: str) -> bool:
+    """`w` in `text` as whole words, where it starts and ends with a word character."""
+    if not w.strip():
+        return False
+    pat = re.escape(w)
+    if w[0].isalnum():
+        pat = r"\b" + pat
+    if w[-1].isalnum():
+        pat += r"\b"
+    return re.search(pat, text) is not None
 
 
 @dataclass
@@ -112,8 +162,10 @@ class CaseResult:
     status: str
     caught: bool = False
     findings: int = 0
-    false_serious: int = 0  # MAJOR-or-worse findings that name no planted bug
+    false_serious: int = 0  # on a clean control: MAJOR-or-worse findings (not test gaps); a false-alarm proxy
+    other_serious: int = 0  # on a planted case: MAJOR-or-worse findings about something else (may be real)
     other_minor: int = 0  # MINOR or ADVISORY findings that name no planted bug (not scored either way)
+    test_gaps: int = 0  # findings that only say tests are missing (the cases have none by design)
     forecasts: list[tuple[float, int]] = field(default_factory=list)
     residual: tuple[float, int] | None = None
     cost: float = 0.0
@@ -124,7 +176,9 @@ class CaseResult:
 
 
 def _git(root: Path, *args: str) -> str:
-    r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False)
+    # The user's global git setup (signing, hooks) has no business in a scratch repository.
+    r = subprocess.run(["git", "-C", str(root), "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                        *args], capture_output=True, text=True, check=False)
     if r.returncode != 0:
         raise DaedalusError(f"git {' '.join(args)}: {r.stderr.strip()}")
     return r.stdout
@@ -183,16 +237,23 @@ def score_case(case: Case, res: AgentResult, seconds: float) -> CaseResult:
         out.findings += 1
         hit = names_bug(case, f)
         sev = str(f.get("severity", "")).upper()
+        gap = not hit and test_gap(f)
         out.caught |= hit
         out.details.append({"title": str(f.get("title", ""))[:200], "severity": sev, "confidence": f.get("confidence"),
-                            "names_bug": hit, "evidence": str(f.get("evidence", ""))[:300]})
-        if not hit:
-            if sev in SERIOUS:
-                out.false_serious += 1
-            else:
-                out.other_minor += 1
+                            "names_bug": hit, "test_gap": gap, "evidence": str(f.get("evidence", ""))[:300]})
+        if hit:
+            pass
+        elif gap:
+            out.test_gaps += 1
+        elif sev not in SERIOUS:
+            out.other_minor += 1
+        elif case.bug is None:
+            out.false_serious += 1
+        else:
+            out.other_serious += 1
         p = probability(f.get("confidence"))
-        if p is not None and (hit or sev in SERIOUS):  # an unmatched MINOR may still be real: not scored
+        # Scored only where the truth is known: a hit (1), or a serious finding on a clean control (0).
+        if p is not None and (hit or (case.bug is None and sev in SERIOUS and not gap)):
             out.forecasts.append((p, int(hit)))
     rr = probability(body.get("residual_risk"))
     if rr is not None:
@@ -231,6 +292,10 @@ def _whole_json(text: str) -> dict[str, Any] | None:
 
 def run_bench(cases: list[Case], adapter: Adapter, *, lite: bool = False, repeat: int = 1,
               notify=lambda _m: None) -> dict[str, Any]:
+    if repeat < 1:
+        raise DaedalusError("--repeat must be at least 1")
+    if not cases:
+        raise DaedalusError("no cases to run")
     results: list[CaseResult] = []
     scratch = Path(tempfile.mkdtemp(prefix="daedalus-bench-"))
     try:
@@ -271,7 +336,9 @@ def summarize(results: list[CaseResult], adapter: Any, lite: bool, repeat: int) 
         "planted": len(planted),
         "clean_cases_with_false_alarm": sum(1 for r in clean if r.false_serious),
         "clean": len(clean),
-        "false_serious_per_review": round(sum(r.false_serious for r in done) / len(done), 4) if done else None,
+        "false_serious_per_clean_review": round(sum(r.false_serious for r in clean) / len(clean), 4) if clean else None,
+        "other_serious": sum(r.other_serious for r in planted),
+        "test_gaps": sum(r.test_gaps for r in done),
         "findings_brier": score(p for r in done for p in r.forecasts).to_dict(),
         "residual_brier": score(r.residual for r in done if r.residual is not None).to_dict(),
         "cost": round(cost, 6),
@@ -287,15 +354,18 @@ def render(s: dict[str, Any]) -> list[str]:
         return "n/a" if x is None else f"{x:.0%}"
 
     fb, rb = s["findings_brier"], s["residual_brier"]
+    s = {k: ("n/a" if v is None else v) for k, v in s.items()}
     lines = [
         f"reviewer {s['reviewer']}{' (lite)' if s['lite'] else ''} · {s['reviews']} review(s)"
         + (f", {s['failed']} failed" if s["failed"] else ""),
         f"  recall: caught {s['caught']} of {s['planted']} planted bugs ({pct(s['recall'])})",
-        f"  false alarms: {s['clean_cases_with_false_alarm']} of {s['clean']} clean changes drew a MAJOR+ finding; "
-        f"{s['false_serious_per_review']} unfounded MAJOR+ per review",
+        f"  false alarms: {s['clean_cases_with_false_alarm']} of {s['clean']} clean changes drew a MAJOR+ finding "
+        f"({s['false_serious_per_clean_review']} per clean change)",
+        f"  also: {s['other_serious']} MAJOR+ finding(s) on planted cases about something else (may be real: see "
+        f"`details`), {s['test_gaps']} saying tests are missing (the cases have none, by design)",
         f"  calibration: findings Brier {fb['brier'] if fb['brier'] is not None else 'n/a'} over {fb['n']}"
         f" · residual risk Brier {rb['brier'] if rb['brier'] is not None else 'n/a'} over {rb['n']} (0 is perfect)",
-        f"  cost ${s['cost']:.4f} (${(s['cost_per_review'] or 0):.4f} per review, {'/'.join(s['cost_basis'])})"
+        f"  cost ${s['cost']:.4f} ({s['cost_per_review']} per review, {'/'.join(s['cost_basis'])})"
         f" · {s['seconds_per_review']}s per review",
     ]
     missed = [c["case"] for c in s["cases"] if c["planted"] and c["status"] == "COMPLETED" and not c["caught"]]
@@ -303,5 +373,5 @@ def render(s: dict[str, Any]) -> list[str]:
         lines.append("  missed: " + ", ".join(dict.fromkeys(missed)))
     noisy = [c["case"] for c in s["cases"] if c["false_serious"]]
     if noisy:
-        lines.append("  unfounded MAJOR+ on: " + ", ".join(dict.fromkeys(noisy)))
+        lines.append("  false alarms on: " + ", ".join(dict.fromkeys(noisy)))
     return lines

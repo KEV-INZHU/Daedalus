@@ -79,3 +79,43 @@ def test_any_reviewer_command_can_be_benchmarked(tmp_path, capsys):
     assert s["reviewer"] == "reviewer-cmd" and s["planted"] == 1 and s["caught"] == 0 and s["clean"] == 1
     assert list((root / ".daedalus" / "bench").glob("*.json"))
     assert main(["-C", str(root), "bench", "--only", "nope"]) == 2
+
+
+@pytest.mark.parametrize("files,why", [({"/etc/x": "a"}, "relative path"), ({"../x": "a"}, "relative path"),
+                                      ({".git/config": "a"}, "relative path"), ({"a.py": 3}, "map file paths")])
+def test_case_files_stay_inside_the_scratch_repository(tmp_path, files, why):
+    bad = tmp_path / "c.yaml"
+    import yaml
+
+    bad.write_text(yaml.safe_dump({"cases": [{"name": "x", "objective": "o", "before": {}, "after": files,
+                                              "bug": None}]}))
+    with pytest.raises(DaedalusError, match=why):
+        load_cases(bad)
+
+
+@pytest.mark.parametrize("doc,why", [
+    ({"cases": [{"name": "a b", "objective": "o", "before": {}, "after": {}}]}, "unique slug"),
+    ({"cases": [{"name": "a", "objective": "o", "before": {}, "after": {}}] * 2}, "unique slug"),
+    ({"cases": [{"name": "a", "objective": "o", "before": {}, "after": {"a.py": "x"},
+                 "bug": {"file": "a.py", "line": 3}}]}, "file and a line"),
+    ({"nope": 1}, "cases:"),
+])
+def test_malformed_cases_are_refused_plainly(tmp_path, doc, why):
+    import yaml
+
+    bad = tmp_path / "c.yaml"
+    bad.write_text(yaml.safe_dump(doc))
+    with pytest.raises(DaedalusError, match=why):
+        load_cases(bad)
+
+
+def test_repeat_must_be_positive(cases):
+    with pytest.raises(DaedalusError, match="at least 1"):
+        run_bench([cases["clean-helper"]], SimulatedAdapter({}), repeat=0)
+
+
+def test_words_match_whole_words_only(cases):
+    c = cases["naive-expiry"]
+    assert not names_bug(c, {"title": "the output is computed", "evidence": "tokens.py"})  # 'utc' inside a word
+    assert names_bug(c, {"title": "compares local time with a UTC expiry", "evidence": "tokens.py"})
+    assert not names_bug(c, {"title": "wrong", "evidence": "src/tokens.py:1"})  # far from line 6

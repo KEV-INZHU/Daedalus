@@ -35,11 +35,28 @@ def test_files_with_no_useful_room_are_listed_not_silently_lost():
     out = fit_diff(chunks, 10_000)
     assert "Not shown at all (read these in the repository): " in out
     assert len(out) <= 10_000
-    for i in range(60):  # each file is either shown in part or named as not shown
-        assert f"+++ b/f{i}.py" in out or f"f{i}.py (" in out.rsplit("\n", 1)[-1]
+    last = out.rsplit("\n", 1)[-1]
+    shown = sum(f"+++ b/f{i}.py" in out for i in range(60))
+    named = sum(f"f{i}.py (" in last for i in range(60))
+    more = int(last.rsplit("and ", 1)[1].split()[0]) if " more" in last else 0
+    assert shown + named + more == 60  # every file is shown in part, named, or counted
+
+
+def test_the_output_never_exceeds_the_limit_however_long_the_paths():
+    import random
+
+    rnd = random.Random(7)
+    for limit in (2_000, 5_000, 20_000):
+        chunks = [_file(f"{'deep/' * rnd.randint(1, 30)}f{i}.py", rnd.randint(1, 400)) for i in range(rnd.randint(2, 80))]
+        assert len(fit_diff(chunks, limit)) <= limit
 
 
 def test_split_diff_keeps_paths_and_order():
     text = "\n".join(c for _, c in [_file("a.py", 1), _file("dir/b c.py", 1)])
     assert [p for p, _ in split_diff(text)] == ["a.py", "dir/b c.py"]
     assert "\n".join(c for _, c in split_diff(text)) == text
+
+
+def test_split_diff_reads_the_path_from_the_file_lines():
+    text = ("diff --git a/x b/y b/x b/y b/z\n--- a/x b/y\n+++ b/x b/y b/z\n@@ -1 +1 @@\n-a\n+b")
+    assert split_diff(text)[0][0] == "x b/y b/z"

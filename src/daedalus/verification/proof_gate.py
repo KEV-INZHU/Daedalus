@@ -188,4 +188,5 @@ def compare_with_base(ari: Ariadne, run_id: str, produced: list[EvidenceRecord],
         ari._append(run_id, ev.BASE_CHECKED, SYSTEM, {
             "check_id": check_id, "base_revision": base, "definition_hash": defn.definition_hash,
             "result": res["result"], "exit_code": res.get("exit_code"), "error": res.get("error"),
+            "log_path": res.get("log_path"),
         })

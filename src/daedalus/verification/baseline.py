@@ -70,5 +70,7 @@ def base_note(entry: dict[str, Any] | None) -> str:
     """The sentence a failing check's reason gains, or ""."""
     if not entry or entry.get("result") != "FAIL":
         return ""
-    return (f" It also fails on a clean checkout of the base revision {str(entry.get('base_revision', ''))[:12]}, "
-            "so this change probably did not cause it; it must still pass before acceptance.")
+    log = f" (base log: {entry['log_path']})" if entry.get("log_path") else ""
+    return (f" It also fails on a clean checkout of the base revision {str(entry.get('base_revision', ''))[:12]}"
+            f"{log}, so the failure may predate this change: compare the two logs before blaming or clearing it. "
+            "It must still pass before acceptance.")

@@ -239,7 +239,7 @@ def test_judge_and_calibration_from_the_command_line(tmp_path, clock, monkeypatc
     monkeypatch.delenv("DAEDALUS_AGENT")
     monkeypatch.delenv("CLAUDECODE", raising=False)
     monkeypatch.setattr(cli, "_interactive", lambda: True)
-    assert main(["-C", str(root), "findings", "--run", rid, "judge", "F1", "invalid", "was already failing"]) == 0
+    assert main(["-C", str(root), "findings", "--run", rid, "judge", "F1", "invalid", "was already failing", "-y"]) == 0
     capsys.readouterr()
     assert main(["-C", str(root), "findings", "--run", rid]) == 0
     assert "80% sure" in capsys.readouterr().out
@@ -250,3 +250,41 @@ def test_judge_and_calibration_from_the_command_line(tmp_path, clock, monkeypatc
     assert main(["-C", str(root), "calibration", "--json", "--by", "severity"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["findings"]["by"]["MAJOR"]["n"] == 1
+
+
+def test_judging_asks_for_confirmation_without_yes(tmp_path, clock, monkeypatch):
+    from daedalus import cli
+    from daedalus.cli import main
+
+    root = make_repo(tmp_path / "r", {"mode": "review"})
+    a = Ariadne(root, clock=clock)
+    rid, _ = _run_with_finding(a, root, {"summary": "s", "findings": [finding()]})
+    a.close()
+    monkeypatch.delenv("DAEDALUS_AGENT", raising=False)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    assert main(["-C", str(root), "findings", "--run", rid, "judge", "F1", "valid"]) != 0
+    b = Ariadne(root, clock=clock)
+    assert b.state(rid).findings["F1"].judgment is None
+    b.close()
+
+
+def test_the_track_record_is_replayed_only_when_the_log_grows(tmp_path, clock, monkeypatch):
+    from daedalus.core import calibration
+    from daedalus.orchestration import lifecycle
+
+    root = make_repo(tmp_path / "r", {"mode": "review"})
+    a = Ariadne(root, clock=clock)
+    rid = a.start({"objective": "o"}, actor=HUMAN)
+    calls = []
+    real = calibration.load_states
+    monkeypatch.setattr(calibration, "load_states", lambda *x, **k: calls.append(1) or real(*x, **k))
+    lifecycle._TRACK_MEMO.clear()
+    lifecycle.track_record_for(a, "aristotle", rid)
+    lifecycle.track_record_for(a, "mozi", rid)
+    assert len(calls) == 1
+    a.verify(rid)  # appends events
+    lifecycle.track_record_for(a, "aristotle", rid)
+    assert len(calls) == 2
+    a.close()

@@ -115,7 +115,7 @@ cases:
                 return None
             validate(q)
             post(q["id"], 0.5)
-    bug: {file: src/forecast.py, line: "    validate(q)", words: [before the window, skips validation, skipped validation, never validated, not validated, validation is skipped, after the early return]}
+    bug: {file: src/forecast.py, line: "    validate(q)", words: [before the window, skips validation, validation skipped, skipped validation, never validated, not validated, validation is skipped, early exit, early return, in-window questions]}
 
   - name: bad-cost-crashes
     objective: Sum the cost column of a usage report
@@ -173,7 +173,7 @@ cases:
             with open(path, "wb") as f:
                 f.write(data)
             return path
-    bug: {file: src/uploads.py, line: "os.path.join(UPLOADS, name)", words: [traversal, "..", absolute path, escape, outside uploads]}
+    bug: {file: src/uploads.py, line: "os.path.join(UPLOADS, name)", words: [traversal, "../", absolute path, escapes the uploads, outside uploads, outside the uploads]}
 
   - name: naive-expiry
     objective: Expire API tokens after their expiry time (stored as UTC)
@@ -190,7 +190,7 @@ cases:
         def valid(token):
             """token["expires"] is a naive datetime in UTC."""
             return datetime.now() < token["expires"]
-    bug: {file: src/tokens.py, line: "datetime.now()", words: [utc, timezone, time zone, local time, utcnow]}
+    bug: {file: src/tokens.py, line: "datetime.now()", words: [timezone, time zone, local time, utcnow, "now(timezone.utc)", not utc, compares local]}
 
   - name: unanchored-validation
     objective: Validate usernames before using them in a shell command
