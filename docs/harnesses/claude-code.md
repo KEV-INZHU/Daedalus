@@ -62,4 +62,10 @@ Set `harness: {bootstrap: "pip install ..."}` in `.daedalus.yml` and rerun
 `daedalus install claude-code`. SessionStart then runs that command whenever Daedalus is missing. It is
 committed configuration, so changing it raises the run's tier to critical.
 
+Install what the **checks** need too, not only Daedalus: with `pip install -e .` alone, a fresh
+container has Daedalus but no pytest, and every check fails. For a Python project with test
+extras, use `pip install -q -e ".[dev]"` (or your project's equivalent). A check that fails because a
+Python module is missing now says so ("`pytest` is not installed where the check ran, so this is
+not a test result"), rather than reading as a failed test.
+
 See also [../gate-workflow.md](../gate-workflow.md) and [../troubleshooting.md](../troubleshooting.md).

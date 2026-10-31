@@ -24,3 +24,28 @@ drives toward zero. A follow-up round that ends worse than it started is undone:
 is restored and re-verified (`daedalus restore` does the same by hand). Findings a *delta* review raised
 against the undone change no longer count, since that code is gone. A *full* review's findings always
 count, because they may concern code that is still there.
+
+## What reviews cost, and what they bought
+
+`daedalus metrics` prints review spend by perspective: what its launched sessions were charged,
+how many findings it raised, and the cost per finding. A perspective that keeps costing money and
+finding nothing is a candidate to drop from your mode or tier. In `--json`, see `review_spend` per
+run and in `aggregate`. For fan-out runs it also prints how much time running packages side by
+side saved compared with running them one by one, how long integrating their results took, and
+how many results failed to integrate. The saving can be negative: when packages wait on each other,
+the round spans longer than the work itself, and the metric shows that rather than hiding it.
+
+## Plan review: before any code
+
+Design mistakes are the expensive findings: a review of finished code that says "wrong approach"
+costs a rebuild. A plan review catches them first, for the price of two short read-only sessions.
+
+- `plan_review: true` in `.daedalus.yml` makes `daedalus run` start by having the Builder write a
+  plan (read-only). An independent reviewer then critiques it, and its concerns become round 1's
+  "Before you build" section. Off by default.
+- `daedalus plan-review "the plan"` (or `--file PLAN.md`) does the same for an interactive
+  session. An agent may ask for one of its own plan.
+
+A plan review is advice. It records no review and no finding, so it never satisfies or blocks
+acceptance. Only its session's cost is charged to the run. The plan reaches the reviewer quoted as
+data.

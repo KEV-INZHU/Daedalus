@@ -651,6 +651,12 @@ class CommandAdapter(Adapter):
         # rule, so a prompt passed as an argument would be swallowed by it. (The built-in claude-code
         # preset always uses stdin; a custom claude-json adapter with `prompt_via: arg` gets no grant,
         # and its Builder prompt still lists the commands, which then need the user's allow-rules.)
+        if not req.read_only and req.bus_commands and self.parse == "claude-json":
+            # Live coordination: a PostToolUse hook hands the session new bus messages as they arrive.
+            # Before `--allowedTools`, which takes every argument after it.
+            from daedalus.harness.claude_code import session_hooks
+
+            cmd += ["--settings", json.dumps(session_hooks())]
         grants = (*req.run_commands, *req.bus_commands)
         if not req.read_only and grants and self.parse == "claude-json" and self.prompt_via == "stdin":
             # Headless sessions deny shell commands they were not granted: grant exactly the checks

@@ -30,6 +30,7 @@ from typing import Any
 from daedalus.adapters.base import Adapter, AgentRequest, AgentResult, require
 from daedalus.coordination.launch import Coordinator
 from daedalus.core.acceptance import Decision
+from daedalus.core.names import review_name
 from daedalus.core.errors import BudgetExhausted, ContractError, DaedalusError, IntegrationError
 from daedalus.core.state_machine import Disposition, ExecutionState, Severity, WorkerState
 from daedalus.orchestration import prompts
@@ -64,6 +65,8 @@ def check_commands(state: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
     granted, skipped = [], []
     for cid in state.contract.required_checks:
         d = state.policy.checks.get(cid)
+        if d is not None and d.holdout:
+            continue  # never granted, and never named to the Builder
         p = prompts.check_prefix(d.command) if (d is not None and state.policy.builder_runs_checks) else ""
         if p:
             granted.append(p)
@@ -164,7 +167,7 @@ def _reuse_review(ari: Ariadne, state: Any, perspective: str, keyed: tuple[str, 
         )
     except (ContractError, DaedalusError):
         return None
-    notify(f"{perspective} review reused from run {source.run_id} (event {source.seq}): "
+    notify(f"{review_name(perspective)} reused from run {source.run_id} (event {source.seq}): "
            f"same candidate, contract, policy, prompt and model")
     return rid
 
@@ -195,7 +198,8 @@ def launch_review(
         state.policy.allowed_degradations,
     )
     prior = [
-        {"id": f.finding_id, "severity": f.severity.value, "title": f.title, "required_change": f.required_change}
+        {"id": f.finding_id, "severity": f.severity.value, "title": f.title, "required_change": f.required_change,
+         **({"builder_note": f.answers[-1]["note"]} if f.answers else {})}
         for f in state.open_findings
         if f.perspective == perspective
     ]
@@ -217,12 +221,12 @@ def launch_review(
         old_id, inter, touched = delta
         prompt = prompts.delta_review_prompt(perspective, state.contract, inter, touched, old_id, checks, prior,
                                              integrity)
-        notify(f"launching {perspective} delta review of candidate {cand.short} "
+        notify(f"launching {review_name(perspective)} (delta) of candidate {cand.short} "
                f"({len(touched)} file(s) changed since {old_id[:12]})")
     else:
         prompt = prompts.review_prompt(perspective, state.contract, diff_text(ari.root, cand), checks, prior,
                                        first_pass=not again, integrity=integrity)
-        notify(f"launching {perspective} review of candidate {cand.short}")
+        notify(f"launching {review_name(perspective)} of candidate {cand.short}")
     snapshot.save(ari.root, run_dir, cand.candidate_id, cand.manifest)  # best effort: else the next is full
     # Registered before it works, so its review is attributed to its principal. No peer messages
     # go into a review prompt (coordination/launch.py).
@@ -249,7 +253,7 @@ def _run_review(ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, n
 
     def failed(why: str) -> None:
         ari.record_failed_review(run_id, perspective, why)
-        notify(f"{perspective} review failed: {why}")
+        notify(f"{review_name(perspective)} failed: {why}")
 
     if res.status != "COMPLETED":
         failed(res.error or res.status)
@@ -287,7 +291,7 @@ def _run_review(ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, n
         failed(f"invalid review result: {exc}")
         return None
     n = len(body.get("findings", []))
-    notify(f"{perspective} review {rid}: {n} finding(s)")
+    notify(f"{review_name(perspective)} {rid}: {n} finding(s)")
     coord.post_findings(name, body.get("findings", []))
     return rid
 
@@ -379,6 +383,75 @@ def launch_required_reviews(
     return [rid for p in pending if (rid := launch_review(ari, run_id, p, adapter, notify, coord))]
 
 
+# --------------------------------------------------------------- plan review
+PLAN_SEVERITIES = ("MAJOR", "MINOR", "ADVISORY")
+
+
+def review_plan(
+    ari: Ariadne, run_id: str, plan: str, adapter: Adapter, notify: Notify = _quiet, *, tag: str = "1"
+) -> dict[str, Any] | None:
+    """Have an independent, read-only reviewer critique a plan before it is built. Returns
+    {summary, concerns: [{severity, title, detail}]}, or None when the reviewer gave nothing usable.
+    Advice only: nothing is recorded as a review or a finding, only the session's cost."""
+    state = ari._running(run_id)
+    plan = str(plan or "").strip()
+    if not plan:
+        raise ContractError("there is no plan to review")
+    refuse_unaffordable(state, adapter, "a plan review")
+    task = f"plan-review-{tag}"
+    notify("a reviewer is reading the plan before any code is written")
+    res = adapter.run_agent(AgentRequest(
+        run_id, task, "aristotle", prompts.plan_review_prompt(state.contract, plan), ari.root, REVIEW_TIMEOUT_S,
+        read_only=True, should_stop=ari.stop_check(run_id),
+    ))
+    ari.record_session(run_id, task, "aristotle", res)
+    body = res.structured if res.status == "COMPLETED" else None
+    if not isinstance(body, dict) or not isinstance(body.get("concerns", []), list):
+        notify("plan review returned nothing usable")
+        return None
+    concerns = []
+    for c in body.get("concerns", []):
+        if not isinstance(c, dict) or not str(c.get("title", "")).strip():
+            continue
+        sev = str(c.get("severity", "")).upper()
+        concerns.append({"severity": sev if sev in PLAN_SEVERITIES else "MINOR",
+                         "title": str(c["title"]).strip(), "detail": str(c.get("detail", "")).strip()})
+    return {"summary": str(body.get("summary", "")), "concerns": concerns}
+
+
+def plan_feedback(review: dict[str, Any] | None) -> list[str]:
+    if not review or not review["concerns"]:
+        return []
+    return ["Before you build: a reviewer read your plan and raised these. Change the plan where they are right:"] + [
+        f"[{c['severity']}] {c['title']}" + (f": {c['detail']}" if c["detail"] else "") for c in review["concerns"]
+    ]
+
+
+def plan_round(ari: Ariadne, run_id: str, adapter: Adapter, notify: Notify = _quiet) -> list[str]:
+    """The Builder plans (read-only), a reviewer critiques it; the critique becomes round 1's feedback.
+    A failure anywhere here only means building without a reviewed plan."""
+    state = ari._running(run_id)
+    try:
+        refuse_unaffordable(state, adapter, "a design plan")
+        res = adapter.run_agent(AgentRequest(
+            run_id, "design-plan-1", "brunel", prompts.design_plan_prompt(prompts.builder_view(state)), ari.root,
+            REVIEW_TIMEOUT_S, read_only=True, should_stop=ari.stop_check(run_id),
+        ))
+        ari.record_session(run_id, "design-plan-1", "brunel", res)
+        plan = (res.structured or {}).get("plan") if res.status == "COMPLETED" else None
+        if not isinstance(plan, str) or not plan.strip():
+            notify("the builder gave no plan; building without a plan review")
+            return []
+        review = review_plan(ari, run_id, plan, adapter, notify)
+    except (DaedalusError, OSError) as exc:
+        notify(f"plan review skipped: {exc}")
+        return []
+    lines = plan_feedback(review)
+    if lines:
+        notify(f"plan review: {len(lines) - 1} concern(s) for the builder")
+    return lines
+
+
 # --------------------------------------------------------------------- build
 def build_round(
     ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, feedback: list[str], notify: Notify = _quiet,
@@ -421,7 +494,7 @@ def _run_build(ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, feedb
                 run_id,
                 task_id,
                 "brunel",
-                prompts.builder_prompt(state.contract, feedback, round_no, runnable, skipped),
+                prompts.builder_prompt(prompts.builder_view(state), feedback, round_no, runnable, skipped),
                 ari.root,
                 BUILD_TIMEOUT_S,
                 should_stop=ari.stop_check(run_id),
@@ -528,7 +601,7 @@ def fan_out_round(
     notify(f"round {round_no}: Brunel is planning up to {cap} parallel packages")
     before = ari.capture(state).candidate_id
     plan_req = AgentRequest(
-        run_id, f"plan-{round_no}", "brunel", prompts.plan_prompt(state.contract, cap), ari.root,
+        run_id, f"plan-{round_no}", "brunel", prompts.plan_prompt(prompts.builder_view(state), cap), ari.root,
         REVIEW_TIMEOUT_S, read_only=True, should_stop=ari.stop_check(run_id),
     )
     try:
@@ -619,7 +692,7 @@ def fan_out_round(
                     finish(tid, AgentResult("FAILED", error="no isolated workspace"), integrate=False)
                     continue
                 req = coord.prepare(AgentRequest(
-                    run_id, tid, "brunel", prompts.worker_prompt(state.contract, w.package, runnable, skipped),
+                    run_id, tid, "brunel", prompts.worker_prompt(prompts.builder_view(state), w.package, runnable, skipped),
                     Path(w.workspace), BUILD_TIMEOUT_S, should_stop=stop, run_commands=runnable,
                 ), names[tid])
                 running[pool.submit(adapter.run_agent, req)] = tid
@@ -706,6 +779,8 @@ def drive(
     accepted_before_followup: Any = None  # the acceptable candidate a follow-up round started from
     followup_round = 0
     coord = Coordinator(ari, run_id, notify)  # coordination settings are fixed for the whole drive
+    if ari.config().plan_review and ari.state(run_id).contract.budget.max_workers <= 1:
+        feedback = plan_round(ari, run_id, adapter, notify)  # round 1 builds against a reviewed plan
     for round_no in range(1, max_rounds + 1):
         if ari.state(run_id).execution is not ExecutionState.RUNNING:
             break  # cancelled (or finished) elsewhere: no further rounds
@@ -836,7 +911,13 @@ def followup_feedback(findings: list[Any]) -> list[str]:
     )
     return [head] + [
         f"{f.finding_id} [{f.severity.value}] {f.title}. {f.required_change}".strip() for f in findings
-    ]
+    ] + [WORKLIST_HINT]
+
+
+WORKLIST_HINT = (
+    "`daedalus findings` lists these. Answer each one: `daedalus findings answer F1 --fixed \"what changed\"` "
+    "(the re-review checks the claim) or `--dispute \"evidence\"` (it goes to arbitration)."
+)
 
 
 def left_open_note(decision: Decision, rounds: int) -> str:

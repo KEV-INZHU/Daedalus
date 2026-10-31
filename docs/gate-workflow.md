@@ -60,10 +60,11 @@ as you would out of commit messages. Set `harness: {auto_start: false}` to open 
 | Toggle   | `daedalus on` / `daedalus off`, `init`    | Hooks consult the gate; the core pins policy per run    |
 | Contract | `daedalus start "goal" -c "criterion"`    | Versioned contract, scope, required checks, budget      |
 | Status   | `daedalus status`                         | Full state machine, evidence, risk floors, authorization |
+| Next     | `daedalus next`                           | One line: what the run needs now, and from whom (agent, Daedalus, or you) |
 
 Everything else stays out of the way until it matters: `daedalus log` and
 `daedalus audit` for the hash-chained audit trail, `daedalus metrics` for
-acceptance rate, rework, cost and latency across runs, plus a few human-only decisions:
+acceptance rate, rework, cost, latency and escaped defects across runs, plus a few human-only decisions:
 
 ```bash
 daedalus approve merge          # scoped to this candidate + contract version, expiring, single-use
@@ -74,7 +75,35 @@ daedalus risk-exception low --rationale "docs-only change under auth/"
 
 Human-only commands refuse to run inside an agent session or without a terminal.
 
-If a review finding looks wrong, dispute it rather than arguing in circles:
-`daedalus dispute F2 --reason "..."`, then `daedalus arbitrate F2` has Plato rule on it.
+When a bug turns up in work the gate accepted, say so in the fixing commit with a trailer naming
+the run (its full id, or at least 8 characters of it):
+
+```
+Fix the off-by-one in the retry loop
+
+Fixes-Run: 78da1e9ed398
+```
+
+`daedalus metrics` counts those runs as **escaped defects**: accepted work that needed fixing
+afterwards. A fix only counts if it comes after the run's accepted commit (its `Daedalus-Run:`
+trailer). The escape rate is the honest measure of whether the gate improves quality.
+
+A run the harness opens starts from your request as typed, with one generic criterion. The agent
+proposes a sharper contract, and you apply it with one command:
+
+```bash
+daedalus propose "Add a per-run coordination channel" -c "a late joiner sees every decision"   # agent
+daedalus confirm            # you: applies it as a contract amendment (or `--reject --reason ...`)
+```
+
+A pending proposal shows in `daedalus status`, and in the stop hook's "Needs you" list. Proposing
+changes nothing. Confirming is an amendment, so evidence and reviews from before it are stale.
+
+Review findings are a worklist. `daedalus findings` lists the open ones, and the agent answers
+each: `daedalus findings answer F2 --fixed "what changed"` puts its note in front of the next
+review of that perspective, which resolves the finding only if the change bears it out. If a
+finding looks wrong, dispute it rather than arguing in circles:
+`daedalus findings answer F2 --dispute "evidence"` (or `daedalus dispute F2 --reason "..."`),
+then `daedalus arbitrate F2` has Plato rule on it.
 By default the ruling is advice for a human. Set `arbitration_resolves_findings: true` under
 `policy:` to let an overrule resolve the finding.

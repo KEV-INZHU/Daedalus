@@ -27,6 +27,10 @@ state, so a shipped commit is always a fast-forward of what was accepted.
 
 from __future__ import annotations
 
+import subprocess
+
+import shutil
+
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -43,6 +47,7 @@ from daedalus.core.errors import DaedalusError, IllegalTransition
 from daedalus.core.state_machine import Disposition, ExecutionState
 from daedalus.factory import gitops
 from daedalus.factory.ledger import (
+    LINE_PUSHED,
     LINE_STARTED,
     LINE_STOPPED,
     OUTCOME,
@@ -74,6 +79,11 @@ class FactoryConfig:
     rounds: int = 3
     andon: int = 3  # consecutive failed orders that stop the line
     budget: float | None = None  # spend cap for one `factory run`, across orders
+    # Optional ship step: after a line ships orders, push the integration branch to this remote and,
+    # with `pull_request`, open a pull request into `base` (needs the `gh` CLI). Off by default.
+    push: str | None = None
+    pull_request: bool = False
+    base: str | None = None
 
 
 def factory_config(root: Any) -> FactoryConfig:
@@ -87,7 +97,7 @@ def factory_config(root: Any) -> FactoryConfig:
     raw = cfg.get("factory") or {} if isinstance(cfg, dict) else {}
     if not isinstance(raw, dict):
         raise FactoryError("`factory:` in .daedalus.yml must be a mapping")
-    unknown = set(raw) - {"orders", "branch_prefix", "mode", "rounds", "andon", "budget"}
+    unknown = set(raw) - {"orders", "branch_prefix", "mode", "rounds", "andon", "budget", "ship"}
     if unknown:
         raise FactoryError(f"unknown `factory:` keys: {sorted(unknown)}")
     mode = raw.get("mode")
@@ -96,8 +106,18 @@ def factory_config(root: Any) -> FactoryConfig:
     orders = str(raw.get("orders", "factory/orders")).strip("/")
     if not orders or orders.startswith(".") or ".." in orders.split("/"):
         raise FactoryError("factory.orders must be a directory inside the repository")
+    ship = raw.get("ship") or {}
+    if not isinstance(ship, dict) or set(ship) - {"push", "pull_request", "base"}:
+        raise FactoryError("factory.ship must be a mapping with `push` (a remote), `pull_request` and `base`")
+    if ship.get("pull_request") and not ship.get("push"):
+        raise FactoryError("factory.ship.pull_request needs factory.ship.push (the branch must be on the remote)")
+    if not isinstance(ship.get("pull_request", False), bool):
+        raise FactoryError("factory.ship.pull_request must be true or false")
     try:
         out = FactoryConfig(
+            push=str(ship["push"]) if ship.get("push") else None,
+            pull_request=bool(ship.get("pull_request", False)),
+            base=str(ship["base"]) if ship.get("base") else None,
             orders_dir=orders,
             branch_prefix=str(raw.get("branch_prefix", "factory/")),
             mode=mode,
@@ -217,11 +237,43 @@ class Line:
         self.notify(f"line started on {self.into}")
         try:
             self._loop(report)
+            if report.shipped and self.cfg.push:
+                self._push_shipped(report)
         finally:
             self.ledger.append(
                 LINE_STOPPED, reason=report.stopped or "interrupted", shipped=report.shipped, cost=report.cost
             )
         return report
+
+    def _push_shipped(self, report: LineReport) -> None:
+        """Push the integration branch, and open a pull request when configured. A failure here is
+        reported and never undoes what shipped: the orders are on the integration branch either way."""
+        remote, branch = self.cfg.push or "", self.into or ""
+        r = subprocess.run(["git", "-C", str(self.root), "push", "-u", remote, branch],
+                           capture_output=True, text=True, check=False)
+        if r.returncode != 0:
+            report.notes.append(f"push to {remote} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+            self.notify(report.notes[-1])
+            return
+        pr = ""
+        if self.cfg.pull_request:
+            base = self.cfg.base or "main"
+            if shutil.which("gh") is None:
+                report.notes.append("pushed; no pull request opened: the `gh` CLI is not installed")
+            else:
+                body = "Orders shipped by the Daedalus factory line:\n\n" + "\n".join(f"- {o}" for o in report.shipped)
+                p = subprocess.run(
+                    ["gh", "pr", "create", "--head", branch, "--base", base,
+                     "--title", f"Factory: {len(report.shipped)} order(s) from {branch}", "--body", body],
+                    cwd=str(self.root), capture_output=True, text=True, check=False,
+                )
+                pr = p.stdout.strip() if p.returncode == 0 else ""
+                if not pr:
+                    report.notes.append(f"pushed; opening a pull request failed: {(p.stderr or p.stdout).strip()[-300:]}")
+        self.ledger.append(LINE_PUSHED, into=branch, remote=remote, shipped=report.shipped, pull_request=pr or None)
+        msg = f"pushed {branch} to {remote}" + (f"; pull request {pr}" if pr else "")
+        report.notes.append(msg)
+        self.notify(msg)
 
     def _loop(self, report: LineReport) -> None:
         consecutive = 0

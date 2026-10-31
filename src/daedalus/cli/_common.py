@@ -22,23 +22,7 @@ from daedalus.core.contracts import bind_text_criteria
 from daedalus.core.errors import AuthorizationError, DaedalusError
 from daedalus.core.state_machine import Disposition
 
-# Plain-words names for the roles, for display only. Persisted ids, reason codes and event payloads
-# keep the short ids: the audit log refers to them.
-DISPLAY_NAMES = {
-    "aristotle": "quality review (Aristotle)",
-    "socrates": "validation review (Socrates)",
-    "james": "functionality review (James)",
-    "mozi": "simplicity review (Mozi)",
-    "plato": "arbiter (Plato)",
-    "brunel": "builder (Brunel)",
-    "vitruvius": "planner (Vitruvius)",
-}
-
-
-def display_name(role: str) -> str:
-    """How a person reads a role id; an id with no entry (a custom review) is shown as it is."""
-    return DISPLAY_NAMES.get(role, role)
-
+from daedalus.core.names import DISPLAY_NAMES, display_name  # noqa: E402,F401  (re-exported)
 
 SEV_ABBR = {"BLOCKER": "B", "MAJOR": "M", "MINOR": "m", "ADVISORY": "A"}
 EXIT = {Disposition.ACCEPTED: 0, Disposition.BLOCKED: 1, Disposition.REJECTED: 3, Disposition.CANCELLED: 4}

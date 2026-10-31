@@ -353,6 +353,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"Daedalus gate: {'ON' if enabled else 'OFF'} · run {rid} ({state.mode} mode) · {state.execution.value}"
         )
         _print(f"Objective: {state.contract.objective}  [contract v{state.contract.contract_version}]")
+        if state.pending_proposal is not None:
+            from daedalus.cli.proposals import show_proposal
+
+            for line in show_proposal(state.pending_proposal):
+                _print(line)
+            _print("  Needs you: `daedalus confirm` to apply it, or `daedalus confirm --reject`.")
         for line in render_decision(d, verbose=not args.brief, root=ari.root):
             _print(line)
         return 0

@@ -42,6 +42,46 @@ policy:                     # optional: override any key of the default policy
 
 `daedalus policy --default` prints the full default policy.
 
+### Test strength (mutation)
+
+The gate is only as good as the tests it runs. `daedalus mutate` checks them: it breaks the changed
+Python lines on purpose, one small break at a time (`==` to `!=`, `and` to `or`, `+` to `-`,
+`return x` to `return None`, and so on), and runs your tests against each break in a throwaway
+copy of the tree. A break the tests do not notice "survives", and is listed with its file and line:
+
+```yaml
+checks:
+  tests: python -m pytest -q
+  mutation: {command: [daedalus, mutate, --, python, -m, pytest, -q, -x], mandatory: false, cache: false}
+```
+
+Changed lines are those since the run's base: Daedalus gives every check `DAEDALUS_BASE_REVISION`.
+`cache: false` matters, because the result depends on the base, not only on the tree. The check
+fails below `--min-score` (default 0.8), and exits 2 if the tests fail before any break. Use
+`--max` (default 30 mutants) and `--timeout` (seconds per test run) to bound the cost. Test files
+are never mutated, and the working tree is never touched.
+
+### Holdout checks
+
+A check with `holdout: true` gates acceptance like any other, but the builder never sees it:
+
+```yaml
+checks:
+  tests: python -m pytest -q
+  acceptance: {command: [python, -m, pytest, -q, ../holdout-tests], holdout: true}
+```
+
+Builder, worker and planner prompts leave it out of the required checks, and say only that a
+criterion is "verified by a held-out check". It is never granted as a command the builder may
+run. When it fails, the builder is told that a holdout check failed, without its name, output or
+log path. You see which check it was in `daedalus status` (`check:<id>`), and the output in
+`daedalus log`.
+
+Keep the held-out tests **outside the repository** (as above). An agent can read anything in the
+repository, `.daedalus.yml` included, so a holdout whose tests sit next to the code hides less.
+Launched builders work in the repository (or a worktree) and cannot browse outside it. An
+interactive session can, if you allow it.
+
 Budgets keep two currencies apart. `max_cost` caps everything a run is charged, including
 API-equivalent estimates from subscription sessions; `max_cash` caps money actually billed and
 defaults to 0. Like `max_cost`, an exhausted cash budget turns a run that still has unmet
