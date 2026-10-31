@@ -8,10 +8,52 @@ lifecycle, reviews and acceptance. A message on the bus never changes run state.
 Code: `daedalus.coordination` (`bus.py`, `channel.py`, `identity.py`, `surface.py`) and the
 `daedalus bus` command.
 
-**This is a library API that callers opt into.** Daedalus's own launch paths (`daedalus run`,
-launched reviews) do not yet mint names or attach the channel. An orchestrator that wants
-coordination calls `Channel.spawn` for each subagent before it works, and `surface.attach` on the
-request before handing it to the adapter.
+## On by default
+
+`daedalus run` coordinates the agents it launches (`coordination/launch.py`). Turn it off, or
+point it at another bus, in `.daedalus.yml`:
+
+```yaml
+coordination: false                       # off
+coordination: {bus_dir: ../shared-bus}    # on, with a bus shared with other tools
+```
+
+`$DAEDALUS_BUS_DIR` wins over `bus_dir`, and the default is `.daedalus/bus`. A relative path is
+taken from the repository root, and sessions get the absolute path. The bus must be under
+`.daedalus/` or outside the repository. Anywhere else its files would be part of every candidate,
+so each message would change the tree under review. A configured path there is a config error,
+and an environment path there turns coordination off for the run.
+
+The setting is read once when a run's drive starts, so editing it mid-run changes nothing until the
+next run. It is not policy: the bus never decides acceptance, so it is not part of the policy hash
+a run pins.
+
+| Launch | Name (role → principal) | What the session gets |
+|--------|-------------------------|-----------------------|
+| In-place builder, each round | `brunel` → `agent:brunel` | Run context and unread messages in its prompt, the `daedalus bus` environment, and a grant to run `daedalus bus` |
+| Parallel worker | `brunel` → `agent:worker:<task>` | The same, from inside its worktree (`DAEDALUS_REPO` points the command at the run's repository) |
+| Reviewer | `<perspective>` → `agent:reviewer:<perspective>` | Nothing from the bus. Its findings are posted once its review is recorded. |
+| Planner, arbiter | not registered | Nothing |
+
+Reviewers get no peer messages, for two reasons. A builder should not be able to talk to the
+reviewer judging its work, and a cached review's key has to keep meaning the same prompt. Every
+name is retired when its session ends, which drops its subscription.
+
+The `daedalus bus` grant is separate from `run_commands`. `run_commands` holds exactly the
+trusted checks policy lets a builder run (`builder_runs_checks`), and coordination is not a check.
+A read-only session never gets the grant.
+
+Inside an agent session (`DAEDALUS_AGENT_NAME` set), `daedalus bus` acts only as that agent, on its
+own run, repository and bus. `--as`, `--run`, `-C` and `--bus-dir` may not point anywhere else, and
+`reconcile` and `expire`, which touch every agent's delivery, are refused.
+
+A coordination failure (an unwritable bus, a refused registration) never fails a run. It is
+reported, and that one launch goes ahead without coordination; later launches try again. A name
+that was registered is always retired, even if its launch could not be prepared. Parallel workers
+are retired as each one finishes.
+
+The pieces are also a library: `Channel.spawn` registers a subagent, and `surface.attach`
+prepares its launch request.
 
 ## Layout
 

@@ -125,7 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--version", action="version", version=f"daedalus {__version__}")
-    p.add_argument("-C", "--dir", default=".", help="repository directory (default: current)")
+    # Default None so a command can tell `-C .` from no `-C` at all; `main` turns None into ".".
+    p.add_argument("-C", "--dir", default=None, help="repository directory (default: current)")
     # The flat list argparse would print is replaced by the grouped one in the epilog.
     sub = p.add_subparsers(dest="cmd", required=True, metavar="command", help=argparse.SUPPRESS)
     for mod in _command_modules():
@@ -150,6 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         try:
             args = build_parser().parse_args(argv)
+            args.dir_given = args.dir is not None
+            if args.dir is None:
+                args.dir = "."
         except SystemExit as exc:
             # `--help` and `--version` exit with their output still buffered; a usage
             # error keeps its own status even when stdout has gone away.

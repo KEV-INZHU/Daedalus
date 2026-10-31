@@ -34,6 +34,7 @@ adapter:                    # used by `daedalus run` / `daedalus review`
 checks:
   tests: python -m pytest -q
   typecheck: {command: [mypy, src]}
+coordination: true          # launched agents coordinate over a message bus (default on; docs/coordination.md)
 policy:                     # optional: override any key of the default policy
   path_floors:
     - {name: billing, patterns: ["src/billing/**"], tier: high}
