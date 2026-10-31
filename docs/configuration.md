@@ -5,6 +5,7 @@
 | Mode            | Adds                                    | When                                   |
 |-----------------|-----------------------------------------|----------------------------------------|
 | `gate` (default)| Builder + trusted checks + predicate    | Most tasks                             |
+| `lite`          | + one short, cheap review (three questions, Haiku on Claude Code) | Every change, at pennies a review |
 | `review`        | + one focused reviewer (Aristotle)      | When you want a second look            |
 | `council`       | + Socrates, Mozi, Aristotle, James      | High-stakes work                       |
 
@@ -16,6 +17,11 @@ and set `budget: {max_workers: 2}` in the run's contract file (`daedalus run --c
 Risk floors apply in every mode. Touching `**/auth/**`, migrations, CI or
 lockfiles raises the tier, and the tier sets the reviews and approvals that are
 mandatory. A mode can add requirements but can never remove them.
+
+Lite mode is the cheap way in: one review per change that answers three questions (does it meet the
+contract, what does it break, would the tests catch it), with a stated confidence on each finding. It runs on
+`lite: {model: ...}` if set, else Haiku with the `claude-code` adapter, else the adapter's review model.
+Risk floors still apply: a review the tier requires (auth, migrations, weakened tests ...) is always the full one.
 
 By default the `high` tier requires three independent reviews and no human approval; `critical` also
 requires a `merge` approval. To put a human on high-tier merges, add `approvals: [merge]` to the `high` entry of
@@ -35,12 +41,24 @@ checks:
   tests: python -m pytest -q
   typecheck: {command: [mypy, src]}
 coordination: true          # launched agents coordinate over a message bus (default on; docs/coordination.md)
+compare_base: true          # a failing required check is re-run once on the base: "was it already failing?"
+lite: {model: haiku}        # the model lite-mode reviews run on (optional)
 policy:                     # optional: override any key of the default policy
   path_floors:
     - {name: billing, patterns: ["src/billing/**"], tier: high}
 ```
 
 `daedalus policy --default` prints the full default policy.
+
+### Was it already failing?
+
+When a required check fails, Daedalus runs it once more on a clean checkout of the run's base revision (a
+temporary git worktree, with the checkout's `src/` first on `PYTHONPATH`). If it fails there too, the block
+message and every review prompt say so: the change probably did not cause it. The check must still pass before
+acceptance; this only stops reviewers and builders from blaming the change for an old failure. Results are kept
+per base revision and check definition, so runs that share a base pay once. A clean checkout has no untracked
+files (an `.env`, installed node modules), so a check that needs them may fail there for that reason alone.
+`compare_base: false` turns it off.
 
 ### Test strength (mutation)
 

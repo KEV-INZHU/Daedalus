@@ -157,4 +157,35 @@ def verify(ari: Ariadne, run_id: str, *, only: set[str] | None = None) -> list[E
                 produced.append(rec)
                 if not (trusted and result != "PASS" and _retryable(defn, out)):
                     break
+        if trusted:
+            compare_with_base(ari, run_id, produced, log_dir)
     return produced
+
+
+def compare_with_base(ari: Ariadne, run_id: str, produced: list[EvidenceRecord], log_dir) -> None:
+    """For each required check that just failed, its result on a clean checkout of the base revision
+    (verification/baseline.py), recorded once per base and check definition. Advice only."""
+    from daedalus.verification.baseline import run_on_base
+
+    try:
+        if not ari.config().compare_base:
+            return
+    except Exception:  # noqa: BLE001 — an unreadable config already fails elsewhere; this is advice
+        return
+    state = ari.state(run_id)
+    base = state.contract.base_revision
+    if not base:
+        return
+    final = {r.check_id: r for r in produced}  # the last attempt of each check
+    for check_id, rec in final.items():
+        defn = state.policy.checks.get(check_id)
+        if rec.result != "FAIL" or not rec.mandatory or defn is None or defn.holdout:
+            continue
+        seen = state.base_checks.get(check_id)
+        if seen and seen.get("base_revision") == base and seen.get("definition_hash") == defn.definition_hash:
+            continue
+        res = run_on_base(ari.root, base, defn, log_dir, ari.state_dir / "baseline")
+        ari._append(run_id, ev.BASE_CHECKED, SYSTEM, {
+            "check_id": check_id, "base_revision": base, "definition_hash": defn.definition_hash,
+            "result": res["result"], "exit_code": res.get("exit_code"), "error": res.get("error"),
+        })

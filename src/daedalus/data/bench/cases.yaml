@@ -1,0 +1,304 @@
+# Planted-bug benchmark for `daedalus bench`. Each case is a base tree (`before`) and a change
+# (`after`) with a contract. `bug` names the defect a reviewer should catch: the file, a substring of
+# the buggy line (`line`), and words a finding about it is likely to use. A case with `bug: null` is a
+# clean control: any MAJOR-or-worse finding on it is a false alarm.
+version: 1
+cases:
+  - name: pagination-off-by-one
+    objective: Add pagination to list_items
+    criteria: ["page 1 returns the first `size` items", "the last page returns the remainder"]
+    before:
+      src/items.py: |
+        def list_items(items):
+            return list(items)
+    after:
+      src/items.py: |
+        def list_items(items, page=1, size=10):
+            """Return one page of items; pages start at 1."""
+            if page < 1 or size < 1:
+                raise ValueError("page and size must be positive")
+            start = page * size
+            return list(items)[start:start + size]
+    bug: {file: src/items.py, line: "start = page * size", words: [off-by-one, off by one, "page - 1", "(page - 1)", first page]}
+
+  - name: integrity-error-counts-as-pass
+    objective: Close the trading day only when the ledger integrity check passes
+    criteria: ["a failed or crashed integrity check never closes the day"]
+    before:
+      src/close_day.py: |
+        def close_day(ledger, check):
+            ledger.close()
+    after:
+      src/close_day.py: |
+        import logging
+
+        log = logging.getLogger(__name__)
+
+
+        def integrity_ok(ledger, check) -> bool:
+            try:
+                return bool(check(ledger))
+            except Exception:
+                log.warning("integrity check crashed")
+                return True
+
+
+        def close_day(ledger, check):
+            if not integrity_ok(ledger, check):
+                raise RuntimeError("integrity check failed; day left open")
+            ledger.close()
+    bug: {file: src/close_day.py, line: "return True", words: ["return true", fail open, fails open, crashed check, treated as a pass, counts as a pass]}
+
+  - name: alert-leaks-prices
+    objective: Send a crash alert to the team bus
+    criteria: ["alerts carry counts only, never prices or positions (counts-only rule)"]
+    before:
+      src/alerts.py: |
+        def send(bus, text):
+            bus.post(text)
+    after:
+      src/alerts.py: |
+        def send(bus, text):
+            bus.post(text)
+
+
+        def crash_alert(bus, error, open_orders):
+            lines = [f"bot crashed: {type(error).__name__}", f"{len(open_orders)} open orders"]
+            lines += [f"{o['symbol']} @ {o['price']}" for o in open_orders[:3]]
+            send(bus, "\n".join(lines))
+    bug: {file: src/alerts.py, line: "o['price']", words: [price, counts-only, counts only]}
+
+  - name: test-run-posts-live
+    objective: Let test runs post to a sandbox bus instead of the live one
+    criteria: ["unless BOT_ENV is exactly 'live', messages go to the sandbox bus"]
+    before:
+      src/bus.py: |
+        LIVE_URL = "https://bus.example/live"
+
+
+        def target():
+            return LIVE_URL
+    after:
+      src/bus.py: |
+        import os
+
+        LIVE_URL = "https://bus.example/live"
+        SANDBOX_URL = "https://bus.example/sandbox"
+
+
+        def target():
+            if os.environ.get("BOT_ENV", "live") == "test":
+                return SANDBOX_URL
+            return LIVE_URL
+    bug: {file: src/bus.py, line: 'os.environ.get("BOT_ENV", "live")', words: [defaults to live, default of "live", unset, not set, missing BOT_ENV]}
+
+  - name: check-after-early-exit
+    objective: Skip forecasting inside the protected window, and validate every question first
+    criteria: ["every question is validated, including those in the protected window", "no forecast is posted in the window"]
+    before:
+      src/forecast.py: |
+        def handle(q, post):
+            post(q["id"], 0.5)
+    after:
+      src/forecast.py: |
+        def in_window(q):
+            return q.get("hours_to_close", 99) < 2
+
+
+        def validate(q):
+            if "id" not in q:
+                raise ValueError("question has no id")
+
+
+        def handle(q, post):
+            if in_window(q):
+                return None
+            validate(q)
+            post(q["id"], 0.5)
+    bug: {file: src/forecast.py, line: "    validate(q)", words: [before the window, skips validation, skipped validation, never validated, not validated, validation is skipped, after the early return]}
+
+  - name: bad-cost-crashes
+    objective: Sum the cost column of a usage report
+    criteria: ["rows with a missing or malformed cost are skipped and counted, never crash the run"]
+    before:
+      src/costs.py: |
+        def total(rows):
+            return 0.0
+    after:
+      src/costs.py: |
+        def total(rows):
+            """(sum of costs, number of rows skipped)."""
+            skipped = 0
+            s = 0.0
+            for row in rows:
+                if "cost" not in row:
+                    skipped += 1
+                    continue
+                s += float(row["cost"])
+            return s, skipped
+    bug: {file: src/costs.py, line: 'float(row["cost"])', words: [malformed, ValueError, non-numeric, invalid cost]}
+
+  - name: mutable-default
+    objective: Collect tags for a post
+    criteria: ["each call starts from no tags unless tags are passed in"]
+    before:
+      src/tags.py: |
+        def tags_for(post):
+            return []
+    after:
+      src/tags.py: |
+        def tags_for(post, tags=[]):
+            for word in post.split():
+                if word.startswith("#"):
+                    tags.append(word[1:])
+            return tags
+    bug: {file: src/tags.py, line: "tags=[]", words: [mutable default, shared between calls, accumulat, persists across calls]}
+
+  - name: upload-path-traversal
+    objective: Save uploaded files under the uploads directory
+    criteria: ["a saved file always stays inside uploads/"]
+    before:
+      src/uploads.py: |
+        UPLOADS = "uploads"
+    after:
+      src/uploads.py: |
+        import os
+
+        UPLOADS = "uploads"
+
+
+        def save(name, data):
+            path = os.path.join(UPLOADS, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data)
+            return path
+    bug: {file: src/uploads.py, line: "os.path.join(UPLOADS, name)", words: [traversal, "..", absolute path, escape, outside uploads]}
+
+  - name: naive-expiry
+    objective: Expire API tokens after their expiry time (stored as UTC)
+    criteria: ["a token whose UTC expiry has passed is rejected"]
+    before:
+      src/tokens.py: |
+        def valid(token):
+            return True
+    after:
+      src/tokens.py: |
+        from datetime import datetime
+
+
+        def valid(token):
+            """token["expires"] is a naive datetime in UTC."""
+            return datetime.now() < token["expires"]
+    bug: {file: src/tokens.py, line: "datetime.now()", words: [utc, timezone, time zone, local time, utcnow]}
+
+  - name: unanchored-validation
+    objective: Validate usernames before using them in a shell command
+    criteria: ["only lowercase letters and digits are accepted"]
+    before:
+      src/users.py: |
+        import subprocess
+
+
+        def make_home(name):
+            subprocess.run(f"mkdir -p /home/{name}", shell=True, check=True)
+    after:
+      src/users.py: |
+        import re
+        import subprocess
+
+        NAME = re.compile(r"[a-z0-9]+")
+
+
+        def make_home(name):
+            if not NAME.match(name):
+                raise ValueError("bad username")
+            subprocess.run(f"mkdir -p /home/{name}", shell=True, check=True)
+    bug: {file: src/users.py, line: "NAME.match(name)", words: [anchor, fullmatch, injection, trailing]}
+
+  - name: clean-helper
+    objective: Add a helper that clamps a value into a range
+    criteria: ["values below lo become lo, above hi become hi", "lo > hi raises ValueError"]
+    before:
+      src/mathx.py: |
+        def double(x):
+            return 2 * x
+    after:
+      src/mathx.py: |
+        def double(x):
+            return 2 * x
+
+
+        def clamp(x, lo, hi):
+            if lo > hi:
+                raise ValueError("lo must not exceed hi")
+            return max(lo, min(x, hi))
+    bug: null
+
+  - name: clean-rename
+    objective: Rename the confusing variable in the average function, no behaviour change
+    criteria: ["average returns the same results as before"]
+    before:
+      src/stats.py: |
+        def average(xs):
+            if not xs:
+                return 0.0
+            t = 0.0
+            for x in xs:
+                t += x
+            return t / len(xs)
+    after:
+      src/stats.py: |
+        def average(xs):
+            if not xs:
+                return 0.0
+            total = 0.0
+            for x in xs:
+                total += x
+            return total / len(xs)
+    bug: null
+
+  - name: clean-bounded-retry
+    objective: Retry a flaky fetch up to three times
+    criteria: ["at most three attempts", "the last error is raised if all fail"]
+    before:
+      src/fetch.py: |
+        def fetch(get, url):
+            return get(url)
+    after:
+      src/fetch.py: |
+        def fetch(get, url, attempts=3):
+            if attempts < 1:
+                raise ValueError("attempts must be at least 1")
+            last = None
+            for _ in range(attempts):
+                try:
+                    return get(url)
+                except ConnectionError as exc:
+                    last = exc
+            raise last
+    bug: null
+
+  - name: clean-anchored-validation
+    objective: Validate usernames before creating home directories
+    criteria: ["only lowercase letters and digits are accepted"]
+    before:
+      src/users.py: |
+        import os
+
+
+        def make_home(name):
+            os.makedirs(os.path.join("/home", name), exist_ok=True)
+    after:
+      src/users.py: |
+        import os
+        import re
+
+        NAME = re.compile(r"[a-z0-9]+")
+
+
+        def make_home(name):
+            if not NAME.fullmatch(name):
+                raise ValueError("bad username")
+            os.makedirs(os.path.join("/home", name), exist_ok=True)
+    bug: null

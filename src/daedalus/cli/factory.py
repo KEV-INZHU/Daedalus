@@ -258,7 +258,7 @@ def register(sub: Any) -> None:
     sp.add_argument("--scope", action="append", help="path glob the order may change (repeatable)")
     sp.add_argument("--depends-on", action="append", help="order that must ship first (repeatable)")
     sp.add_argument("--priority", type=int, default=0, help="higher runs first (default 0)")
-    sp.add_argument("--mode", choices=("gate", "review", "council"))
+    sp.add_argument("--mode", choices=("gate", "lite", "review", "council"))
     sp.add_argument("--rounds", type=int, help="build/verify/review rounds before parking")
     sp = add("plan", cmd_factory_plan, "have the planner break a large goal into draft work orders")
     sp.add_argument("goal")

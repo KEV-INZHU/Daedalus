@@ -309,4 +309,4 @@ def contract_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--scope", action="append", help="path glob the change may touch (repeatable)")
     sp.add_argument("--risk", help="declared risk tier (can only raise the computed tier)")
     sp.add_argument("--check", action="append", help="extra required check from policy (repeatable)")
-    sp.add_argument("--mode", choices=("gate", "review", "council"))
+    sp.add_argument("--mode", choices=("gate", "lite", "review", "council"))

@@ -42,6 +42,8 @@ REVIEW_FAILED = "review.failed"
 FINDING_RESOLVED = "finding.resolved"
 FINDING_DISPUTED = "finding.disputed"
 FINDING_ANSWERED = "finding.answered"  # the builder says what it changed; the re-review checks the claim
+BASE_CHECKED = "baseline.checked"  # a failed check, run once on a clean checkout of the base: advice only
+FINDING_JUDGED = "finding.judged"  # a person's verdict on whether a finding was real; scores reviewers, gates nothing
 ARBITRATION_RECORDED = "arbitration.recorded"
 ARBITRATION_FAILED = "arbitration.failed"
 BLOCKER_RAISED = "blocker.raised"
@@ -94,6 +96,12 @@ class Finding:
     disputes: list[dict[str, Any]] = field(default_factory=list)
     ruling: dict[str, Any] | None = None  # latest Plato ruling: decision, rationale, ...
     answers: list[dict[str, Any]] = field(default_factory=list)  # builder's "fixed" notes: by, note, at
+    # The reviewer's forecast that this finding is real and needs a change (0..1), its strongest reason
+    # it may be wrong, and a test that fails until it is fixed. Absent in older reviews.
+    confidence: float | None = None
+    against: str = ""
+    failing_test: str = ""
+    judgment: dict[str, Any] | None = None  # latest person's verdict: verdict (valid | invalid), note, by, at
 
 
 @dataclass
@@ -110,6 +118,10 @@ class Review:
     resolves: tuple[str, ...]
     scope: str = "full"  # full | delta (only the change since `delta_from` was reviewed)
     delta_from: str | None = None  # candidate id of the review this one extends
+    # The reviewer's forecast that a MAJOR-or-worse defect it did not report remains (0..1), and what
+    # it ran on. Absent in older reviews.
+    residual_risk: float | None = None
+    model: str | None = None
 
 
 @dataclass
@@ -151,6 +163,8 @@ class RunState:
     invalidated: dict[str, str] = field(default_factory=dict)
     checks_in_flight: dict[str, dict[str, Any]] = field(default_factory=dict)
     reviews: list[Review] = field(default_factory=list)
+    # check id -> its latest result on a clean checkout of the base revision (verification/baseline.py)
+    base_checks: dict[str, dict[str, Any]] = field(default_factory=dict)
     failed_reviews: list[dict[str, Any]] = field(default_factory=list)
     failed_arbitrations: list[dict[str, Any]] = field(default_factory=list)
     findings: dict[str, Finding] = field(default_factory=dict)
@@ -315,6 +329,8 @@ def _apply(s: RunState, ev: Event) -> None:
             resolves=tuple(r.get("resolves", ())),
             scope=r.get("scope", "full"),
             delta_from=r.get("delta_from"),
+            residual_risk=r.get("residual_risk"),
+            model=r.get("model"),
         )
         s.reviews.append(review)
         for f in r.get("findings", ()):
@@ -329,6 +345,9 @@ def _apply(s: RunState, ev: Event) -> None:
                 severity=Severity(f["severity"]),
                 required_change=f.get("required_change", ""),
                 verification=f.get("verification", ""),
+                confidence=f.get("confidence"),
+                against=f.get("against", ""),
+                failing_test=f.get("failing_test", ""),
             )
         for fid in review.resolves:
             if fid in s.findings and s.findings[fid].resolved_by is None:
@@ -339,6 +358,11 @@ def _apply(s: RunState, ev: Event) -> None:
         s.failed_reviews.append({**p, "at": ev.ts})
     elif t == FINDING_ANSWERED:
         s.findings[p["finding_id"]].answers.append({"by": ev.actor, "note": p["note"], "at": ev.ts})
+    elif t == BASE_CHECKED:
+        s.base_checks[p["check_id"]] = dict(p)
+    elif t == FINDING_JUDGED:
+        s.findings[p["finding_id"]].judgment = {"verdict": p["verdict"], "note": p.get("note", ""),
+                                                "by": ev.actor, "at": ev.ts}
     elif t == FINDING_DISPUTED:
         s.findings[p["finding_id"]].disputes.append({"by": ev.actor, "reason": p["reason"], "at": ev.ts})
     elif t == ARBITRATION_RECORDED:

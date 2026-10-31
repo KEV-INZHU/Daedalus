@@ -29,7 +29,7 @@ from typing import Any
 
 from daedalus.adapters.base import Adapter, AgentRequest, AgentResult, require
 from daedalus.coordination.launch import Coordinator
-from daedalus.core.acceptance import Decision
+from daedalus.core.acceptance import Decision, base_note_for, fix_aids
 from daedalus.core.errors import BudgetExhausted, ContractError, DaedalusError, IntegrationError
 from daedalus.core.names import review_name
 from daedalus.core.state_machine import Disposition, ExecutionState, Severity, WorkerState
@@ -130,7 +130,8 @@ def refuse_unaffordable(state: Any, adapter: Adapter, what: str) -> None:
         )
 
 
-def _review_key(ari: Ariadne, state: Any, perspective: str, adapter: Adapter) -> tuple[str, str, dict] | None:
+def _review_key(ari: Ariadne, state: Any, perspective: str, adapter: Adapter, track: str = "",
+                lite: bool = False) -> tuple[str, str, dict] | None:
     """(candidate id, cache key, key inputs) for a first-pass full review of the current tree, or None
     if it cannot be computed: an unreadable tree, or an adapter with no explicitly configured model
     (the key could not name what ran)."""
@@ -140,7 +141,7 @@ def _review_key(ari: Ariadne, state: Any, perspective: str, adapter: Adapter) ->
     if not cand.complete:
         return None  # an unreadable file means the hash does not describe the tree
     inputs = review_inputs(perspective, state.policy_hash, state.contract,
-                           prompts.review_template_hash(perspective), adapter, first_pass=True)
+                           prompts.review_template_hash(perspective, track, lite), adapter, first_pass=True)
     return cand.candidate_id, review_key_from(cand.candidate_id, inputs), inputs
 
 
@@ -167,7 +168,8 @@ def _reuse_review(ari: Ariadne, state: Any, perspective: str, keyed: tuple[str, 
         rid = ari.submit_review(
             run_id, reviewer=reviewer, perspective=perspective, summary=r.get("summary", ""),
             findings=findings, source="launched", exposed_to=(), candidate_id=cand.candidate_id,
-            extra={"cache_key": key, "cache_inputs": inputs, "duration_s": source.duration_s, "cost": source.cost,
+            residual_risk=r.get("residual_risk"),
+            extra={**({"model": r["model"]} if r.get("model") else {}), "cache_key": key, "cache_inputs": inputs, "duration_s": source.duration_s, "cost": source.cost,
                    "cost_basis": source.basis, "reused_from": source.to_dict(key)},
         )
     except (ContractError, DaedalusError):
@@ -175,6 +177,49 @@ def _reuse_review(ari: Ariadne, state: Any, perspective: str, keyed: tuple[str, 
     notify(f"{review_name(perspective)} reused from run {source.run_id} (event {source.seq}): "
            f"same candidate, contract, policy, prompt and model")
     return rid
+
+
+def is_lite(ari: Ariadne, state: Any, perspective: str) -> bool:
+    """A lite-mode review is short and cheap only where lite mode alone asked for it: a review the
+    risk tier requires (auth, migrations, weakened tests ...) is always the full one."""
+    if state.mode != "lite":
+        return False
+    tier = ari.evaluate(state.run_id).risk.effective_tier
+    return perspective not in state.policy.requirement(tier).reviews
+
+
+def lite_adapter(ari: Ariadne, adapter: Adapter) -> Adapter:
+    """The adapter with its review model swapped for `lite: {model}` if one is set and it has one;
+    Claude Code's lite reviews default to Haiku."""
+    try:
+        model = ari.config().lite_model
+    except (DaedalusError, ValueError, OSError):
+        return adapter
+    if model is None and getattr(adapter, "name", None) == "claude-code":
+        model = LITE_DEFAULT_MODEL
+    if not model or not hasattr(adapter, "review_model"):
+        return adapter
+    import copy
+
+    out = copy.copy(adapter)
+    out.review_model = model  # type: ignore[attr-defined]
+    return out
+
+
+LITE_DEFAULT_MODEL = "haiku"
+TRACK_RUNS = 200  # recent runs the track record reads
+
+
+def track_record_for(ari: Ariadne, perspective: str, run_id: str) -> str:
+    """The perspective's record in this repository (core/calibration.py), or "" when there is too
+    little to go on. Never fails a review."""
+    from daedalus.core.calibration import load_states, track_record
+
+    try:
+        states, _ = load_states(ari.store, TRACK_RUNS)
+        return track_record(states, perspective, exclude_run=run_id)
+    except Exception:  # noqa: BLE001 — advice for the prompt only
+        return ""
 
 
 def _well_formed(findings: Any) -> bool:
@@ -210,28 +255,32 @@ def launch_review(
     ]
     again = any(r.perspective == perspective and r.contract_version == state.contract.contract_version
                 for r in state.reviews)
+    lite = is_lite(ari, state, perspective)
+    if lite:
+        adapter = lite_adapter(ari, adapter)
+    track = track_record_for(ari, perspective, run_id)
     # Only a first-pass review, shown no earlier findings, is keyed: a re-review answers a different prompt.
     cache = ari.evidence_cache("reviews") if not (again or prior) else None
-    keyed = _review_key(ari, state, perspective, adapter) if cache is not None else None
+    keyed = _review_key(ari, state, perspective, adapter, track, lite) if cache is not None else None
     if keyed is not None and (reused := _reuse_review(ari, state, perspective, keyed, cache, notify)):
         return reused
     refuse_unaffordable(state, adapter, f"a {perspective} review")
     cand = ari.record_candidate(run_id, actor=SYSTEM, authored=False, label=f"review {perspective}")
     decision = ari.evaluate(run_id)
-    checks = {k: (v[0].value, v[1]) for k, v in decision.check_states.items()}
+    checks = {k: (v[0].value, v[1] + base_note_for(state, k, v[0])) for k, v in decision.check_states.items()}
     integrity = decision.integrity.review_section() if decision.integrity else ""
     run_dir = ari.state_dir / "runs" / run_id
     delta = _delta_basis(ari, state, perspective, cand, run_dir) if delta_ok(state) else None
     if delta is not None:
         old_id, inter, touched = delta
         prompt = prompts.delta_review_prompt(perspective, state.contract, inter, touched, old_id, checks, prior,
-                                             integrity)
+                                             integrity, track, lite)
         notify(f"launching {review_name(perspective)} (delta) of candidate {cand.short} "
                f"({len(touched)} file(s) changed since {old_id[:12]})")
     else:
         prompt = prompts.review_prompt(perspective, state.contract, diff_text(ari.root, cand), checks, prior,
-                                       first_pass=not again, integrity=integrity)
-        notify(f"launching {review_name(perspective)} of candidate {cand.short}")
+                                       first_pass=not again, integrity=integrity, track=track, lite=lite)
+        notify(f"launching {'lite ' if lite else ''}{review_name(perspective)} of candidate {cand.short}")
     snapshot.save(ari.root, run_dir, cand.candidate_id, cand.manifest)  # best effort: else the next is full
     # Registered before it works, so its review is attributed to its principal. No peer messages
     # go into a review prompt (coordination/launch.py).
@@ -285,12 +334,14 @@ def _run_review(ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, n
             candidate_id=cand.candidate_id,
             scope="delta" if delta is not None else "full",
             delta_from=delta[0] if delta is not None else None,
+            residual_risk=body.get("residual_risk"),
             # What a later run needs to reuse this verdict, and to say what reusing it saved.
             # The key binds to the candidate reviewed: if the tree moved since it was computed there is none.
             extra={**({"cache_key": keyed[1], "cache_inputs": keyed[2]}
                       if keyed is not None and delta is None and keyed[0] == cand.candidate_id else {}),
                    "duration_s": round(ari.clock() - started, 3), "cost": res.cost, "cost_basis": res.cost_basis,
-                   "session_id": res.session_id},
+                   "session_id": res.session_id,
+                   **({"model": model} if (model := adapter_identity(adapter)) else {})},
         )
     except (ContractError, DaedalusError) as exc:
         failed(f"invalid review result: {exc}")
@@ -918,7 +969,7 @@ def followup_feedback(findings: list[Any]) -> list[str]:
         "Anything left open does not block acceptance."
     )
     return [head] + [
-        f"{f.finding_id} [{f.severity.value}] {f.title}. {f.required_change}".strip() for f in findings
+        f"{f.finding_id} [{f.severity.value}] {f.title}. {f.required_change}{fix_aids(f)}".strip() for f in findings
     ] + [WORKLIST_HINT]
 
 

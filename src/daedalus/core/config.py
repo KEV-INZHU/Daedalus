@@ -72,6 +72,11 @@ class RepoConfig:
     # `daedalus run` has the Builder plan first and a reviewer critique the plan before any code is
     # written (two extra read-only sessions). Advice only: it never decides acceptance.
     plan_review: bool = False
+    # Model for lite-mode reviews (`lite: {model: ...}`), overriding the adapter's review model; None keeps it.
+    lite_model: str | None = None
+    # When a required check fails, run it once on a clean checkout of the base revision and say if it
+    # was already failing (verification/baseline.py). Advice only; `compare_base: false` turns it off.
+    compare_base: bool = True
 
     @property
     def policy(self) -> Policy:
@@ -323,6 +328,13 @@ def load_config(root: str | Path, *, preset: str | None = None) -> RepoConfig:
     plan_review = cfg.get("plan_review", False)
     if not isinstance(plan_review, bool):
         raise PolicyError("`plan_review:` must be true or false")
+    compare_base = cfg.get("compare_base", True)
+    if not isinstance(compare_base, bool):
+        raise PolicyError("`compare_base:` must be true or false")
+    lite = cfg.get("lite") or {}
+    if not isinstance(lite, dict) or set(lite) - {"model"} or (
+            "model" in lite and (not isinstance(lite["model"], str) or not lite["model"].strip())):
+        raise PolicyError("`lite:` must be a mapping with only `model` (a model name)")
     if bus_dir is not None:
         where, top = (root / bus_dir).resolve(), root.resolve()
         state = top / STATE_DIR
@@ -345,6 +357,8 @@ def load_config(root: str | Path, *, preset: str | None = None) -> RepoConfig:
         coordination=coordination,
         bus_dir=bus_dir,
         plan_review=plan_review,
+        lite_model=lite["model"].strip() if lite.get("model") else None,
+        compare_base=compare_base,
     )
 
 

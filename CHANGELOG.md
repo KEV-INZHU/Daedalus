@@ -9,10 +9,30 @@ and versions follow [Semantic Versioning](https://semver.org/).
 - Runs record new event types (`agent.registered`, `agent.retired`, `contract.proposed`,
   `contract.proposal_rejected`, `finding.answered`). Earlier
   versions do not know these events and refuse to replay such a run, so read it with this version or later.
+- Runs may record `finding.judged` and `baseline.checked`. Earlier versions refuse to replay such a run.
+- The review prompt changed (forecast fields, and the track record when there is one), so reviews cached by
+  earlier versions are not reused.
 - Contracts may record `general: true` on a criterion. Earlier versions read such a contract but drop the
   marker, so they show the criterion as proved by its checks; read these runs with this version or later.
 
 ### Added
+- Calibrated reviews ([docs/calibration.md](docs/calibration.md)): each finding carries the reviewer's
+  `confidence` that it is real, `against` (the strongest reason it could be wrong) and optionally `failing_test`;
+  each review carries `residual_risk`, its probability that a MAJOR-or-worse defect it did not report remains.
+  The builder sees the confidence and the failing test in its feedback. A bad or missing probability never
+  fails a review.
+- `daedalus calibration`: Brier score, skill against the base rate, reliability and resolution, a calibration
+  table and the most confident false alarms, by perspective, model or severity. Findings are scored by confirmed
+  fixes, arbiter rulings and `daedalus findings judge F# valid|invalid` (a person's verdict, after the run if need
+  be; agents cannot record one); residual risk by escaped defects (`Fixes-Run:`).
+- Track record in the prompt: once a perspective has five findings with a known outcome, its next review starts
+  from how many held up, whether its confidence ran high, and its recent false alarms.
+- `mode: lite`: one short review per change (three questions: contract, breakage, proof), on `lite: {model}` or
+  Haiku with Claude Code. Reviews the risk tier requires are always full.
+- Was it already failing? A required check that fails is run once on a clean checkout of the base revision; if it
+  fails there too, the block message and review prompts say so. Advice only; `compare_base: false` turns it off.
+- `daedalus bench`: a planted-bug benchmark (ten bugs, four clean controls) reporting recall, unfounded findings,
+  calibration and cost per review, for the configured adapter, the lite setup, or any `--reviewer-cmd`.
 - `daedalus risk [PATH ...]`: preview the tier your uncommitted changes (or the paths you name) reach, which risk
   floors and files set it, any weakened tests, and the reviews and approvals it requires. It records nothing.
 - `daedalus/coordination/buslock.py`: the bus's writer lock as one standard-library-only file, so the shared
@@ -63,6 +83,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
   launched session (the command adapter passes both through; read-only sessions never get the grant).
 
 ### Changed
+- A reviewer's diff over the size limit no longer loses its end: every file keeps a fair share, cut at a hunk
+  boundary, and the files cut short or left out are named so the reviewer reads them from the repository.
 - Criteria nothing checks in particular are no longer shown as proved. A `-c` criterion bound only to the mandatory
   checks is marked `general`: `start`, `verify` and the report say no check tests it specifically, and the
   builder's prompt asks for a test that fails unless it holds. Naming a dedicated check with `--check` makes it

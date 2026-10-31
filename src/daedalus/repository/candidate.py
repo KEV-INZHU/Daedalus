@@ -174,16 +174,18 @@ def capture(root: str | Path, base_revision: str | None, exclude: tuple[str, ...
 
 
 def diff_text(root: str | Path, manifest: CandidateManifest, limit: int = MAX_DIFF_BYTES) -> str:
-    """Human/agent-readable diff of the candidate against its base (for reviewers)."""
+    """Human/agent-readable diff of the candidate against its base (for reviewers).
+
+    Over `limit`, every file keeps a fair share instead of the tail being cut off: see `fit_diff`."""
     root = Path(root)
-    parts: list[str] = []
+    chunks: list[tuple[str, str]] = []
     base = manifest.manifest["base_revision"]
     tracked: set[str] = set()
     if base and is_git_repo(root):
         paths = list(manifest.changed_paths)
         if paths:
             r = _git(root, "diff", "--relative", "--no-renames", base, "--", *paths, check=False)
-            parts.append(r.stdout.decode("utf-8", "replace"))
+            chunks += split_diff(r.stdout.decode("utf-8", "replace"))
             tracked = set(
                 _split_z(
                     _git(
@@ -200,11 +202,62 @@ def diff_text(root: str | Path, manifest: CandidateManifest, limit: int = MAX_DI
                 body = p.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 body = "<binary or unreadable>"
-            parts.append(
-                f"--- /dev/null\n+++ b/{rel}  (new file)\n"
-                + "".join("+" + ln + "\n" for ln in body.splitlines())
-            )
-    text = "\n".join(parts)
-    if len(text) > limit:
-        text = text[:limit] + f"\n... diff truncated at {limit} bytes ..."
-    return text
+            chunks.append((rel, f"--- /dev/null\n+++ b/{rel}  (new file)\n"
+                           + "".join("+" + ln + "\n" for ln in body.splitlines())))
+    return fit_diff(chunks, limit)
+
+
+def split_diff(text: str) -> list[tuple[str, str]]:
+    """A `git diff` as (path, that file's part), in order."""
+    out: list[tuple[str, str]] = []
+    for part in ("\n" + text).split("\ndiff --git ")[1:]:
+        head = part.split("\n", 1)[0]
+        path = head.split(" b/", 1)[1] if " b/" in head else head
+        out.append((path, "diff --git " + part.rstrip("\n")))
+    if not out and text.strip():
+        out.append(("", text.rstrip("\n")))
+    return out
+
+
+MIN_SHARE = 400  # below this a file's share shows nothing useful: list it instead
+
+
+def fit_diff(chunks: list[tuple[str, str]], limit: int) -> str:
+    """Join per-file diffs within `limit` characters. If they do not fit, small files are kept
+    whole and the space left is split evenly among the larger ones, each cut at a hunk boundary
+    where possible. Every cut or omitted file is named at the end, so a reviewer knows what it did
+    not see (and can read it from the repository) rather than mistaking a partial diff for the whole."""
+    total = sum(len(c) for _, c in chunks) + len(chunks)
+    if total <= limit:
+        return "\n".join(c for _, c in chunks)
+    budget = max(0, limit - 200 - 120 * len(chunks))  # room for the notes below
+    order = sorted(range(len(chunks)), key=lambda i: len(chunks[i][1]))
+    kept: dict[int, str] = {}
+    cut: list[str] = []
+    omitted: list[str] = []
+    left = budget
+    for n, i in enumerate(order):
+        path, body = chunks[i]
+        share = left // (len(order) - n)
+        if len(body) <= share:
+            kept[i] = body
+            left -= len(body)
+            continue
+        if share < MIN_SHARE:
+            omitted.append(f"{path or '(diff)'} ({len(body)} chars)")
+            continue
+        head = body[:share]
+        at = head.rfind("\n@@")
+        if at < share // 2:  # no hunk boundary in the back half: cut at a line instead
+            at = head.rfind("\n")
+        head = head[: at if at > 0 else share]
+        kept[i] = head + f"\n... {path}: shown {len(head)} of {len(body)} chars; read the file for the rest ..."
+        cut.append(path)
+        left -= len(head)
+    text = "\n".join(kept[i] for i in range(len(chunks)) if i in kept)
+    notes = [f"... diff over {limit} chars: every file kept a share instead of the end being dropped."]
+    if cut:
+        notes.append("Cut short (read these in the repository before judging them): " + ", ".join(cut))
+    if omitted:
+        notes.append("Not shown at all (read these in the repository): " + ", ".join(omitted))
+    return text + "\n" + "\n".join(notes)

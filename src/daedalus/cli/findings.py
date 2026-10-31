@@ -4,6 +4,7 @@
     daedalus findings --all                   resolved ones too
     daedalus findings answer F3 --fixed "…"   say what changed; the next review checks the claim
     daedalus findings answer F3 --dispute "…" contest it with evidence; `daedalus arbitrate F3` rules
+    daedalus findings judge F3 invalid "…"    a person's verdict, for `daedalus calibration`; gates nothing
 
 Answering resolves nothing. Only the perspective that raised a finding (in a later review) or a
 person with `attest` authority resolves it.
@@ -15,7 +16,7 @@ import argparse
 import json
 from typing import Any
 
-from daedalus.cli._common import _ari, _print, _run_id, add_command, display_name, starter_actor
+from daedalus.cli._common import _ari, _print, _run_id, add_command, display_name, human_actor, starter_actor
 from daedalus.core.errors import DaedalusError
 
 
@@ -41,6 +42,10 @@ def row(f: Any) -> dict[str, Any]:
         "status": finding_status(f),
         "answers": f.answers,
         "disputes": f.disputes,
+        "confidence": f.confidence,
+        "against": f.against,
+        "failing_test": f.failing_test,
+        "judgment": f.judgment,
     }
 
 
@@ -48,6 +53,11 @@ def cmd_findings(args: argparse.Namespace) -> int:
     ari = _ari(args)
     try:
         rid = _run_id(ari, args, any_run=True)
+        if args.findings_cmd == "judge":
+            actor = human_actor(f"judging {args.finding} {args.verdict}", assume_yes=True)
+            ari.judge_finding(rid, args.finding, actor=actor, verdict=args.verdict, note=args.note or "")
+            _print(f"{args.finding}: judged {args.verdict}; `daedalus calibration` scores the reviewer with it")
+            return 0
         if args.findings_cmd == "answer":
             if bool(args.fixed) == bool(args.dispute):
                 raise DaedalusError("answer with exactly one of --fixed or --dispute")
@@ -69,7 +79,8 @@ def cmd_findings(args: argparse.Namespace) -> int:
             _print("no open findings" if not args.all else "no findings")
         else:
             for r in rows:
-                _print(f"{r['id']} [{r['severity']}] {r['title']}  ({r['review']}; {r['status']})")
+                conf = f", {r['confidence']:.0%} sure" if r["confidence"] is not None else ""
+                _print(f"{r['id']} [{r['severity']}] {r['title']}  ({r['review']}{conf}; {r['status']})")
                 if r["required_change"]:
                     _print(f"    change: {r['required_change']}")
         return 0
@@ -89,3 +100,9 @@ def register(sub: Any) -> None:
     p.add_argument("finding")
     p.add_argument("--fixed", metavar="NOTE")
     p.add_argument("--dispute", metavar="EVIDENCE")
+    j = cmds.add_parser(
+        "judge", help="say whether a finding was real (valid) or a false alarm (invalid); scores reviewers only"
+    )
+    j.add_argument("finding")
+    j.add_argument("verdict", choices=("valid", "invalid"))
+    j.add_argument("note", nargs="?", help="why, e.g. 'the test was already failing on main'")

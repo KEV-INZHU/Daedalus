@@ -15,7 +15,7 @@ from typing import Any
 from daedalus.core.errors import ContractError, PolicyError
 from daedalus.core.policy import Policy, canonical_json, sha256_hex
 
-MODES = ("gate", "review", "council")
+MODES = ("gate", "lite", "review", "council")
 PERSPECTIVES = ("socrates", "mozi", "aristotle", "james")
 
 # Reviews a mode adds on top of the tier floor. Modes only ever add; the tier
@@ -23,6 +23,7 @@ PERSPECTIVES = ("socrates", "mozi", "aristotle", "james")
 # never bypasses verification, policy floors or authorization).
 MODE_REVIEWS: dict[str, tuple[str, ...]] = {
     "gate": (),
+    "lite": ("aristotle",),  # one short, cheap review; tier-required reviews stay full (lifecycle.launch_review)
     "review": ("aristotle",),
     "council": PERSPECTIVES,
 }

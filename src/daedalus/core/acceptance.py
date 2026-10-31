@@ -337,7 +337,8 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
     for check_id, (st, msg) in checks.items():
         if st is not CheckState.PASS:
             untrusted = st is CheckState.ERROR and "untrusted verifier" in msg
-            reasons.append(Reason(f"check:{check_id}", msg, HUMAN if untrusted else AGENT))
+            reasons.append(Reason(f"check:{check_id}", msg + base_note_for(state, check_id, st),
+                                  HUMAN if untrusted else AGENT))
 
     for crit in state.contract.acceptance_criteria:
         if crit.checks:
@@ -391,7 +392,7 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
                 Reason(
                     f"finding:{f.finding_id}",
                     f"{f.severity.value} from the {review_name(f.perspective)} ({f.finding_id}): {f.title}. "
-                    f"Required change: {f.required_change or 'see finding'}.{upheld}",
+                    f"Required change: {f.required_change or 'see finding'}.{upheld}{fix_aids(f)}",
                     AGENT,
                 )
             )
@@ -469,3 +470,26 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
         [Reason("not_finished", "every condition holds; run `daedalus finish` to record acceptance", AGENT)],
         acceptable=True,
     )
+
+
+def fix_aids(f: Any) -> str:
+    """What makes a finding cheaper to fix: the reviewer's confidence and a test that fails until it is."""
+    out = f" (reviewer's confidence {f.confidence:.0%})" if getattr(f, "confidence", None) is not None else ""
+    if getattr(f, "failing_test", ""):
+        out += f" Test that fails until it is fixed: {f.failing_test[:600]}"
+    return out
+
+
+def base_note_for(state: RunState, check_id: str, st: CheckState) -> str:
+    """Whether a failing check also failed on the base revision, if that was measured for this
+    exact check definition and base. Advice for the reader: the check must pass all the same."""
+    from daedalus.verification.baseline import base_note
+
+    e = state.base_checks.get(check_id)
+    defn = state.policy.checks.get(check_id)
+    if st is not CheckState.FAIL or not e or defn is None:
+        return ""
+    if e.get("base_revision") != state.contract.base_revision or e.get("definition_hash") != defn.definition_hash:
+        return ""
+    return base_note(e)
+

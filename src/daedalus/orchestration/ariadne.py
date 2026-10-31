@@ -514,6 +514,7 @@ class Ariadne:
         scope: str = "full",
         delta_from: str | None = None,
         extra: dict[str, Any] | None = None,
+        residual_risk: Any = None,
     ) -> str:
         """Record a review. `source="launched"` is reserved for reviews Daedalus
         itself launched through an adapter (orchestration.lifecycle). A `delta` review
@@ -559,6 +560,7 @@ class Ariadne:
                     "severity": severity.value,
                     "required_change": str(f.get("required_change", "")),
                     "verification": str(f.get("verification", "")),
+                    **_forecast_fields(f),
                 }
             )
         resolves = [str(r) for r in resolves]
@@ -588,10 +590,26 @@ class Ariadne:
                     "findings": out,
                     "resolves": resolves,
                     **({"scope": "delta", "delta_from": delta_from} if scope == "delta" else {}),
+                    **({"residual_risk": rr} if (rr := probability(residual_risk)) is not None else {}),
                 }
             },
         )
         return review_id
+
+    def judge_finding(self, run_id: str, finding_id: str, *, actor: str, verdict: str, note: str = "") -> None:
+        """A person's verdict on whether a finding was real, for scoring reviewers (`daedalus
+        calibration`). It resolves nothing and changes no disposition, so it may be recorded after the
+        run is finished, which is when the answer is usually known."""
+        state = self.state(run_id)
+        _require_principal(actor)
+        if is_agent(actor) or actor.startswith("system:"):
+            raise AuthorizationError("only a person judges a finding: the builder must not grade its reviewers")
+        if finding_id not in state.findings:
+            raise ContractError(f"unknown finding {finding_id}")
+        if verdict not in ("valid", "invalid"):
+            raise ContractError("verdict must be valid or invalid")
+        self._append(run_id, ev.FINDING_JUDGED, actor,
+                     {"finding_id": finding_id, "verdict": verdict, "note": note[: self.MAX_ANSWER]})
 
     def record_failed_review(self, run_id: str, perspective: str, error: str) -> None:
         self._append(run_id, ev.REVIEW_FAILED, SYSTEM, {"perspective": perspective, "error": error})
@@ -1530,3 +1548,32 @@ class Ariadne:
     # ================================================================ audit
     def contract_hash_of(self, run_id: str) -> str:
         return sha256_hex(self._contract_path(run_id).read_bytes())
+
+
+MAX_FORECAST_TEXT = 2000
+
+
+def probability(x: Any) -> float | None:
+    """A reviewer's stated probability, or None when it gave none or gave something that is not one.
+    A bad forecast never fails a review: the findings matter more than their scoring."""
+    if isinstance(x, bool) or not isinstance(x, (int, float, str)):
+        return None
+    try:
+        v = float(str(x).strip().rstrip("%")) / (100 if str(x).strip().endswith("%") else 1)
+    except ValueError:
+        return None
+    if v != v or not 0.0 <= v <= 1.0:  # NaN or out of range
+        return None
+    return round(v, 4)
+
+
+def _forecast_fields(f: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if (p := probability(f.get("confidence"))) is not None:
+        out["confidence"] = p
+    for k in ("against", "failing_test"):
+        v = f.get(k)
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()[:MAX_FORECAST_TEXT]
+    return out
+

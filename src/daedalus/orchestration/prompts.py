@@ -38,6 +38,16 @@ connect to the contract, a real risk, project conventions, or measurable cost. P
 Severity: BLOCKER (must not be accepted as is), MAJOR (a real defect or risk; should be fixed),
 MINOR (worth fixing), ADVISORY (optional). A clean review is not proof of correctness.
 
+Forecast, and you will be scored (Brier score) against what happens next:
+- `confidence`: your probability, 0.05 to 0.95 in steps of 0.05, that the finding is real and the
+  code must change. 0.9 means you expect to be wrong once in ten. Start from your track record below,
+  if one is shown, then adjust for this evidence.
+- `against`: the strongest reason the finding could be wrong. Before you report a failing test or a
+  broken behaviour, ask whether it was already like that before this change (see any checks marked
+  as failing on the base revision) and whether the code you did not see handles it.
+- `failing_test`: if you can, a short test that fails now and passes once the finding is fixed.
+- `residual_risk`: your probability that a MAJOR-or-worse defect you did **not** report remains.
+
 If earlier findings from your perspective are listed and the candidate now fixes them, list their ids
 in `resolves`. Do not edit any files.
 
@@ -48,8 +58,10 @@ End your reply with exactly one fenced JSON block:
   "summary": "one paragraph",
   "findings": [
     {"title": "...", "evidence": "...", "severity": "BLOCKER|MAJOR|MINOR|ADVISORY",
-     "required_change": "...", "verification": "how to confirm the fix"}
+     "required_change": "...", "verification": "how to confirm the fix",
+     "confidence": 0.8, "against": "...", "failing_test": "..."}
   ],
+  "residual_risk": 0.1,
   "resolves": []
 }
 ```
@@ -365,9 +377,10 @@ Before the JSON block, list the areas you swept in one line each, so coverage is
 
 
 def _review_frame(perspective: str, task: str, c: TaskContract, checks: dict[str, Any],
-                  prior_findings: list[dict[str, str]], integrity: str = "") -> list[str]:
+                  prior_findings: list[dict[str, str]], integrity: str = "", track: str = "",
+                  output: str = REVIEW_OUTPUT) -> list[str]:
     """The parts every review prompt shares: role, output format, task, contract, evidence, prior findings."""
-    parts = [skill_body(perspective), "", REVIEW_OUTPUT, "", task, "", contract_block(c), "",
+    parts = [skill_body(perspective), "", output, "", task, "", contract_block(c), "",
              "## Verification evidence", ""]
     parts += [f"- {cid}: {st} — {detail}" for cid, (st, detail) in checks.items()] or ["- none"]
     if prior_findings:
@@ -380,6 +393,8 @@ def _review_frame(perspective: str, task: str, c: TaskContract, checks: dict[str
                              "only if the change shows that is true.")
     if integrity:
         parts += ["", integrity]
+    if track:
+        parts += ["", track]
     return parts
 
 
@@ -395,6 +410,18 @@ unchanged code for new issues; the earlier review covered it. Do not edit any fi
 
 
 
+LITE_TASK = """## Your task: a quick review, three questions
+
+This is a lite review: one pass, kept short. Answer three questions about the diff, and report a
+finding only where you would bet on it (`confidence` 0.5 or more), MINOR ones included.
+
+1. **Contract**: does the change do what each acceptance criterion and invariant says? Name any it misses.
+2. **Breakage**: what input, failure path or existing caller does it now get wrong?
+3. **Proof**: would the tests fail without this change? Name a criterion no test pins down.
+
+Before the JSON block, answer each question in one or two lines."""
+
+
 def review_prompt(
     perspective: str,
     c: TaskContract,
@@ -403,11 +430,15 @@ def review_prompt(
     prior_findings: list[dict[str, str]],
     first_pass: bool = True,
     integrity: str = "",
+    track: str = "",
+    lite: bool = False,
 ) -> str:
     """A full review. `first_pass` is False for a full re-review (one that could not be a delta).
-    `integrity` is the test-tampering section (`IntegrityReport.review_section()`), if anything was flagged."""
-    task = (FIRST_PASS_INTRO if first_pass else REREVIEW_INTRO) + "\n\n" + SWEEP
-    parts = _review_frame(perspective, task, c, checks, prior_findings, integrity)
+    `integrity` is the test-tampering section (`IntegrityReport.review_section()`), if anything was flagged.
+    `track` is the perspective's track record (core/calibration.py); `lite` asks the three questions
+    instead of the full sweep."""
+    task = LITE_TASK if lite else (FIRST_PASS_INTRO if first_pass else REREVIEW_INTRO) + "\n\n" + SWEEP
+    parts = _review_frame(perspective, task, c, checks, prior_findings, integrity, track)
     parts += ["", "## Candidate diff", "", "```diff", diff or "(no changes)", "```"]
     return "\n".join(parts)
 
@@ -421,9 +452,11 @@ def delta_review_prompt(
     checks: dict[str, Any],
     prior_findings: list[dict[str, str]],
     integrity: str = "",
+    track: str = "",
+    lite: bool = False,
 ) -> str:
-    task = DELTA_OUTPUT.format(old=old_candidate[:12]) + "\n" + SWEEP
-    parts = _review_frame(perspective, task, c, checks, prior_findings, integrity)
+    task = DELTA_OUTPUT.format(old=old_candidate[:12]) + "\n" + (LITE_TASK.split("\n\n", 1)[1] if lite else SWEEP)
+    parts = _review_frame(perspective, task, c, checks, prior_findings, integrity, track)
     parts += ["", f"## Changed since your last review ({len(touched)} file(s))", "", "```diff",
               inter_diff or "(no textual changes)", "```"]
     return "\n".join(parts)
@@ -461,9 +494,11 @@ def factory_plan_prompt(goal: str, existing: list[dict[str, Any]], checks: list[
     return "\n".join(parts)
 
 
-def review_template_hash(perspective: str) -> str:
+def review_template_hash(perspective: str, track: str = "", lite: bool = False) -> str:
     """Identity of the instructions a full review is given, without the run's diff and evidence:
-    a verdict reached under other instructions is not the same verdict."""
+    a verdict reached under other instructions is not the same verdict. The track record and the
+    lite questions are instructions too."""
     from daedalus.core.policy import sha256_hex
 
-    return sha256_hex("\0".join([skill_body(perspective), REVIEW_OUTPUT, FIRST_PASS_INTRO, SWEEP]))
+    parts = [skill_body(perspective), REVIEW_OUTPUT, LITE_TASK if lite else FIRST_PASS_INTRO, "" if lite else SWEEP]
+    return sha256_hex("\0".join(parts + ([track] if track else [])))
