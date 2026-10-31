@@ -103,8 +103,10 @@ def verify(ari: Ariadne, run_id: str, *, only: set[str] | None = None) -> list[E
                     },
                 )
                 if trusted:
+                    base = state.contract.base_revision
                     out = run_check(
-                        defn, ari.root, log_dir, clock=ari.clock, log_name=f"{check_id}-{key.split('#')[1]}"
+                        defn, ari.root, log_dir, clock=ari.clock, log_name=f"{check_id}-{key.split('#')[1]}",
+                        run_env={"DAEDALUS_BASE_REVISION": base} if base else None,
                     )
                     error = out.error
                     result = out.result

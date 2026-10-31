@@ -16,6 +16,7 @@ from typing import Any
 from daedalus.core.authorization import authorization_status
 from daedalus.core.contracts import MODE_REVIEWS
 from daedalus.core.evidence import check_status
+from daedalus.core.names import review_name, with_article
 from daedalus.core.paths import match_any
 from daedalus.core.risk import RiskAssessment, assess
 from daedalus.core.run import RunState
@@ -377,18 +378,19 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
                 reasons.append(
                     Reason(
                         f"finding:{f.finding_id}",
-                        f"{f.severity.value} from {f.perspective} ({f.finding_id}): {f.title}. Plato's ruling: "
+                        f"{f.severity.value} from the {review_name(f.perspective)} ({f.finding_id}): {f.title}. "
+                        "The arbiter's (Plato) ruling: "
                         f"overrule ({ruling.get('rationale', '')}). Policy leaves resolution to a human: "
                         f"`daedalus resolve {f.finding_id}`, or address the finding.",
                         HUMAN,
                     )
                 )
                 continue
-            upheld = " Plato upheld it on arbitration." if ruling and ruling.get("decision") == "uphold" else ""
+            upheld = " The arbiter (Plato) upheld it." if ruling and ruling.get("decision") == "uphold" else ""
             reasons.append(
                 Reason(
                     f"finding:{f.finding_id}",
-                    f"{f.severity.value} from {f.perspective} ({f.finding_id}): {f.title}. "
+                    f"{f.severity.value} from the {review_name(f.perspective)} ({f.finding_id}): {f.title}. "
                     f"Required change: {f.required_change or 'see finding'}.{upheld}",
                     AGENT,
                 )
@@ -400,12 +402,12 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
     for p in reviews_needed:
         if not review_satisfied(state, p, cid, independent):
             why = f"tier {tier}" if p in policy.requirement(tier).reviews else f"{state.mode} mode"
-            article = "an" if p[:1].lower() in ("a", "e", "i", "o", "u") else "a"
-            kind = "an independent, Daedalus-launched" if independent else article
+            needed = (f"an independent, Daedalus-launched {review_name(p)}" if independent
+                      else with_article(review_name(p)))
             reasons.append(
                 Reason(
                     f"review:{p}",
-                    f"{why} requires {kind} {p} review of candidate {cid[:12]}. With a launching adapter "
+                    f"{why} requires {needed} of candidate {cid[:12]}. With a launching adapter "
                     "(`adapter:` in .daedalus.yml), Daedalus launches it once the checks pass (`daedalus "
                     f"verify`, or when the agent stops); otherwise `daedalus review {p}`. The author never "
                     "reviews its own work.",

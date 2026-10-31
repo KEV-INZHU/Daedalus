@@ -47,6 +47,9 @@ class CheckDefinition:
     retry_on_timeout: bool = False
     cache: bool = True  # `cache: false`: non-deterministic, never reuse a result across runs
     cache_inputs: tuple[str, ...] = ()  # files (paths or globs) whose contents join the cross-run cache key
+    # A holdout gates acceptance like any check, but the Builder is never shown it: not in its prompt, not
+    # granted to it, and its failures reach it without output. Keep its test files outside the repository.
+    holdout: bool = False
 
     @property
     def definition_hash(self) -> str:
@@ -166,6 +169,12 @@ class Policy:
 
 
 # ---------------------------------------------------------------------- loading
+def _holdout(cid: str, v: Any) -> bool:
+    if not isinstance(v, bool):
+        raise PolicyError(f"check {cid!r} holdout must be true or false")
+    return v
+
+
 def _floors(items: Any, where: str) -> tuple[Floor, ...]:
     if items is None:
         return ()
@@ -280,6 +289,7 @@ def policy_from_dict(raw: dict[str, Any]) -> Policy:
             retry_on_timeout=bool(c.get("retry_on_timeout", False)),
             cache=cache_flag(c.get("cache"), f"check {cid!r} cache"),
             cache_inputs=_cache_inputs(cid, c.get("cache_inputs")),
+            holdout=_holdout(cid, c.get("holdout", False)),
         )
 
     floors_path = _floors(raw.get("path_floors"), "path_floors")

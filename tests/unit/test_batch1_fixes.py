@@ -127,7 +127,7 @@ LEGACY_COMMANDS = {
 def test_the_split_cli_keeps_every_pre_split_command_and_adds_demo():
     parser = cli.build_parser()
     sub = next(a for a in parser._actions if a.dest == "cmd")
-    assert set(sub.choices) == LEGACY_COMMANDS | {"demo", "report", "bus"}
+    assert set(sub.choices) == LEGACY_COMMANDS | {"demo", "report", "bus", "propose", "confirm", "findings", "mutate", "plan-review", "next"}
 
 
 def test_importing_the_cli_does_not_import_the_demo_module():

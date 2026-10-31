@@ -44,8 +44,10 @@ from daedalus.adapters.base import AGENT_MARKER
 from daedalus.core.acceptance import Decision
 from daedalus.core.config import STATE_DIR, find_root, gate_enabled, load_config
 from daedalus.core.errors import DaedalusError
+from daedalus.core.names import review_name, with_article
 from daedalus.core.state_machine import CheckState, Disposition, ExecutionState
 from daedalus.orchestration.ariadne import Ariadne
+from daedalus.orchestration.lifecycle import WORKLIST_HINT
 from daedalus.orchestration.prompts import ROLE_SKILLS, SKILLS_DIR
 from daedalus.plugins import HarnessIntegration
 
@@ -198,7 +200,23 @@ def opened_message(ari: Ariadne, rid: str) -> str:
         msg += f" It covers everything since {base[:10]}, including commits made after your request."
     if state.current_candidate_id and ari.capture(state).changed_paths:
         msg += " Uncommitted changes that were already in the tree are part of it."
+    if state.created_by == AUTO_ACTOR:
+        msg += (
+            " Its objective is the request as given, with one generic criterion: propose a short objective and"
+            ' testable criteria now with `daedalus propose "<objective>" -c "<criterion>"`, for the user to confirm.'
+        )
     return msg
+
+
+def proposal_note(state: Any) -> str | None:
+    p = state.pending_proposal
+    if p is None:
+        return None
+    return (
+        f"[human] {p['proposed_by']} proposed a contract ({p['proposal_id']}): \"{p['objective']}\" with "
+        f"{len(p['criteria']) + len(p['attest'])} criteria. Review it with `daedalus status`, then "
+        f"`daedalus confirm` (or `daedalus confirm --reject`)."
+    )
 
 
 # Turns the harness submits that are not the user's words. They never name a run.
@@ -363,6 +381,9 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
                 return {"decision": "block", "reason": "Daedalus gate:\n- " + "\n- ".join(followup_feedback(followup))
                         + "\nThen stop again; the gate reviews only what you change."}
             final = ari.finish(run_id)
+            note = proposal_note(ari.state(run_id))
+            if note:  # accepted against the contract as it stood; the proposal was never applied
+                return {"systemMessage": summary_line(final) + "\n" + note.replace("[human] ", "Unconfirmed: ")}
             return {"systemMessage": summary_line(final)}
 
         if decision.disposition is Disposition.REJECTED:  # nothing the agent does can change it
@@ -398,6 +419,7 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
                     "Daedalus gate: this work is not accepted yet. Resolve these before stopping "
                     f"(attempt {state.stop_blocks + 1}/{cap}):\n- "
                     + "\n- ".join(agent)
+                    + ("\n" + WORKLIST_HINT if ari.state(run_id).open_findings else "")
                     + "\nRun `daedalus status` for detail. Do not edit policy or checks to get past the gate."
                 ),
             }
@@ -411,12 +433,14 @@ def stop_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[st
         ]
         for p in pending_reviews:
             if system_reviews:
-                human.append(f"[system] the {p} review has not passed on this candidate (see notes above, or rerun "
+                human.append(f"[system] the {review_name(p)} has not passed on this candidate (see notes above, or rerun "
                              f"`daedalus verify`)")
             else:
-                human.append(f"[human] a {p} review is required, and no adapter here can launch one: set "
+                human.append(f"[human] {with_article(review_name(p))} is required, and no adapter here can launch one: set "
                              f"`adapter: claude-code` in .daedalus.yml, or run `daedalus review {p}` with one")
         human += [f"[human] {n}" for n in notes]
+        if (note := proposal_note(ari.state(run_id))) is not None:
+            human.append(note)
         if human:
             lines.append("Needs you:")
             lines += human
@@ -503,6 +527,39 @@ def statusline(payload: dict[str, Any]) -> str:
         return ""
 
 
+def bus_hook(payload: dict[str, Any], *, ari: Ariadne | None = None) -> dict[str, Any]:
+    """PostToolUse in a launched, coordinating session: hand the agent the bus messages that arrived
+    since it last looked, as added context. The only hook that runs inside a launched session (the
+    adapter adds it there with `--settings`); anywhere without an agent name it does nothing."""
+    from daedalus.coordination.bus import FileBus
+    from daedalus.coordination.channel import Channel, peer_block
+    from daedalus.coordination.launch import ENV_REPO
+    from daedalus.coordination.surface import ENV_AGENT, ENV_BUS_DIR, ENV_RUN
+
+    name, run_id, where, repo = (os.environ.get(k) for k in (ENV_AGENT, ENV_RUN, ENV_BUS_DIR, ENV_REPO))
+    if not (name and run_id and where and repo):
+        return {}
+    own = ari is None
+    try:
+        ari = ari or Ariadne(Path(repo))
+        msgs = Channel(ari, run_id, FileBus(Path(where))).read(name)
+    except (DaedalusError, OSError, ValueError):
+        return {}  # coordination never gets in the way of the work
+    finally:
+        if own and ari is not None:
+            ari.close()
+    if not msgs:
+        return {}
+    text = peer_block(msgs, f"New coordination messages ({len(msgs)}):")
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}
+
+
+def session_hooks() -> dict[str, Any]:
+    """`--settings` for a launched, coordinating builder: the live-delivery hook, nothing else."""
+    return {"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command",
+                                                                   "command": _hook_command("bus")}]}]}}
+
+
 def run_hook(name: str, stdin_text: str, args: list[str] | None = None) -> str:
     if name == "commit-msg":
         from daedalus.harness.provenance import commit_msg_hook
@@ -518,6 +575,7 @@ def run_hook(name: str, stdin_text: str, args: list[str] | None = None) -> str:
         "session-start": session_start_hook,
         "prompt": prompt_hook,
         "pre-edit": pre_edit_hook,
+        "bus": bus_hook,
     }
     handler = handlers.get(name)
     if handler is None:

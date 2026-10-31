@@ -18,7 +18,7 @@ from typing import Any
 from daedalus.audit.store import Event, EventStore
 from daedalus.core import run as ev
 from daedalus.core.run import replay
-from daedalus.core.state_machine import Disposition
+from daedalus.core.state_machine import WORKER_ACTIVE, Disposition, WorkerState
 
 # Events that record a human *decision*. Derived events a command emits as a
 # consequence (finalizing the candidate, recording the disposition) are not
@@ -73,6 +73,18 @@ class RunMetrics:
     cache_seconds_saved: float = 0.0
     cache_cost_saved: float = 0.0
     cache_cash_saved: float = 0.0  # part of cache_cost_saved that was billed money
+    # Review spend by perspective: {perspective: {"cost": charged for its launched sessions, "findings": raised}}.
+    review_spend: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Parallel packages (fan-out): what running them side by side saved, and what integrating them cost.
+    parallel_workers: int = 0
+    parallel_serial_s: float = 0.0  # the workers' sessions end to end, as if run one after another
+    parallel_span_s: float = 0.0  # first dispatch to last worker finished
+    integration_s: float = 0.0  # from each worker finishing to its result being integrated
+    integration_failures: int = 0  # completed workers whose result could not be integrated
+
+    @property
+    def parallel_saved_s(self) -> float:
+        return round(self.parallel_serial_s - self.parallel_span_s, 3)
 
     @property
     def cache_hits(self) -> int:
@@ -97,7 +109,8 @@ class RunMetrics:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {**asdict(self), "first_pass": self.first_pass, "cache_hits": self.cache_hits}
+        return {**asdict(self), "first_pass": self.first_pass, "cache_hits": self.cache_hits,
+                "parallel_saved_s": self.parallel_saved_s}
 
 
 def _tokens(session: dict[str, Any], key: str) -> int:
@@ -174,8 +187,59 @@ def run_metrics(events: Iterable[Event]) -> RunMetrics:
         delta_reviews=sum(1 for r in state.reviews if r.scope == "delta"),
         late_findings=_late_findings(state),
         followup_rounds=state.followup_rounds,
+        review_spend=_review_spend(state, events),
+        **_parallel(state, events),
         **_reuse_savings(events),
     )
+
+
+def _review_spend(state: Any, events: list[Event]) -> dict[str, dict[str, float]]:
+    """What each perspective's launched review sessions were charged, and the findings it raised.
+    Reused reviews cost nothing here; plan reviews (advice, no findings) are left out."""
+    out: dict[str, dict[str, float]] = {}
+    for e in events:
+        if e.type != ev.COST_CHARGED:
+            continue
+        task = str(e.payload.get("note", "")).rsplit(" ", 1)[-1]
+        if task.startswith("review-"):
+            row = out.setdefault(task[len("review-"):], {"cost": 0.0, "findings": 0})
+            row["cost"] = round(row["cost"] + float(e.payload.get("cost", 0.0)), 4)
+    for f in state.findings.values():
+        out.setdefault(f.perspective, {"cost": 0.0, "findings": 0})["findings"] += 1
+    return out
+
+
+def _parallel(state: Any, events: list[Event]) -> dict[str, Any]:
+    """Isolated (fan-out) packages only: in-place builders are not parallel work."""
+    isolated = {t for t, w in state.workers.items() if not w.package.get("in_place")}
+    start: dict[str, float] = {}
+    end: dict[str, float] = {}
+    integrated: dict[str, float] = {}
+    for e in events:
+        tid = e.payload.get("task_id")
+        if tid not in isolated:
+            continue
+        if e.type == ev.WORKER_TRANSITION:
+            to = e.payload.get("to")
+            if to == WorkerState.DISPATCHED.value:
+                start.setdefault(tid, e.ts)
+            elif to not in (s.value for s in WORKER_ACTIVE) and to != WorkerState.PENDING.value and tid in start:
+                end[tid] = e.ts
+        elif e.type == ev.WORKER_INTEGRATED:
+            integrated[tid] = e.ts
+    ran = [t for t in start if t in end]
+    if not ran:
+        return {}
+    serial = sum(end[t] - start[t] for t in ran)
+    span = max(end[t] for t in ran) - min(start[t] for t in ran)
+    done = [t for t in ran if state.workers[t].state is WorkerState.COMPLETED]
+    return {
+        "parallel_workers": len(ran),
+        "parallel_serial_s": round(serial, 3),
+        "parallel_span_s": round(span, 3),
+        "integration_s": round(sum(integrated[t] - end[t] for t in done if t in integrated), 3),
+        "integration_failures": sum(1 for t in done if t not in integrated),
+    }
 
 
 def _late_findings(state: Any) -> int:
@@ -222,6 +286,13 @@ class Aggregate:
     cache_seconds_saved: float = 0.0
     cache_cost_saved: float = 0.0
     cache_cash_saved: float = 0.0
+    # {perspective: {"cost", "findings", "cost_per_finding"}} over every run; cost_per_finding is None
+    # when a perspective found nothing (its spend bought no findings, which is information too).
+    review_spend: dict[str, dict[str, float | None]] = field(default_factory=dict)
+    parallel_runs: int = 0
+    parallel_saved_s: float = 0.0  # serial minus span, over every fan-out round
+    integration_s: float = 0.0
+    integration_failures: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -267,7 +338,25 @@ def aggregate(metrics: Iterable[RunMetrics]) -> Aggregate:
         cache_seconds_saved=round(sum(m.cache_seconds_saved for m in ms), 3),
         cache_cost_saved=round(sum(m.cache_cost_saved for m in ms), 4),
         cache_cash_saved=round(sum(m.cache_cash_saved for m in ms), 4),
+        review_spend=_spend_totals(ms),
+        parallel_runs=sum(1 for m in ms if m.parallel_workers),
+        parallel_saved_s=round(sum(m.parallel_saved_s for m in ms), 3),
+        integration_s=round(sum(m.integration_s for m in ms), 3),
+        integration_failures=sum(m.integration_failures for m in ms),
     )
+
+
+def _spend_totals(ms: list[RunMetrics]) -> dict[str, dict[str, float | None]]:
+    totals: dict[str, dict[str, float]] = {}
+    for m in ms:
+        for p, row in m.review_spend.items():
+            t = totals.setdefault(p, {"cost": 0.0, "findings": 0})
+            t["cost"] = round(t["cost"] + row["cost"], 4)
+            t["findings"] += int(row["findings"])
+    return {
+        p: {**t, "cost_per_finding": round(t["cost"] / t["findings"], 4) if t["findings"] else None}
+        for p, t in sorted(totals.items())
+    }
 
 
 def collect(store: EventStore) -> tuple[list[RunMetrics], dict[str, str]]:

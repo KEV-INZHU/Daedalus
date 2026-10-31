@@ -68,7 +68,15 @@ def test_agent_marker_is_shared(monkeypatch):
 def test_review_reason_uses_correct_article(ari, repo):
     rid = ari.start({"objective": "o"}, actor=HUMAN, mode="review")
     msg = next(r.message for r in ari.evaluate(rid).reasons if r.code == "review:aristotle")
-    assert "requires an aristotle review" in msg
+    assert "requires a quality review (Aristotle)" in msg  # plain name, with its article
+    assert "`daedalus review aristotle`" in msg  # commands keep the id
+
+
+def test_plain_names_take_the_right_article():
+    from daedalus.core.names import review_name, with_article
+
+    assert with_article(review_name("aristotle")) == "a quality review (Aristotle)"
+    assert with_article(review_name("ownership")) == "an ownership review"  # a custom perspective
 
 
 def test_run_with_wrongly_typed_payload_is_isolated(ari):

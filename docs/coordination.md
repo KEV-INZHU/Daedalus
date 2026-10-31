@@ -79,8 +79,22 @@ topic fails instead of creating one.
 
 Daedalus writers serialize on an OS lock (`flock`, or `msvcrt.locking` on Windows) held on
 `<bus>/.lock`. The lock file stays in place, and a crashed writer's lock is released with its
-process, so no stale lock ever has to be broken. **`bus.py` does not take that lock**, so when both
-write the same bus:
+process, so no stale lock ever has to be broken.
+
+**Give `bus.py` the same lock.** The lock is one standalone file,
+`src/daedalus/coordination/buslock.py`, which imports only the standard library. Copy it next to
+`bus.py`, and wrap each write (the topic append, the inbox fan-out, the `subscribers.json`
+rewrite) in it:
+
+```python
+from buslock import locked
+
+with locked(BUS_ROOT):          # the bus directory, the same one DAEDALUS_BUS_DIR points at
+    append_to_topic(message)
+    fan_out(message)
+```
+
+Until `bus.py` does that, when both write the same bus:
 
 - `subscribers.json` is read, changed and replaced whole by each side. Two concurrent subscription
   changes can lose one of them (a lost update). Subscribe Daedalus agents when `bus.py` is not
@@ -164,7 +178,12 @@ daedalus bus post answer "agreed" --reply-to msg-...
 daedalus bus ack msg-...
 ```
 
-`daedalus bus` is not a human-authority command, so it works inside agent sessions. Adapters that
+`daedalus bus` is not a human-authority command, so it works inside agent sessions.
+
+**Live delivery.** A launched `claude-code` builder also gets a `PostToolUse` hook (passed with
+`--settings`, so the repository's own settings are untouched). After each tool call it reads the
+agent's unread messages and adds them to the session's context, fenced as peer data like the
+bootstrap. Each message is handed over once, and errors never reach the session. Adapters that
 send only a prompt (the OpenAI-compatible adapter, for example) get the context through the
 prompt, but they cannot run `daedalus bus` mid-session.
 
@@ -195,6 +214,8 @@ like any other process with file access (see [security-model.md](security-model.
   (signed identities, a broker) is a proposal, not something this uses.
 - Reading through the channel is what the sealing and receipts see. A process that reads the bus
   files directly is not recorded as exposed to anything.
-- No push into a session that is already running. New messages reach it when it runs
-  `daedalus bus read`, or at its next launch.
+- Live delivery works only for launched builders on the `claude-code` adapter. For those, the
+  adapter adds a `PostToolUse` hook (`daedalus hook bus`, through `--settings`), which hands the
+  session its new messages after each tool call. Other adapters, and interactive sessions, get new
+  messages when they run `daedalus bus read`, or at their next launch.
 - `ack` is the agent's own claim. It is not evidence for acceptance.
