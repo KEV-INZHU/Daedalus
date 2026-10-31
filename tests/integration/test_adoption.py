@@ -234,8 +234,8 @@ def test_risk_resolves_paths_as_git_does(repo, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "src/auth/login.py" in out and "risk floors only" in out
     assert "not in the working tree (assessed as a deletion): src/auth/login.py" in out
-    assert main(["-C", str(repo), "risk", "src/auth/login.py"]) == 0  # from the -C directory
-    assert "src/auth/login.py" in capsys.readouterr().out
+    assert main(["-C", str(repo), "risk", "--json", "src/auth/login.py"]) == 0  # from the -C directory
+    assert json.loads(capsys.readouterr().out)["changed"] == ["src/auth/login.py"]
     assert main(["risk", "../../elsewhere.py"]) == 2
     assert main(["risk", ""]) == 2
 
@@ -345,3 +345,32 @@ def test_a_negative_cash_budget_does_not_load(tmp_path):
 
     root = make_repo(tmp_path / "r", {"adapter": "claude-code", "policy": {"default_budget": {"max_cash": -1}}})
     assert "does not load" in review_blocker(root)
+
+
+def test_tier_and_mode_reviews_are_two_lines_and_one_remedy(repo, ari):
+    from daedalus.cli.next import next_step
+
+    rid = ari.start({"objective": "o", "risk_tier": "high"}, actor=HUMAN, mode="council")
+    fix(repo)
+    ari.verify(rid)
+    d = ari.evaluate(rid)
+    lines = disposition_lines(d, repo, ari.state(rid))
+    groups = [ln for ln in lines if " requires " in ln and "reviews of candidate" in ln]
+    # the tier asks for three reviews; council mode adds the simplicity review the tier does not
+    assert len(groups) == 2, lines
+    assert groups[0].startswith("  [human] tier high") and groups[1].startswith("  [human] council mode")
+    assert "simplicity review (Mozi)" in groups[1]
+    remedies = [ln for ln in lines if "No adapter here can launch reviews" in ln]
+    assert len(remedies) == 1
+    assert "risk-exception" in remedies[0] and "mode asks for some of them" in remedies[0]
+    assert next_step(ari, rid)["who"] == "human"
+
+
+def test_next_on_a_mode_review_offers_no_risk_exception(repo, ari):
+    from daedalus.cli.next import next_step
+
+    rid = ari.start({"objective": "o"}, actor=HUMAN, mode="review")
+    fix(repo)
+    ari.verify(rid)
+    step = next_step(ari, rid)
+    assert step["who"] == "human" and "risk-exception" not in step["action"]

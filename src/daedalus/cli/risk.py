@@ -81,8 +81,7 @@ def _hash(root: Path, rel: str) -> str | None:
     """The content hash the gate's candidate would record (symlinks by their target text)."""
     from daedalus.repository.candidate import _hash_entry
 
-    h = _hash_entry(root, rel, [])
-    return None if h in (None, "unreadable") else h
+    return _hash_entry(root, rel, [])  # "unreadable" stays as the gate records it, never a deletion
 
 
 def _repo_path(root: Path, path: str, base: Path) -> str:
@@ -90,13 +89,17 @@ def _repo_path(root: Path, path: str, base: Path) -> str:
     the `-C` directory when one is given (as `git -C` does), else where you are."""
     if not path.strip():
         raise DaedalusError("an empty path names nothing: give a file or directory")
-    top = root.resolve()
-    # absolute + normpath, not resolve: a symlink is judged by where it sits, as the candidate sees it
-    full = Path(os.path.normpath(base.resolve() / path))
-    try:
-        rel = full.relative_to(top).as_posix()
-    except ValueError:
-        raise DaedalusError(f"{path} is outside the repository at {root}") from None
+    # absolute + normpath, not resolve: a symlink is judged by where it sits, as the candidate sees it.
+    # The root may itself be reached through a symlink, so compare with both of its spellings.
+    full = Path(os.path.normpath(Path(base).absolute() / path))
+    for top in dict.fromkeys((Path(os.path.normpath(root.absolute())), root.resolve())):
+        try:
+            rel = full.relative_to(top).as_posix()
+            break
+        except ValueError:
+            continue
+    else:
+        raise DaedalusError(f"{path} is outside the repository at {root}")
     return "" if rel == "." else rel
 
 
@@ -111,9 +114,13 @@ def _expand(root: Path, rel: str) -> list[str]:
     if is_git_repo(root):
         import subprocess
 
-        out = subprocess.run(["git", "-C", str(root), "ls-files", "-co", "--exclude-standard", "-z", "--", rel or "."],
-                             capture_output=True, check=False).stdout.decode("utf-8", "replace")
-        return [x for x in out.split("\0") if x]
+        from daedalus.repository.candidate import _split_z
+
+        r = subprocess.run(["git", "-C", str(root), "ls-files", "-co", "--exclude-standard", "-z", "--", rel or "."],
+                           capture_output=True, check=False)
+        if r.returncode != 0:
+            raise DaedalusError(f"cannot list {rel or '.'}: {r.stderr.decode('utf-8', 'replace').strip()}")
+        return _split_z(r.stdout)
     return sorted(Path(dp, f).relative_to(root).as_posix() for dp, _, fs in os.walk(p) for f in fs)
 
 

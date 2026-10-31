@@ -9,6 +9,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
 - Runs record new event types (`agent.registered`, `agent.retired`, `contract.proposed`,
   `contract.proposal_rejected`, `finding.answered`). Earlier
   versions do not know these events and refuse to replay such a run, so read it with this version or later.
+- Contracts may record `general: true` on a criterion. Earlier versions read such a contract but drop the
+  marker, so they show the criterion as proved by its checks; read these runs with this version or later.
 
 ### Added
 - `daedalus risk [PATH ...]`: preview the tier your uncommitted changes (or the paths you name) reach, which risk

@@ -204,6 +204,9 @@ def general_criteria_note(contract: Any) -> str | None:
             "Add a test for each one, or bind it to its own check with `--check <id>`.")
 
 
+BROKEN = "Reviews cannot launch: the configuration or adapter does not load (`daedalus doctor` says why)"
+
+
 def review_blocker(root: Path | None, state: Any = None) -> str | None:
     """Why this repository cannot launch independent reviews by itself, with the fix; None when it can.
     With a run's `state`, billed launches are judged against that run's budget and spend (the rule the
@@ -220,11 +223,8 @@ def review_blocker(root: Path | None, state: Any = None) -> str | None:
         adapter = make_adapter(cfg.adapter)
         caps = adapter.capabilities
         basis = getattr(adapter, "expected_cost_basis", lambda: None)()
-        max_cash = float(cfg.policy.default_budget.get("max_cash") or 0)
-        if not math.isfinite(max_cash) or max_cash < 0:
-            raise ValueError("max_cash must be a finite, non-negative number")
-    except Exception:  # noqa: BLE001 - any broken config or adapter means nothing launches
-        return "Reviews cannot launch: the configuration or adapter does not load (`daedalus doctor` says why)"
+    except (DaedalusError, ValueError, TypeError, OSError):  # a broken config or adapter: nothing launches
+        return BROKEN
     if not (caps.launch_agent and caps.structured_results and caps.identity == "launched"):
         if adapter.name == "inline":  # what an unset `adapter:` means
             return f"No adapter here can launch reviews: {fix}"
@@ -238,6 +238,13 @@ def review_blocker(root: Path | None, state: Any = None) -> str | None:
         except BudgetExhausted as exc:
             return str(exc)
         return None
+    if basis == "cash":
+        try:
+            max_cash = float(cfg.policy.default_budget.get("max_cash") or 0)
+        except (TypeError, ValueError):
+            return BROKEN
+        if not math.isfinite(max_cash) or max_cash < 0:
+            return BROKEN
     if basis == "cash" and not max_cash:
         return (f"`{adapter.name}` sessions here would be billed, and the budget allows no billed spend: set "
                 "`policy: {default_budget: {max_cash: <dollars>}}` in .daedalus.yml")
