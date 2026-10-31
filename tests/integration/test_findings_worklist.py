@@ -43,7 +43,8 @@ def test_an_answer_reaches_the_re_review_and_resolves_nothing(repo, ari, reviewe
         return AgentResult("COMPLETED", structured={"summary": "ok", "findings": [], "resolves": ["F1"]})
 
     launch_review(ari, reviewed, "aristotle", SimulatedAdapter({"aristotle": [rereview]}))
-    assert 'The builder says it addressed this: "renamed it to `status`"' in prompts[0]
+    assert 'The builder says it addressed this: "renamed it to \\u0060status\\u0060"' in prompts[0]
+    assert "`status`" not in prompts[0]  # backticks escaped like every other quoted data
     assert ari.state(reviewed).findings["F1"].resolved_by is not None  # the reviewer resolved it
 
 

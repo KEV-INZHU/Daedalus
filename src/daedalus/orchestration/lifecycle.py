@@ -30,14 +30,19 @@ from typing import Any
 from daedalus.adapters.base import Adapter, AgentRequest, AgentResult, require
 from daedalus.coordination.launch import Coordinator
 from daedalus.core.acceptance import Decision
-from daedalus.core.names import review_name
 from daedalus.core.errors import BudgetExhausted, ContractError, DaedalusError, IntegrationError
+from daedalus.core.names import review_name
 from daedalus.core.state_machine import Disposition, ExecutionState, Severity, WorkerState
 from daedalus.orchestration import prompts
 from daedalus.orchestration.ariadne import SEVERITY_SYNONYMS, SYSTEM, Ariadne
 from daedalus.repository import snapshot
 from daedalus.repository.candidate import diff_text
-from daedalus.verification.evidence_cache import EvidenceCache, adapter_identity, review_inputs, review_key_from
+from daedalus.verification.evidence_cache import (
+    EvidenceCache,
+    adapter_identity,
+    review_inputs,
+    review_key_from,
+)
 
 Notify = Callable[[str], None]
 
@@ -779,8 +784,11 @@ def drive(
     accepted_before_followup: Any = None  # the acceptable candidate a follow-up round started from
     followup_round = 0
     coord = Coordinator(ari, run_id, notify)  # coordination settings are fixed for the whole drive
-    if ari.config().plan_review and ari.state(run_id).contract.budget.max_workers <= 1:
-        feedback = plan_round(ari, run_id, adapter, notify)  # round 1 builds against a reviewed plan
+    if ari.config().plan_review:
+        if ari.state(run_id).contract.budget.max_workers <= 1:
+            feedback = plan_round(ari, run_id, adapter, notify)  # round 1 builds against a reviewed plan
+        else:  # parallel runs plan their packages instead; a design plan would describe no one builder
+            notify("plan review skipped: this run may fan out to parallel workers (max_workers > 1)")
     for round_no in range(1, max_rounds + 1):
         if ari.state(run_id).execution is not ExecutionState.RUNNING:
             break  # cancelled (or finished) elsewhere: no further rounds

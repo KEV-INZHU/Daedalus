@@ -59,8 +59,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
   launched session (the command adapter passes both through; read-only sessions never get the grant).
 
 ### Changed
-- A check that fails because a Python module is not installed says so in its reason ("`pytest` is not installed
-  where the check ran, so this is not a test result"), with the bootstrap fix for fresh containers.
+- A check that fails because a Python module is not installed says it looks like a missing tool (never for a
+  module the repository itself provides), with the bootstrap fix for fresh containers.
 - Messages people read name roles by what they do: "a quality review (Aristotle)", "the arbiter (Plato)", in gate
   reasons, the stop hook and `daedalus run` progress. Commands, reason codes and the audit log keep the ids
   (`daedalus review aristotle`, `review:aristotle`).

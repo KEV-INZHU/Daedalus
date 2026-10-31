@@ -65,7 +65,8 @@ committed configuration, so changing it raises the run's tier to critical.
 Install what the **checks** need too, not only Daedalus: with `pip install -e .` alone, a fresh
 container has Daedalus but no pytest, and every check fails. For a Python project with test
 extras, use `pip install -q -e ".[dev]"` (or your project's equivalent). A check that fails because a
-Python module is missing now says so ("`pytest` is not installed where the check ran, so this is
-not a test result"), rather than reading as a failed test.
+Python module is missing now says so ("this looks like a missing tool, not a test result: `pytest`
+is not installed where the check ran"), rather than reading as a failed test. A module the
+repository itself provides never gets that note: failing to import your own code is a real failure.
 
 See also [../gate-workflow.md](../gate-workflow.md) and [../troubleshooting.md](../troubleshooting.md).

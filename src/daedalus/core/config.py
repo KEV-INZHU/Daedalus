@@ -36,8 +36,8 @@ from typing import Any
 import yaml
 
 from daedalus.core.contracts import MODES
-from daedalus.core.paths import MAKEFILE_NAMES
 from daedalus.core.errors import PolicyError
+from daedalus.core.paths import MAKEFILE_NAMES
 from daedalus.core.policy import (
     DEFAULT_MAX_AGE_S,
     Policy,

@@ -83,9 +83,31 @@ def test_nothing_is_pushed_by_default(tmp_path, clock):
         {"push": "origin", "pull_request": "yes"},
         {"push": "origin", "other": 1},
         "origin",
+        {"push": "--upload-pack=x"},  # would be read as an option
+        {"push": "origin", "base": "-x"},
+        {"push": " "},
     ],
 )
 def test_bad_ship_settings_are_refused(tmp_path, ship):
     root = make_repo(tmp_path / "r", {"factory": {"ship": ship}})
     with pytest.raises(FactoryError):
         factory_config(root)
+
+
+def test_a_hanging_push_is_bounded_and_reported(tmp_path, clock, monkeypatch):
+    from daedalus.factory import line as line_mod
+
+    real = line_mod.subprocess.run
+
+    def hang(cmd, *a, **kw):
+        if cmd[:1] == ["git"] and "push" in cmd:
+            assert kw.get("stdin") is line_mod.subprocess.DEVNULL and kw["env"]["GIT_TERMINAL_PROMPT"] == "0"
+            assert kw.get("timeout") == line_mod.SHIP_TIMEOUT_S and "--" in cmd
+            raise line_mod.subprocess.TimeoutExpired(cmd, kw["timeout"])
+        return real(cmd, *a, **kw)
+
+    monkeypatch.setattr(line_mod.subprocess, "run", hang)
+    root, _ = shipping_repo(tmp_path, {"push": "origin"})
+    report = run_line(root, clock)
+    assert report.shipped == ["fix"]
+    assert any("push to origin failed: timed out" in n for n in report.notes)

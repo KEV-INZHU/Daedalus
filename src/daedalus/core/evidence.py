@@ -158,7 +158,8 @@ def check_status(state: RunState, obs: Observation, check_id: str) -> tuple[Chec
         state_ = CheckState.FAIL if e.result == "FAIL" else CheckState.ERROR
         return state_, (
             f"a holdout check did not pass on candidate {cand[:12]}. Its name and output are kept from the "
-            "builder: make the work meet the contract's criteria. A person can read it with `daedalus log`."
+            "builder: make the work meet the contract's criteria. A person sees which check it was with "
+            "`daedalus status` outside an agent session; its log is kept outside the repository."
         )
     if e.result == "FAIL":
         where = f" Log: {e.log_path}" if e.log_path else ""
