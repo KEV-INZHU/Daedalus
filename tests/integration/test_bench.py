@@ -119,3 +119,63 @@ def test_words_match_whole_words_only(cases):
     assert not names_bug(c, {"title": "the output is computed", "evidence": "tokens.py"})  # 'utc' inside a word
     assert names_bug(c, {"title": "compares local time with a UTC expiry", "evidence": "tokens.py"})
     assert not names_bug(c, {"title": "wrong", "evidence": "src/tokens.py:1"})  # far from line 6
+
+
+def test_word_matching_needs_whole_words():
+    from daedalus.bench import _word
+
+    assert not _word("utc", "the output is computed") and _word("utc", "a utc expiry")
+    assert _word("../", "a name with ../ in it") and not _word("", "anything")
+
+
+@pytest.mark.parametrize("rel", ["./a.py", "a/./b.py", ".GIT/config", "x/.Git/y"])
+def test_dot_and_git_paths_are_refused(tmp_path, rel):
+    import yaml
+
+    bad = tmp_path / "c.yaml"
+    bad.write_text(yaml.safe_dump({"cases": [{"name": "x", "objective": "o", "before": {}, "after": {rel: "a"}}]}))
+    with pytest.raises(DaedalusError, match="relative path"):
+        load_cases(bad)
+
+
+def test_a_summary_with_nothing_scored_still_renders(cases):
+    from daedalus.bench import render, summarize
+
+    out = "\n".join(render(summarize([], SimulatedAdapter({}), False, 1)))
+    assert "n/a" in out and "None" not in out
+    rev = SimulatedAdapter({"aristotle": [ScriptedStep(structured={"summary": "s", "findings": []})]})
+    out = "\n".join(render(run_bench([cases["clean-helper"]], rev)))
+    assert "recall: caught 0 of 0 planted bugs (n/a)" in out and "$0.0000 per review" in out
+
+
+def test_only_a_finding_about_missing_tests_is_a_test_gap():
+    from daedalus.bench import test_gap
+
+    assert test_gap({"title": "No tests added for clamp"}) and test_gap({"title": "Untested failure path"})
+    assert not test_gap({"title": "Retry limit can be exceeded, and no test covers it"})
+
+
+@pytest.mark.parametrize("title", ["Missing unit tests for clamp", "Lack of tests for the retry",
+                                   "Tests do not cover the failure path", "No new unit tests added"])
+def test_common_test_gap_phrasings_are_recognised(title):
+    from daedalus.bench import test_gap
+
+    assert test_gap({"title": title})
+
+
+@pytest.mark.parametrize("rel", ["a\x00.py", "c:x.py", "dir./a.py", "a.py "])
+def test_unsafe_case_names_are_refused(tmp_path, rel):
+    import yaml
+
+    bad = tmp_path / "c.yaml"
+    bad.write_text(yaml.safe_dump({"cases": [{"name": "x", "objective": "o", "before": {}, "after": {rel: "a"}}]}))
+    with pytest.raises(DaedalusError, match="relative path"):
+        load_cases(bad)
+
+
+@pytest.mark.parametrize("title", ["**No tests** for clamp", "[MAJOR] Missing tests for x", "Lacking tests",
+                                   "Coverage is missing for the retry"])
+def test_test_gaps_behind_markup_are_recognised(title):
+    from daedalus.bench import test_gap
+
+    assert test_gap({"title": title})

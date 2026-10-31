@@ -47,6 +47,13 @@ Daedalus re-runs your checks on the exact working tree, launches the independent
 risk requires, and either sends reasons back to the agent or records the run **ACCEPTED**. Accepted
 commits carry `Daedalus-Run` trailers. See [docs/gate-workflow.md](docs/gate-workflow.md).
 
+Reviews you can measure: every finding carries the reviewer's stated confidence, `daedalus calibration`
+scores those forecasts against what happened (Brier score), and `daedalus bench` runs a reviewer on planted
+bugs. `mode: lite` puts one short review on every change for about $0.002 on Haiku; in one pass over the
+built-in corpus, a floor test rather than a ranking, it caught all ten planted bugs with no false alarms on the
+clean changes
+([docs/calibration.md](docs/calibration.md)).
+
 How strict? `daedalus init --preset solo|standard|strict` picks a policy
 ([docs/configuration.md](docs/configuration.md#presets)). Unfamiliar word? See
 [docs/concepts.md](docs/concepts.md). Something not working? See

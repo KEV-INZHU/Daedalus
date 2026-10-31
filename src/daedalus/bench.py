@@ -102,14 +102,21 @@ def _files(src: Path, case: str, key: str, v: Any) -> dict[str, str]:
     if not isinstance(v, dict) or not all(isinstance(k, str) and isinstance(b, str) for k, b in v.items()):
         raise DaedalusError(f"{src}: case {case}: `{key}` must map file paths to their text")
     for rel in v:
-        parts = Path(rel).parts
-        if not rel.strip() or Path(rel).is_absolute() or ".." in parts or (parts and parts[0] == ".git"):
+        parts = rel.replace("\\", "/").split("/")
+        if (not rel.strip() or Path(rel).is_absolute() or any(x in ("", ".", "..") for x in parts)
+                or any(x.casefold() == ".git" for x in parts) or any(ord(ch) < 32 for ch in rel)
+                or any(":" in x or x != x.rstrip(". ") for x in parts)):
             raise DaedalusError(f"{src}: case {case}: {rel!r} must be a relative path inside the case")
     return dict(v)
 
 
-_TEST_GAP = re.compile(r"\b(no|missing|without|lacks?|add(ed)?)\b[^.]{0,40}\btests?\b|\buntested\b|"
-                       r"\btests?\b[^.]{0,30}\b(missing|cover|pin|added)\b", re.IGNORECASE)
+# The test gap must be the finding's subject: "No tests for ...", "Missing unit tests ...", "Untested ...",
+# "Tests do not cover ...".
+_TEST_GAP = re.compile(r"^[\s*_`#>-]*(\[\w+\]\s*)?(no|missing|add(ed)?|lacks?|lacking|lack\s+of)\s+(\w+\s+){0,2}tests?\b|^\s*untested\b|"
+                       r"^\s*(the\s+)?(\w+\s+)?tests?\s+(are\s+|is\s+)?missing\b|"
+                       r"^\s*(the\s+)?(\w+\s+)?tests?\s+(do\s+not|don't|does\s+not|doesn't|never)\s+(cover|exercise|check|pin)|"
+                       r"^\s*no\s+test\s+(covers|pins|checks|exercises)\b|"
+                       r"^\s*(test\s+)?coverage\s+(is\s+)?missing\b", re.IGNORECASE)
 
 
 def test_gap(f: dict[str, Any]) -> bool:
@@ -354,19 +361,22 @@ def render(s: dict[str, Any]) -> list[str]:
         return "n/a" if x is None else f"{x:.0%}"
 
     fb, rb = s["findings_brier"], s["residual_brier"]
-    s = {k: ("n/a" if v is None else v) for k, v in s.items()}
+
+    def na(x, fmt="{}"):
+        return "n/a" if x is None else fmt.format(x)
+
     lines = [
         f"reviewer {s['reviewer']}{' (lite)' if s['lite'] else ''} · {s['reviews']} review(s)"
         + (f", {s['failed']} failed" if s["failed"] else ""),
         f"  recall: caught {s['caught']} of {s['planted']} planted bugs ({pct(s['recall'])})",
         f"  false alarms: {s['clean_cases_with_false_alarm']} of {s['clean']} clean changes drew a MAJOR+ finding "
-        f"({s['false_serious_per_clean_review']} per clean change)",
+        f"({na(s['false_serious_per_clean_review'])} per clean change)",
         f"  also: {s['other_serious']} MAJOR+ finding(s) on planted cases about something else (may be real: see "
         f"`details`), {s['test_gaps']} saying tests are missing (the cases have none, by design)",
         f"  calibration: findings Brier {fb['brier'] if fb['brier'] is not None else 'n/a'} over {fb['n']}"
         f" · residual risk Brier {rb['brier'] if rb['brier'] is not None else 'n/a'} over {rb['n']} (0 is perfect)",
-        f"  cost ${s['cost']:.4f} ({s['cost_per_review']} per review, {'/'.join(s['cost_basis'])})"
-        f" · {s['seconds_per_review']}s per review",
+        f"  cost ${s['cost']:.4f} ({na(s['cost_per_review'], '${:.4f}')} per review, {'/'.join(s['cost_basis'])})"
+        f" · {na(s['seconds_per_review'], '{}s')} per review",
     ]
     missed = [c["case"] for c in s["cases"] if c["planted"] and c["status"] == "COMPLETED" and not c["caught"]]
     if missed:

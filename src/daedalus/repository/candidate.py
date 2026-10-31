@@ -184,7 +184,9 @@ def diff_text(root: str | Path, manifest: CandidateManifest, limit: int = MAX_DI
     if base and is_git_repo(root):
         paths = list(manifest.changed_paths)
         if paths:
-            r = _git(root, "diff", "--relative", "--no-renames", base, "--", *paths, check=False)
+            # The user's diff settings (no prefixes, colour, external tools) must not change what is parsed.
+            r = _git(root, "diff", "--relative", "--no-renames", "--no-color", "--no-ext-diff", "--src-prefix=a/",
+                     "--dst-prefix=b/", base, "--", *paths, check=False)
             chunks += split_diff(r.stdout.decode("utf-8", "replace"))
             tracked = set(
                 _split_z(
@@ -212,14 +214,60 @@ def split_diff(text: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for part in ("\n" + text).split("\ndiff --git ")[1:]:
         lines = part.split("\n")
-        path = next((ln[6:] for ln in lines if ln.startswith("+++ b/")), None) or next(
-            (ln[6:] for ln in lines if ln.startswith("--- a/")), None)
+        header = []
+        for ln in lines[1:]:
+            if ln.startswith("@@"):
+                break  # past the header: content lines can start with --- or +++ too
+            header.append(ln)
+        path = next((_diff_path(ln[4:]) for ln in header if ln.startswith("+++ ") and ln[4:] != "/dev/null"), None) \
+            or next((_diff_path(ln[4:]) for ln in header if ln.startswith("--- ") and ln[4:] != "/dev/null"), None)
         if path is None:  # no content lines (a mode change, a binary file): the header names it
-            path = lines[0].rsplit(" b/", 1)[-1]
+            path = _header_path(lines[0])
         out.append((path, "diff --git " + part.rstrip("\n")))
     if not out and text.strip():
         out.append(("", text.rstrip("\n")))
     return out
+
+
+_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _unquote(name: str) -> str:
+    """Git's C-style quoting (`"caf\\303\\251.py"`) undone: octal escapes are UTF-8 bytes."""
+    out = bytearray()
+    i, s = 0, name[1:-1]
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s):
+            n = s[i + 1]
+            octal = s[i + 1:i + 4]
+            if len(octal) == 3 and all(x in "01234567" for x in octal):
+                out.append(int(octal, 8) & 0xFF)
+                i += 4
+                continue
+            out.append(_ESCAPES.get(n, ord(n) if ord(n) < 128 else 63))
+            i += 2
+            continue
+        out += c.encode("utf-8")
+        i += 1
+    return out.decode("utf-8", "replace")
+
+
+def _diff_path(name: str) -> str:
+    """A ---/+++ name as a path: git ends a name holding spaces with a tab, and quotes unusual ones."""
+    name = name[:-1] if name.endswith("\t") else name
+    if len(name) >= 2 and name[0] == name[-1] == '"':
+        name = _unquote(name)
+    return name[2:] if name[:2] in ("a/", "b/") else name
+
+
+def _header_path(head: str) -> str:
+    """The b/ path of a `diff --git` header line (after the prefix), quoted or not."""
+    if head.endswith('"'):
+        start = head.rfind(' "', 0, len(head) - 1)
+        if start != -1:
+            return _diff_path(head[start + 1:])
+    return head.rsplit(" b/", 1)[-1]
 
 
 MIN_SHARE = 400  # below this a file's share shows nothing useful: list it instead
@@ -244,13 +292,17 @@ def fit_diff(chunks: list[tuple[str, str]], limit: int) -> str:
         share = left // (len(order) - n)
         if len(body) <= share:
             kept[i] = body
-            left -= len(body)
+            left -= len(body) + 1  # and the newline that joins it to the next
             continue
         if share < MIN_SHARE:
             omitted.append(f"{path or '(diff)'} ({len(body)} chars)")
             continue
-        marker = f"\n... {path}: shown {{}} of {len(body)} chars; read the file for the rest ..."
+        label = path if len(path) <= 120 else "..." + path[-117:]
+        marker = f"\n... {label}: shown {{}} of {len(body)} chars; read the file for the rest ..."
         room = share - len(marker) - 8
+        if room < MIN_SHARE // 2:  # a long name leaves no useful room: list the file instead
+            omitted.append(f"{path or '(diff)'} ({len(body)} chars)")
+            continue
         head = body[:room]
         at = head.rfind("\n@@")
         if at < room // 2:  # no hunk boundary in the back half: cut at a line instead
@@ -267,7 +319,13 @@ def fit_diff(chunks: list[tuple[str, str]], limit: int) -> str:
     if omitted:
         notes.append("Not shown at all (read these in the repository): " + _names(omitted, room))
     tail = "\n" + "\n".join(notes)
-    return text[: max(0, limit - len(tail))] + tail  # the notes always fit, whatever the paths add up to
+    if len(text) + len(tail) > limit:  # only when the notes ran long: say so rather than trim silently
+        stop = "\n... (the diff above is cut short here to fit the notes below) ..."
+        room = limit - len(tail) - len(stop)
+        if room <= 0:
+            return tail.lstrip("\n")[:limit]  # nothing of the diff fits: the notes alone
+        text = text[:room] + stop
+    return text + tail
 
 
 def _names(paths: list[str], room: int) -> str:

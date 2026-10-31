@@ -60,3 +60,60 @@ def test_split_diff_keeps_paths_and_order():
 def test_split_diff_reads_the_path_from_the_file_lines():
     text = ("diff --git a/x b/y b/x b/y b/z\n--- a/x b/y\n+++ b/x b/y b/z\n@@ -1 +1 @@\n-a\n+b")
     assert split_diff(text)[0][0] == "x b/y b/z"
+
+
+def test_paths_with_spaces_or_quotes_are_read_cleanly():
+    tabbed = "diff --git a/my file.py b/my file.py\n--- a/my file.py\t\n+++ b/my file.py\t\n@@ -1 +1 @@\n-a\n+b"
+    assert split_diff(tabbed)[0][0] == "my file.py"
+    quoted = 'diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -1 +1 @@\n-a\n+b'
+    assert split_diff(quoted)[0][0] == "café.py"
+    new = "diff --git a/n.py b/n.py\nnew file mode 100644\n--- /dev/null\n+++ b/n.py\n@@ -0,0 +1 @@\n+--- x"
+    assert split_diff(new)[0][0] == "n.py"
+
+
+def test_deleted_binary_and_mode_only_files_keep_their_paths():
+    deleted = "diff --git a/old.py b/old.py\ndeleted file mode 100644\n--- a/old.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x"
+    assert split_diff(deleted)[0][0] == "old.py"
+    binary = 'diff --git "a/caf\\303\\251.png" "b/caf\\303\\251.png"\nBinary files differ'
+    assert split_diff(binary)[0][0] == "café.png"
+    mode = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755"
+    assert split_diff(mode)[0][0] == "run.sh"
+
+
+def test_kept_files_are_counted_with_their_joiners_and_notes_alone_never_overflow():
+    chunks = [_file(f"f{i}.py", 1) for i in range(30)] + [_file("big.py", 400)]
+    out = fit_diff(chunks, 6_000)
+    assert len(out) <= 6_000 and "cut short here" not in out  # the budget held without the last-resort cut
+    tiny = fit_diff([_file("a" * 300 + ".py", 50), _file("b" * 300 + ".py", 50)], 300)
+    assert len(tiny) <= 300 and "cut short here" not in tiny
+
+
+def test_many_small_kept_files_fit_without_the_last_resort_cut():
+    chunks = [("t.py", "x") for _ in range(1000)] + [_file("big.py", 2000)]
+    out = fit_diff(chunks, 20_000)
+    assert len(out) <= 20_000 and "cut short here" not in out
+
+
+def test_a_very_long_path_is_listed_not_sliced_backwards():
+    long = "d/" * 300 + "f.py"
+    out = fit_diff([_file(long, 400), _file("b.py", 400)], 3_000)
+    assert len(out) <= 3_000
+    assert out.count("+new 1 ") < 10  # the long-named file was not kept nearly whole
+
+
+def test_the_users_diff_settings_do_not_change_the_paths(tmp_path):
+    from conftest import git, make_repo
+    from daedalus.repository.candidate import capture, diff_text
+
+    root = make_repo(tmp_path / "r")
+    git(root, "config", "diff.noprefix", "true")
+    git(root, "config", "color.diff", "always")
+    (root / "src" / "lib.py").write_text("x = 2\n")
+    text = diff_text(root, capture(root, _base(root)))
+    assert "+++ b/src/lib.py" in text and "\x1b[" not in text
+
+
+def _base(root):
+    import subprocess
+
+    return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()

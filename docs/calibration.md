@@ -79,3 +79,23 @@ Results are kept in `.daedalus/bench/`. Billed adapters need `--yes`.
 A finding counts as naming a bug when it names the bug's file and either a line within three of it or a word a
 finding about it would use. That is generous to a reviewer that names the right file for the wrong reason, so read
 the unfounded-findings count beside recall.
+
+### First results (October 2026, built-in corpus, one pass each)
+
+| Reviewer | Planted bugs caught | Clean changes with a false alarm | Findings Brier | Residual-risk Brier | Cost per review |
+|---|---|---|---|---|---|
+| Sonnet, full prompt | 10 / 10 | 0 / 4 | 0.062 | 0.013 | $0.018 |
+| Haiku, lite prompt (`mode: lite`) | 10 / 10 | 0 / 4 | 0.077 | 0.044 | $0.0016 |
+| Haiku, full prompt | 10 / 10 | 1 / 4 | 0.164 | 0.045 | $0.0028 |
+
+What it shows, and what it doesn't:
+
+- Every setup caught every planted bug, so this corpus is too easy to rank reviewers by recall. What separates
+  them is noise and calibration: Sonnet's confidence tracked the truth best, and the lite prompt made Haiku both
+  cheaper and better calibrated than the full prompt did, at about a tenth of Sonnet's cost.
+- One pass, 14 cases: a single run moves these numbers. Use `--repeat` and your own cases before deciding.
+- The one "false alarm" (Haiku, full prompt, on the retry change) said the new `attempts` argument lets callers
+  exceed "at most three attempts". That is arguably a fair reading of the criterion, which is the point of
+  reading the findings beside the score.
+- Harder cases (bugs spread over two files, bugs that need the code the diff does not show) are the next
+  addition; until then, read recall here as a floor test, not a ranking.
