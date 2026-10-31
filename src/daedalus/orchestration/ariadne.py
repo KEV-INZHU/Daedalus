@@ -592,7 +592,8 @@ class Ariadne:
         f = state.findings.get(finding_id)
         if f is None or f.resolved_by is not None:
             raise ContractError(f"{finding_id} is not an open finding")
-        if actor != f.reviewer and not (not is_agent(actor) and state.policy.has_authority(actor, "attest")):
+        raiser = state.identity_of(actor) == state.identity_of(f.reviewer)  # any alias of the reviewer's principal
+        if not raiser and not (not is_agent(actor) and state.policy.has_authority(actor, "attest")):
             raise AuthorizationError(
                 "only the raising reviewer or a human with `attest` authority resolves a finding"
             )
@@ -668,7 +669,9 @@ class Ariadne:
         b = state.open_blockers.get(blocker_id)
         if b is None:
             raise ContractError(f"{blocker_id} is not an open blocker")
-        if actor != b["raised_by"] and not state.policy.has_authority(actor, "attest"):
+        if state.identity_of(actor) != state.identity_of(b["raised_by"]) and not state.policy.has_authority(
+            actor, "attest"
+        ):
             raise AuthorizationError(
                 "only whoever raised a blocker, or a human with `attest` authority, resolves it"
             )

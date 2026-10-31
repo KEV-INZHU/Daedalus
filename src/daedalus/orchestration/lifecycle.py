@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from daedalus.adapters.base import Adapter, AgentRequest, AgentResult, require
+from daedalus.coordination.launch import Coordinator
 from daedalus.core.acceptance import Decision
 from daedalus.core.errors import BudgetExhausted, ContractError, DaedalusError, IntegrationError
 from daedalus.core.state_machine import Disposition, ExecutionState, Severity, WorkerState
@@ -182,7 +183,8 @@ def _well_formed(findings: Any) -> bool:
 
 
 def launch_review(
-    ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, notify: Notify = _quiet
+    ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, notify: Notify = _quiet,
+    coord: Coordinator | None = None,
 ) -> str | None:
     """Launch one independent, read-only review. Returns the review id, or None
     when the reviewer failed or returned nothing valid (recorded as a failed review)."""
@@ -222,6 +224,19 @@ def launch_review(
                                        first_pass=not again, integrity=integrity)
         notify(f"launching {perspective} review of candidate {cand.short}")
     snapshot.save(ari.root, run_dir, cand.candidate_id, cand.manifest)  # best effort: else the next is full
+    # Registered before it works, so its review is attributed to its principal. No peer messages
+    # go into a review prompt (coordination/launch.py).
+    coord = coord or Coordinator(ari, run_id, notify)
+    name = coord.name(perspective, f"review-{perspective}", f"agent:reviewer:{perspective}")
+    try:
+        return _run_review(ari, run_id, perspective, adapter, notify, prompt, cand, prior, delta, keyed, coord, name)
+    finally:
+        coord.retire(name)
+
+
+def _run_review(ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, notify: Notify, prompt: str,
+                cand: Any, prior: list[dict[str, Any]], delta: Any, keyed: Any, coord: Coordinator,
+                name: str | None) -> str | None:
     started = ari.clock()
     res = adapter.run_agent(
         AgentRequest(
@@ -246,7 +261,7 @@ def launch_review(
     if not isinstance(body, dict) or not isinstance(body.get("findings", []), list):
         failed("reviewer returned no valid JSON result block")
         return None
-    reviewer = f"agent:reviewer:{perspective}:{(res.session_id or 'session')[:8]}"
+    reviewer = name or f"agent:reviewer:{perspective}:{(res.session_id or 'session')[:8]}"
     open_ids = {p["id"] for p in prior}
     try:
         rid = ari.submit_review(
@@ -265,13 +280,15 @@ def launch_review(
             # The key binds to the candidate reviewed: if the tree moved since it was computed there is none.
             extra={**({"cache_key": keyed[1], "cache_inputs": keyed[2]}
                       if keyed is not None and delta is None and keyed[0] == cand.candidate_id else {}),
-                   "duration_s": round(ari.clock() - started, 3), "cost": res.cost, "cost_basis": res.cost_basis},
+                   "duration_s": round(ari.clock() - started, 3), "cost": res.cost, "cost_basis": res.cost_basis,
+                   "session_id": res.session_id},
         )
     except (ContractError, DaedalusError) as exc:
         failed(f"invalid review result: {exc}")
         return None
     n = len(body.get("findings", []))
     notify(f"{perspective} review {rid}: {n} finding(s)")
+    coord.post_findings(name, body.get("findings", []))
     return rid
 
 
@@ -345,7 +362,7 @@ def arbitrate(
 
 
 def launch_required_reviews(
-    ari: Ariadne, run_id: str, adapter: Adapter, notify: Notify = _quiet
+    ari: Ariadne, run_id: str, adapter: Adapter, notify: Notify = _quiet, coord: Coordinator | None = None
 ) -> list[str]:
     """Launch every review the decision still needs, plus a re-review by each
     perspective with an open blocking finding (only that perspective resolves it)."""
@@ -358,12 +375,14 @@ def launch_required_reviews(
         if f.severity.value in state.policy.blocking_severities and f.perspective not in pending
     ]
     pending = list(dict.fromkeys(pending))
-    return [rid for p in pending if (rid := launch_review(ari, run_id, p, adapter, notify))]
+    coord = coord or Coordinator(ari, run_id, notify)
+    return [rid for p in pending if (rid := launch_review(ari, run_id, p, adapter, notify, coord))]
 
 
 # --------------------------------------------------------------------- build
 def build_round(
-    ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, feedback: list[str], notify: Notify = _quiet
+    ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, feedback: list[str], notify: Notify = _quiet,
+    coord: Coordinator | None = None,
 ) -> dict[str, Any]:
     """Plan, dispatch and run one in-place Builder package. Returns the Builder's structured result."""
     state = ari._running(run_id)
@@ -383,11 +402,21 @@ def build_round(
         ],
         actor=SYSTEM,
     )
-    w = ari.dispatch(run_id, task_id, principal="agent:brunel")
+    coord = coord or Coordinator(ari, run_id, notify)
+    name = coord.name("brunel", task_id, "agent:brunel")  # every round's name stands for agent:brunel
+    try:
+        return _run_build(ari, run_id, adapter, round_no, feedback, notify, state, task_id, coord, name)
+    finally:
+        coord.retire(name)
+
+
+def _run_build(ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, feedback: list[str], notify: Notify,
+               state: Any, task_id: str, coord: Coordinator, name: str | None) -> dict[str, Any]:
+    w = ari.dispatch(run_id, task_id, principal=name or "agent:brunel")
     notify(f"round {round_no}: Brunel is building ({task_id})")
     runnable, skipped = check_commands(state)
     try:
-        res = adapter.run_agent(
+        request = coord.prepare(
             AgentRequest(
                 run_id,
                 task_id,
@@ -397,8 +426,10 @@ def build_round(
                 BUILD_TIMEOUT_S,
                 should_stop=ari.stop_check(run_id),
                 run_commands=runnable,
-            )
+            ),
+            name,
         )
+        res = adapter.run_agent(request)
     except Exception as exc:
         ari.worker_finished(run_id, task_id, status="FAILED", note=f"adapter error: {exc}")
         raise
@@ -482,7 +513,8 @@ def _plan_packages(body: Any, round_no: int, taken: set[str] | frozenset[str] = 
 
 
 def fan_out_round(
-    ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, notify: Notify = _quiet
+    ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, notify: Notify = _quiet,
+    coord: Coordinator | None = None,
 ) -> dict[str, Any] | None:
     """Plan, validate, run and integrate parallel packages.
 
@@ -528,6 +560,7 @@ def fan_out_round(
         failures.append(f"{tid}: {why}")
 
     def finish(tid: str, out: AgentResult, *, integrate: bool = True) -> None:
+        coord.retire(names.get(tid))  # its session is over, whatever the outcome
         ok = ("COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED")
         body = out.structured or {}
         status = out.status if out.status in ok else "FAILED"
@@ -556,6 +589,8 @@ def fan_out_round(
 
     stop = ari.stop_check(run_id)
     runnable, skipped = check_commands(state)
+    coord = coord or Coordinator(ari, run_id, notify)
+    names: dict[str, str | None] = {}
     pool = ThreadPoolExecutor(max_workers=cap, thread_name_prefix="daedalus-worker")
     aborted = False
     try:
@@ -573,8 +608,9 @@ def fan_out_round(
                 if len(running) >= cap or not deps[tid] <= integrated:
                     continue
                 pending.remove(tid)
+                names[tid] = coord.name("brunel", tid, f"agent:worker:{tid}")
                 try:
-                    w = ari.dispatch(run_id, tid, principal=f"agent:worker:{tid}")
+                    w = ari.dispatch(run_id, tid, principal=names[tid] or f"agent:worker:{tid}")
                 except DaedalusError as exc:  # this package cannot start; the others go on
                     ari._worker_transition(run_id, tid, WorkerState.CANCELLED, f"dispatch failed: {exc}")
                     fail(tid, f"dispatch failed: {exc}")
@@ -582,10 +618,10 @@ def fan_out_round(
                 if not w.workspace:  # never let a parallel worker loose in the authoritative tree
                     finish(tid, AgentResult("FAILED", error="no isolated workspace"), integrate=False)
                     continue
-                req = AgentRequest(
+                req = coord.prepare(AgentRequest(
                     run_id, tid, "brunel", prompts.worker_prompt(state.contract, w.package, runnable, skipped),
                     Path(w.workspace), BUILD_TIMEOUT_S, should_stop=stop, run_commands=runnable,
-                )
+                ), names[tid])
                 running[pool.submit(adapter.run_agent, req)] = tid
                 notify(f"dispatched {tid} ({len(running)}/{cap} running)")
             if not running:
@@ -625,6 +661,8 @@ def fan_out_round(
                 ari._worker_transition(run_id, tid, WorkerState.CANCELLED, "fan-out round ended")
                 fail(tid, "never started")
         pool.shutdown(wait=not aborted, cancel_futures=aborted)
+        for name in names.values():
+            coord.retire(name)
     return {"integrated": sorted(integrated), "failures": failures}
 
 
@@ -667,6 +705,7 @@ def drive(
     rounds = 0
     accepted_before_followup: Any = None  # the acceptable candidate a follow-up round started from
     followup_round = 0
+    coord = Coordinator(ari, run_id, notify)  # coordination settings are fixed for the whole drive
     for round_no in range(1, max_rounds + 1):
         if ari.state(run_id).execution is not ExecutionState.RUNNING:
             break  # cancelled (or finished) elsewhere: no further rounds
@@ -676,14 +715,14 @@ def drive(
         try:
             fan = None
             if round_no == 1 and ari.state(run_id).contract.budget.max_workers > 1:
-                fan = fan_out_round(ari, run_id, adapter, round_no, notify)
+                fan = fan_out_round(ari, run_id, adapter, round_no, notify, coord)
             if fan is not None and fan["failures"]:
                 feedback = ["parallel packages did not all land; finish the work in place:", *fan["failures"]]
                 continue
             built = (
                 {"_state": WorkerState.COMPLETED}
                 if fan is not None
-                else build_round(ari, run_id, adapter, round_no, feedback, notify)
+                else build_round(ari, run_id, adapter, round_no, feedback, notify, coord)
             )
         except DaedalusError as exc:  # budget, concurrency, or capability refusal
             notes.append(str(exc))
@@ -709,7 +748,7 @@ def drive(
             feedback = [r.message for r in decision.agent_fixable]
             continue
 
-        launch_required_reviews(ari, run_id, adapter, notify)
+        launch_required_reviews(ari, run_id, adapter, notify, coord)
         decision = ari.evaluate(run_id)
         if decision.acceptable:
             # One fix round for non-blocking findings. It never costs an acceptance: the acceptable
