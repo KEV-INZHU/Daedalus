@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from conftest import HUMAN, git, make_repo
-from daedalus.verification.mutation import changed_lines, mutants_of, run
+from daedalus.verification.mutation import ENV_BASE, MutationError, changed_lines, mutants_of, run
 
 LIB = "def is_even(n):\n    return n % 2 == 0\n"
 CHANGE = LIB + "\n\ndef clamp(x, hi):\n    if x > hi and hi >= 0:\n        return hi\n    return x + 0\n"
@@ -30,6 +30,22 @@ def project(tmp_path: Path, tests: str) -> Path:
 
 
 TEST_CMD = [sys.executable, "test_lib.py"]
+
+
+@pytest.fixture(autouse=True)
+def _own_base(monkeypatch):
+    # Under the gate every check (this suite included) is given the run's base; these repositories
+    # have their own history, so the variable must not leak into them.
+    monkeypatch.delenv(ENV_BASE, raising=False)
+
+
+def test_an_unknown_base_is_an_error_not_an_empty_change(tmp_path, monkeypatch):
+    root = project(tmp_path, WEAK)
+    with pytest.raises(MutationError):
+        changed_lines(root, "0" * 40)
+    monkeypatch.setenv(ENV_BASE, "0" * 40)
+    with pytest.raises(MutationError):
+        run(root, TEST_CMD)
 
 
 def test_only_changed_non_test_lines_are_candidates(tmp_path):
