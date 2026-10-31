@@ -4,8 +4,8 @@ Sorted by expected impact on the quality of accepted work, then on how easy Daed
 items have shipped, with tests. Items marked *blocked* need something outside this repository; each
 says what.
 
-Sources: the open items of [history/PLAN.md](history/PLAN.md), and what an agent working under the gate
-on this repository found missing (coordination over the bus, October 2026).
+Sources: the open items of [history/PLAN.md](history/PLAN.md), and gaps found while building
+coordination over the bus (October 2026).
 
 ## Quality of what gets accepted
 
