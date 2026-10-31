@@ -26,7 +26,12 @@ def cmd_mutate(args: argparse.Namespace) -> int:
         )
     if not 0 <= args.min_score <= 1:
         raise DaedalusError("--min-score must be between 0 and 1")
-    result = run(find_root(args.dir), cmd, base=args.base, max_mutants=args.max, timeout_s=args.timeout)
+    from daedalus.verification.mutation import MutationError
+
+    try:
+        result = run(find_root(args.dir), cmd, base=args.base, max_mutants=args.max, timeout_s=args.timeout)
+    except MutationError as exc:
+        raise DaedalusError(f"mutation: {exc}") from exc
     if result.baseline_error:
         _print(f"mutation: {result.baseline_error}; fix that first")
         return 2

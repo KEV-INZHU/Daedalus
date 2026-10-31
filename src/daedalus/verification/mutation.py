@@ -61,8 +61,17 @@ def _git(root: Path, *args: str) -> str:
     return r.stdout if r.returncode == 0 else ""
 
 
+class MutationError(Exception):
+    pass
+
+
 def changed_lines(root: Path, base: str) -> dict[str, set[int]]:
-    """Python source files (not tests) -> the line numbers that differ from `base`."""
+    """Python source files (not tests) -> the line numbers that differ from `base`. An unknown base is
+    an error, never an empty change: "nothing to mutate" must mean nothing changed."""
+    probe = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
+                           capture_output=True, text=True, check=False)
+    if probe.returncode != 0:
+        raise MutationError(f"base revision {base!r} is not a commit in {root}")
     out: dict[str, set[int]] = {}
     current: str | None = None
     for line in _git(root, "diff", "-U0", "--no-color", "--no-ext-diff", base, "--", "*.py").splitlines():
