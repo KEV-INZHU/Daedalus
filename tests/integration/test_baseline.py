@@ -102,3 +102,29 @@ def test_a_bad_compare_base_setting_is_refused(tmp_path):
     root = make_repo(tmp_path / "r", {"compare_base": "yes"})
     with pytest.raises(PolicyError, match="compare_base"):
         load_config(root)
+
+
+def test_a_flaky_base_failure_is_not_recorded_as_failing(tmp_path, clock, monkeypatch):
+    from daedalus.verification import baseline
+
+    root = make_repo(tmp_path / "r")
+    a = Ariadne(root, clock=clock)
+    rid = a.start({"objective": "o"}, actor=HUMAN)
+    real, n = baseline.run_check, []
+
+    def flaky(defn, cwd, *x, **k):
+        n.append(1)
+        out = real(defn, cwd, *x, **k)
+        if len(n) == 2:  # the repeat on the base passes
+            from dataclasses import replace
+
+            return replace(out, result="PASS", exit_code=0)
+        return out
+
+    monkeypatch.setattr(baseline, "run_check", flaky)
+    a.verify(rid)
+    (e,) = _base_events(a, rid)
+    assert e.payload["result"] == "ERROR" and "flaky" in e.payload["error"]
+    assert not list((a.state_dir / "baseline").glob("*.json"))  # nothing cached
+    assert NOTE not in next(r.message for r in a.evaluate(rid).reasons if r.code == "check:tests")
+    a.close()

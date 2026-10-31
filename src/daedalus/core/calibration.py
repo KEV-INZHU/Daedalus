@@ -75,7 +75,10 @@ def forecasts(states: Iterable[RunState], escaped: set[str] | frozenset[str] = f
     gaps = {"findings_without_confidence": 0, "findings_unresolved": 0, "reviews_without_residual": 0}
     for s in states:
         model_of = {r.review_id: r.model or "unknown" for r in s.reviews}
+        reused = {r.review_id for r in s.reviews if r.reused}
         for f in s.findings.values():
+            if f.review_id in reused:
+                continue  # scored where it was first made
             o, why = finding_outcome(s, f)
             if f.confidence is None:
                 gaps["findings_without_confidence"] += 1
@@ -88,8 +91,8 @@ def forecasts(states: Iterable[RunState], escaped: set[str] | frozenset[str] = f
         if s.disposition is not Disposition.ACCEPTED:
             continue
         for r in s.reviews:
-            if r.candidate_id != s.accepted_candidate_id:
-                continue  # only a review of what shipped forecasts what shipped
+            if r.candidate_id != s.accepted_candidate_id or r.reused:
+                continue  # only a fresh review of what shipped forecasts what shipped
             if r.residual_risk is None:
                 gaps["reviews_without_residual"] += 1
                 continue
@@ -189,8 +192,9 @@ def track_record(states: Iterable[RunState], perspective: str, exclude_run: str 
     for s in states:
         if s.run_id == exclude_run:
             continue
+        reused = {r.review_id for r in s.reviews if r.reused}
         for f in s.findings.values():
-            if f.perspective != perspective:
+            if f.perspective != perspective or f.review_id in reused:
                 continue
             o, why = finding_outcome(s, f)
             if o is not None:

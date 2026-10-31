@@ -76,7 +76,7 @@ that name no planted bug, clean changes that drew one, the Brier score of findin
 and time per review. `--reviewer-cmd` puts another tool on the same cases, so the comparison is like for like.
 Results are kept in `.daedalus/bench/`. Billed adapters need `--yes`.
 
-A finding counts as naming a bug when it names the bug's file and either a line within three of it or a word a
+A finding counts as naming a bug when it names the bug's file and either a line within two of it or a word a
 finding about it would use. That is generous to a reviewer that names the right file for the wrong reason, so read
 the unfounded-findings count beside recall.
 

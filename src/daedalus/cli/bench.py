@@ -53,7 +53,9 @@ def cmd_bench(args: argparse.Namespace) -> int:
     out_dir = root / STATE_DIR / "bench"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
+        import os
+
+        path = out_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{os.urandom(3).hex()}.json"
         path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     except OSError:
         path = None

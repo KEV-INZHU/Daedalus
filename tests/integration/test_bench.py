@@ -205,3 +205,25 @@ def test_test_bugs_are_not_gaps():
 
     assert not test_gap({"title": "Added test asserts the wrong bound"})
     assert not test_gap({"title": "No error when tests fail"})
+
+
+def test_line_slack_boundary(cases):
+    from daedalus.bench import LINE_SLACK
+
+    c = cases["pagination-off-by-one"]
+    near = {"title": "x", "evidence": f"src/items.py:{c.bug_line() + LINE_SLACK}"}
+    far = {"title": "x", "evidence": f"src/items.py:{c.bug_line() + LINE_SLACK + 1}"}
+    assert LINE_SLACK == 2 and names_bug(c, near) and not names_bug(c, far)
+
+
+def test_a_crashing_reviewer_fails_its_case_not_the_benchmark(cases):
+    from daedalus.adapters.base import Adapter
+
+    class Boom(Adapter):
+        name = "boom"
+
+        def run_agent(self, request):
+            raise RuntimeError("adapter fell over")
+
+    s = run_bench([cases["clean-helper"], cases["mutable-default"]], Boom())
+    assert s["failed"] == 2 and all("adapter fell over" in c["error"] for c in s["cases"])

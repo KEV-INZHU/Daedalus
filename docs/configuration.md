@@ -56,7 +56,8 @@ When a required check fails, Daedalus runs it once more on a clean checkout of t
 temporary git worktree, with the checkout's `src/` first on `PYTHONPATH`). If it fails there too, the block
 message and every review prompt say so: the change probably did not cause it. The check must still pass before
 acceptance; this only stops reviewers and builders from blaming the change for an old failure. Results are kept
-per base revision and check definition, so runs that share a base pay once. A clean checkout has no untracked
+per base revision and check definition, so runs that share a base pay once (delete `.daedalus/baseline/` to
+forget them). A failure counts only if a second run on the base fails too, so a flaky check labels nothing. A clean checkout has no untracked
 files (an `.env`, installed node modules), so a check that needs them may fail there for that reason alone.
 `compare_base: false` turns it off.
 

@@ -288,3 +288,18 @@ def test_the_track_record_is_replayed_only_when_the_log_grows(tmp_path, clock, m
     lifecycle.track_record_for(a, "aristotle", rid)
     assert len(calls) == 2
     a.close()
+
+
+def test_a_reused_review_is_not_scored_twice(tmp_path, clock):
+    root = make_repo(tmp_path / "r", {"mode": "review"})
+    a = Ariadne(root, clock=clock)
+    rid = a.start({"objective": "o"}, actor=HUMAN)
+    fix(root)
+    a.verify(rid)
+    a.submit_review(rid, reviewer="agent:reviewer:x", perspective="aristotle", source="launched",
+                    findings=[finding()], residual_risk=0.2, extra={"reused_from": {"run_id": "earlier"}})
+    a.judge_finding(rid, "F1", actor=HUMAN, verdict="valid")
+    states, _ = load_states(a.store)
+    fs, _ = forecasts(states)
+    assert fs == []
+    a.close()

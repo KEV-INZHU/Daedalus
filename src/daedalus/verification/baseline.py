@@ -8,7 +8,8 @@ revision into a temporary git worktree, runs the same check there once, and reco
 
 This is advice, never acceptance: the gate still requires every required check to pass on the
 candidate. Results are cached per base revision and check definition, so runs that share a base pay
-once. A clean checkout lacks untracked files (an `.env`, installed node modules), so a base failure
+once (delete .daedalus/baseline/ to forget them). A failure is recorded only if a second run on the base
+fails too, so a flaky check does not label every later run. A clean checkout lacks untracked files (an `.env`, installed node modules), so a base failure
 is reported as what it is: the check also fails on a clean checkout of the base.
 """
 
@@ -49,8 +50,13 @@ def run_on_base(root: Path, base: str, defn: CheckDefinition, log_dir: Path, cac
         # The base checkout's own code first, ahead of an editable install of the working tree's.
         path = os.pathsep.join([str(where / "src"), str(where)] + ([os.environ["PYTHONPATH"]]
                                                                      if os.environ.get("PYTHONPATH") else []))
-        out = run_check(defn, where, log_dir, log_name=f"{defn.check_id}-base",
-                        run_env={"DAEDALUS_BASE_REVISION": base, "PYTHONPATH": path})
+        env = {"DAEDALUS_BASE_REVISION": base, "PYTHONPATH": path}
+        out = run_check(defn, where, log_dir, log_name=f"{defn.check_id}-base", run_env=env)
+        if out.result == "FAIL":  # a failure is kept only if it repeats: a flaky one would label every run
+            again = run_check(defn, where, log_dir, log_name=f"{defn.check_id}-base-2", run_env=env)
+            if again.result != "FAIL":
+                return {"result": "ERROR", "exit_code": again.exit_code, "log_path": again.log_path,
+                        "error": "the check failed once and then passed on the base: flaky, so no label"}
         res = {"result": out.result, "exit_code": out.exit_code, "error": out.error, "log_path": out.log_path}
     finally:
         subprocess.run(["git", "-C", str(root), "worktree", "remove", "--force", str(where)],

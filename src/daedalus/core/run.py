@@ -122,6 +122,7 @@ class Review:
     # it ran on. Absent in older reviews.
     residual_risk: float | None = None
     model: str | None = None
+    reused: bool = False  # copied from an earlier run's review (`reused_from`): not a new forecast
 
 
 @dataclass
@@ -331,6 +332,7 @@ def _apply(s: RunState, ev: Event) -> None:
             delta_from=r.get("delta_from"),
             residual_risk=r.get("residual_risk"),
             model=r.get("model"),
+            reused=bool(r.get("reused_from")),
         )
         s.reviews.append(review)
         for f in r.get("findings", ()):

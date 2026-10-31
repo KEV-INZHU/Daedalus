@@ -315,9 +315,12 @@ def run_bench(cases: list[Case], adapter: Adapter, *, lite: bool = False, repeat
                 root = scratch / f"{n}-{case.name}"
                 diff = stage(case, root)
                 started = time.monotonic()
-                res = adapter.run_agent(AgentRequest(f"bench-{n}", f"bench-{case.name}", "aristotle",
-                                                     case_prompt(case, diff, lite), root, REVIEW_TIMEOUT_S,
-                                                     read_only=True, context_paths=tuple(case.after)))
+                try:
+                    res = adapter.run_agent(AgentRequest(f"bench-{n}", f"bench-{case.name}", "aristotle",
+                                                         case_prompt(case, diff, lite), root, REVIEW_TIMEOUT_S,
+                                                         read_only=True, context_paths=tuple(case.after)))
+                except Exception as exc:  # noqa: BLE001 — one reviewer crash fails that case, not the benchmark
+                    res = AgentResult("FAILED", error=f"{type(exc).__name__}: {exc}")
                 r = score_case(case, res, time.monotonic() - started)
                 results.append(r)
                 verdict = ("caught" if r.caught else "missed") if r.planted else (
