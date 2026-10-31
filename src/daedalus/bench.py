@@ -112,11 +112,15 @@ def _files(src: Path, case: str, key: str, v: Any) -> dict[str, str]:
 
 # The test gap must be the finding's subject: "No tests for ...", "Missing unit tests ...", "Untested ...",
 # "Tests do not cover ...".
-_TEST_GAP = re.compile(r"^[\s*_`#>-]*(\[\w+\]\s*)?(no|missing|add(ed)?|lacks?|lacking|lack\s+of)\s+(\w+\s+){0,2}tests?\b|^\s*untested\b|"
-                       r"^\s*(the\s+)?(\w+\s+)?tests?\s+(are\s+|is\s+)?missing\b|"
-                       r"^\s*(the\s+)?(\w+\s+)?tests?\s+(do\s+not|don't|does\s+not|doesn't|never)\s+(cover|exercise|check|pin)|"
-                       r"^\s*no\s+test\s+(covers|pins|checks|exercises)\b|"
-                       r"^\s*(test\s+)?coverage\s+(is\s+)?missing\b", re.IGNORECASE)
+_FILL = r"(?:(?:unit|regression|new|integration|automated|any|dedicated|specific)\s+){0,2}"
+_TEST_GAP = re.compile(
+    r"^[\s*_`#>-]*(?:\[\w+\]\s*)?(?:"  # markup or a [SEVERITY] tag, before any phrasing
+    rf"(?:no|missing|add|lacks?|lacking|lack\s+of)\s+{_FILL}tests?(?:\s|$|[.,:;)*_`])"
+    r"|untested\b"
+    rf"|(?:the\s+)?{_FILL}tests?\s+(?:are\s+|is\s+)?missing\b"
+    rf"|(?:the\s+)?{_FILL}tests?\s+(?:do\s+not|don't|does\s+not|doesn't|never)\s+(?:cover|exercise|check|pin)"
+    r"|no\s+test\s+(?:covers|pins|checks|exercises)\b"
+    r"|(?:test\s+)?coverage\s+(?:is\s+)?missing\b)", re.IGNORECASE)
 
 
 def test_gap(f: dict[str, Any]) -> bool:
@@ -211,7 +215,7 @@ def stage(case: Case, root: Path) -> str:
         (root / rel).unlink()
     _write(root, case.after)
     _git(root, "add", "-A", "--intent-to-add")
-    return _git(root, "diff", "HEAD")
+    return _git(root, "diff", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", "HEAD")
 
 
 def case_prompt(case: Case, diff: str, lite: bool, perspective: str = "aristotle") -> str:

@@ -179,3 +179,29 @@ def test_test_gaps_behind_markup_are_recognised(title):
     from daedalus.bench import test_gap
 
     assert test_gap({"title": title})
+
+
+def test_stage_ignores_user_diff_config(tmp_path, monkeypatch, cases):
+    from daedalus.bench import stage
+
+    home = tmp_path / "h"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[color]\n\tdiff = always\n[diff]\n\tnoprefix = true\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    d = stage(cases["clean-helper"], tmp_path / "r")
+    assert "\x1b[" not in d and "+++ b/" in d
+
+
+@pytest.mark.parametrize("title", ["**Tests do not cover the failure path**", "[MAJOR] Untested failure path"])
+def test_markup_on_every_phrasing(title):
+    from daedalus.bench import test_gap
+
+    assert test_gap({"title": title})
+
+
+def test_test_bugs_are_not_gaps():
+    from daedalus.bench import test_gap
+
+    assert not test_gap({"title": "Added test asserts the wrong bound"})
+    assert not test_gap({"title": "No error when tests fail"})
