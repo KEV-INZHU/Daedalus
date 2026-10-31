@@ -10,18 +10,28 @@ and versions follow [Semantic Versioning](https://semver.org/).
   versions do not know these events and refuse to replay such a run, so read it with this version or later.
 
 ### Added
-- Agent coordination over the shared filesystem bus, as a library API that orchestrators opt into
+- Agent coordination over the shared filesystem bus, **on by default for `daedalus run`**
   (`daedalus.coordination`, `daedalus bus`, [docs/coordination.md](docs/coordination.md)). `Channel.spawn` mints
   an `agent:<role>:<uuid>` name and has Ariadne register it against the run, task, role and principal.
   `surface.attach` puts the run's context and unread messages into a launch request, fenced as peer data. The
   per-run channel has threaded messages, a context bootstrap for late joiners, restart recovery with message-id
   deduplication, and published/delivered/seen/acted receipts. Reviewers do not see each other's findings on a
-  candidate before submitting their own review of it. Daedalus's own launch paths do not call these yet.
-- `AgentRequest.env`: extra environment for a launched session (the command adapter passes it through).
+  candidate before submitting their own review of it. Launched builders and parallel workers get a registered
+  name, the run's context in their prompt, and a separate grant to run `daedalus bus`. Launched reviewers get a
+  registered name but no peer messages, and their findings are posted after they are recorded. Turn it off with
+  `coordination: false`, or share a bus with `coordination: {bus_dir: path}`. A coordination failure never
+  fails a run.
+- `AgentRequest.env` and `AgentRequest.bus_commands`: extra environment and coordination-command grants for a
+  launched session (the command adapter passes both through; read-only sessions never get the grant).
 
 ### Changed
 - Every authorship check (review, arbitration, acceptance, review reuse) follows a name's registered
-  principal, so a new alias does not let a builder review its own candidate.
+  principal, so a new alias does not let a builder review its own candidate. So does resolving a finding or a
+  blocker: any alias of the principal that raised it counts as the raiser.
+- `-C` defaults to unset rather than `.`, so a command can tell an explicit `-C .` from none (the
+  effective directory is unchanged).
+- Launched builders, workers and reviewers are recorded under their generated names (for example
+  `agent:brunel:<uuid>` rather than `agent:brunel`) while coordination is on.
 
 ## 0.2.0
 

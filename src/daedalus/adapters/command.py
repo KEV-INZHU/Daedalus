@@ -651,9 +651,11 @@ class CommandAdapter(Adapter):
         # rule, so a prompt passed as an argument would be swallowed by it. (The built-in claude-code
         # preset always uses stdin; a custom claude-json adapter with `prompt_via: arg` gets no grant,
         # and its Builder prompt still lists the commands, which then need the user's allow-rules.)
-        if not req.read_only and req.run_commands and self.parse == "claude-json" and self.prompt_via == "stdin":
-            # Headless sessions deny shell commands they were not granted: grant exactly the checks.
-            cmd += ["--allowedTools", *(f"Bash({c}:*)" for c in req.run_commands)]  # one rule per argument
+        grants = (*req.run_commands, *req.bus_commands)
+        if not req.read_only and grants and self.parse == "claude-json" and self.prompt_via == "stdin":
+            # Headless sessions deny shell commands they were not granted: grant exactly the checks
+            # (and, with coordination on, `daedalus bus`).
+            cmd += ["--allowedTools", *(f"Bash({c}:*)" for c in grants)]  # one rule per argument
         if self.prompt_via == "stdin":
             return cmd, req.prompt.encode("utf-8")
         if self.prompt_via == "message":
