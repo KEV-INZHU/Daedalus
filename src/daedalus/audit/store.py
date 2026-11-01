@@ -111,6 +111,11 @@ class EventStore:
             raise AuditIntegrityError(f"audit event {r[0]} has a malformed payload") from exc
         return Event(r[0], r[1], r[2], r[3], r[4], payload, r[6], r[7])
 
+    def head_seq(self) -> int:
+        """The newest event's sequence number (0 for an empty log): changes whenever anything is appended."""
+        row = self._db.execute("SELECT MAX(seq) FROM events").fetchone()
+        return int(row[0] or 0)
+
     def events(self, run_id: str | None = None) -> list[Event]:
         if run_id is None:
             rows = self._db.execute(self._SELECT + " ORDER BY seq").fetchall()

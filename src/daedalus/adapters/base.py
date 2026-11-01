@@ -71,6 +71,9 @@ class AgentRequest:
     # Extra environment for the session, on top of the adapter's own (coordination.surface sets the
     # bus location, run and agent name here so the session's `daedalus bus` commands find them).
     env: dict[str, str] = field(default_factory=dict, compare=False)
+    # Coordination commands the session may run (`daedalus bus`), granted apart from `run_commands`:
+    # those are exactly the trusted checks policy lets a Builder run, and coordination is no check.
+    bus_commands: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -8,10 +8,52 @@ lifecycle, reviews and acceptance. A message on the bus never changes run state.
 Code: `daedalus.coordination` (`bus.py`, `channel.py`, `identity.py`, `surface.py`) and the
 `daedalus bus` command.
 
-**This is a library API that callers opt into.** Daedalus's own launch paths (`daedalus run`,
-launched reviews) do not yet mint names or attach the channel. An orchestrator that wants
-coordination calls `Channel.spawn` for each subagent before it works, and `surface.attach` on the
-request before handing it to the adapter.
+## On by default
+
+`daedalus run` coordinates the agents it launches (`coordination/launch.py`). Turn it off, or
+point it at another bus, in `.daedalus.yml`:
+
+```yaml
+coordination: false                       # off
+coordination: {bus_dir: ../shared-bus}    # on, with a bus shared with other tools
+```
+
+`$DAEDALUS_BUS_DIR` wins over `bus_dir`, and the default is `.daedalus/bus`. A relative path is
+taken from the repository root, and sessions get the absolute path. The bus must be under
+`.daedalus/` or outside the repository. Anywhere else its files would be part of every candidate,
+so each message would change the tree under review. A configured path there is a config error,
+and an environment path there turns coordination off for the run.
+
+The setting is read once when a run's drive starts, so editing it mid-run changes nothing until the
+next run. It is not policy: the bus never decides acceptance, so it is not part of the policy hash
+a run pins.
+
+| Launch | Name (role → principal) | What the session gets |
+|--------|-------------------------|-----------------------|
+| In-place builder, each round | `brunel` → `agent:brunel` | Run context and unread messages in its prompt, the `daedalus bus` environment, and a grant to run `daedalus bus` |
+| Parallel worker | `brunel` → `agent:worker:<task>` | The same, from inside its worktree (`DAEDALUS_REPO` points the command at the run's repository) |
+| Reviewer | `<perspective>` → `agent:reviewer:<perspective>` | Nothing from the bus. Its findings are posted once its review is recorded. |
+| Planner, arbiter | not registered | Nothing |
+
+Reviewers get no peer messages, for two reasons. A builder should not be able to talk to the
+reviewer judging its work, and a cached review's key has to keep meaning the same prompt. Every
+name is retired when its session ends, which drops its subscription.
+
+The `daedalus bus` grant is separate from `run_commands`. `run_commands` holds exactly the
+trusted checks policy lets a builder run (`builder_runs_checks`), and coordination is not a check.
+A read-only session never gets the grant.
+
+Inside an agent session (`DAEDALUS_AGENT_NAME` set), `daedalus bus` acts only as that agent, on its
+own run, repository and bus. `--as`, `--run`, `-C` and `--bus-dir` may not point anywhere else, and
+`reconcile` and `expire`, which touch every agent's delivery, are refused.
+
+A coordination failure (an unwritable bus, a refused registration) never fails a run. It is
+reported, and that one launch goes ahead without coordination; later launches try again. A name
+that was registered is always retired, even if its launch could not be prepared. Parallel workers
+are retired as each one finishes.
+
+The pieces are also a library: `Channel.spawn` registers a subagent, and `surface.attach`
+prepares its launch request.
 
 ## Layout
 
@@ -37,8 +79,22 @@ topic fails instead of creating one.
 
 Daedalus writers serialize on an OS lock (`flock`, or `msvcrt.locking` on Windows) held on
 `<bus>/.lock`. The lock file stays in place, and a crashed writer's lock is released with its
-process, so no stale lock ever has to be broken. **`bus.py` does not take that lock**, so when both
-write the same bus:
+process, so no stale lock ever has to be broken.
+
+**Give `bus.py` the same lock.** The lock is one standalone file,
+`src/daedalus/coordination/buslock.py`, which imports only the standard library. Copy it next to
+`bus.py`, and wrap each write (the topic append, the inbox fan-out, the `subscribers.json`
+rewrite) in it:
+
+```python
+from buslock import locked
+
+with locked(BUS_ROOT):          # the bus directory, the same one DAEDALUS_BUS_DIR points at
+    append_to_topic(message)
+    fan_out(message)
+```
+
+Until `bus.py` does that, when both write the same bus:
 
 - `subscribers.json` is read, changed and replaced whole by each side. Two concurrent subscription
   changes can lose one of them (a lost update). Subscribe Daedalus agents when `bus.py` is not
@@ -122,7 +178,15 @@ daedalus bus post answer "agreed" --reply-to msg-...
 daedalus bus ack msg-...
 ```
 
-`daedalus bus` is not a human-authority command, so it works inside agent sessions. Adapters that
+`daedalus bus` is not a human-authority command, so it works inside agent sessions.
+
+**Live delivery.** A launched `claude-code` builder also gets a `PostToolUse` hook (passed with
+`--settings`, so the repository's own settings are untouched). After each tool call it reads the
+agent's unread messages and adds them to the session's context, fenced as peer data like the
+bootstrap. Delivery is at most once: a message counts as seen when the hook hands it over. If the
+session never gets that hook's output (it ends first, or the harness drops it), the message is
+still in history, and `daedalus bus join` shows it in the context it returns. Errors never reach
+the session. Adapters that
 send only a prompt (the OpenAI-compatible adapter, for example) get the context through the
 prompt, but they cannot run `daedalus bus` mid-session.
 
@@ -153,6 +217,8 @@ like any other process with file access (see [security-model.md](security-model.
   (signed identities, a broker) is a proposal, not something this uses.
 - Reading through the channel is what the sealing and receipts see. A process that reads the bus
   files directly is not recorded as exposed to anything.
-- No push into a session that is already running. New messages reach it when it runs
-  `daedalus bus read`, or at its next launch.
+- Live delivery works only for launched builders on the `claude-code` adapter. For those, the
+  adapter adds a `PostToolUse` hook (`daedalus hook bus`, through `--settings`), which hands the
+  session its new messages after each tool call. Other adapters, and interactive sessions, get new
+  messages when they run `daedalus bus read`, or at their next launch.
 - `ack` is the agent's own claim. It is not evidence for acceptance.

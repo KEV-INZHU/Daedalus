@@ -16,6 +16,7 @@ from typing import Any
 from daedalus.core.authorization import authorization_status
 from daedalus.core.contracts import MODE_REVIEWS
 from daedalus.core.evidence import check_status
+from daedalus.core.names import review_name, with_article
 from daedalus.core.paths import match_any
 from daedalus.core.risk import RiskAssessment, assess
 from daedalus.core.run import RunState
@@ -336,7 +337,8 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
     for check_id, (st, msg) in checks.items():
         if st is not CheckState.PASS:
             untrusted = st is CheckState.ERROR and "untrusted verifier" in msg
-            reasons.append(Reason(f"check:{check_id}", msg, HUMAN if untrusted else AGENT))
+            reasons.append(Reason(f"check:{check_id}", msg + base_note_for(state, check_id, st),
+                                  HUMAN if untrusted else AGENT))
 
     for crit in state.contract.acceptance_criteria:
         if crit.checks:
@@ -377,19 +379,20 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
                 reasons.append(
                     Reason(
                         f"finding:{f.finding_id}",
-                        f"{f.severity.value} from {f.perspective} ({f.finding_id}): {f.title}. Plato's ruling: "
+                        f"{f.severity.value} from the {review_name(f.perspective)} ({f.finding_id}): {f.title}. "
+                        "The arbiter's (Plato) ruling: "
                         f"overrule ({ruling.get('rationale', '')}). Policy leaves resolution to a human: "
                         f"`daedalus resolve {f.finding_id}`, or address the finding.",
                         HUMAN,
                     )
                 )
                 continue
-            upheld = " Plato upheld it on arbitration." if ruling and ruling.get("decision") == "uphold" else ""
+            upheld = " The arbiter (Plato) upheld it." if ruling and ruling.get("decision") == "uphold" else ""
             reasons.append(
                 Reason(
                     f"finding:{f.finding_id}",
-                    f"{f.severity.value} from {f.perspective} ({f.finding_id}): {f.title}. "
-                    f"Required change: {f.required_change or 'see finding'}.{upheld}",
+                    f"{f.severity.value} from the {review_name(f.perspective)} ({f.finding_id}): {f.title}. "
+                    f"Required change: {f.required_change or 'see finding'}.{upheld}{fix_aids(f)}",
                     AGENT,
                 )
             )
@@ -400,15 +403,12 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
     for p in reviews_needed:
         if not review_satisfied(state, p, cid, independent):
             why = f"tier {tier}" if p in policy.requirement(tier).reviews else f"{state.mode} mode"
-            article = "an" if p[:1].lower() in ("a", "e", "i", "o", "u") else "a"
-            kind = "an independent, Daedalus-launched" if independent else article
+            needed = (f"an independent, Daedalus-launched {review_name(p)}" if independent
+                      else with_article(review_name(p)))
             reasons.append(
                 Reason(
                     f"review:{p}",
-                    f"{why} requires {kind} {p} review of candidate {cid[:12]}. With a launching adapter "
-                    "(`adapter:` in .daedalus.yml), Daedalus launches it once the checks pass (`daedalus "
-                    f"verify`, or when the agent stops); otherwise `daedalus review {p}`. The author never "
-                    "reviews its own work.",
+                    f"{why} requires {needed} of candidate {cid[:12]}.",
                     SYSTEM,
                 )
             )
@@ -420,11 +420,9 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
         reasons.append(
             Reason(
                 "test_integrity",
-                f"tests weakened: {integrity.summary()}; restore the assertion or fix the code. If this test "
-                f"change is deliberate, a human acknowledges these signals for this candidate with `daedalus "
-                f"risk-exception {rest} --rationale ...` (`{rest}` is the tier every other floor yields, so "
-                "the exception waives the test-integrity floor and nothing else), or the independent "
-                "reviews of the flagged hunks clear it.",
+                f"tests weakened: {integrity.summary()}; restore the assertion or fix the code. If the "
+                f"change is deliberate, a human runs `daedalus risk-exception {rest} --rationale ...` (it "
+                "waives the test-integrity floor and nothing else), or reviews of the flagged hunks clear it.",
                 AGENT,
             )
         )
@@ -472,3 +470,26 @@ def evaluate(state: RunState, obs: Observation, *, finishing: bool = False) -> D
         [Reason("not_finished", "every condition holds; run `daedalus finish` to record acceptance", AGENT)],
         acceptable=True,
     )
+
+
+def fix_aids(f: Any) -> str:
+    """What makes a finding cheaper to fix: the reviewer's confidence and a test that fails until it is."""
+    out = f" (reviewer's confidence {f.confidence:.0%})" if getattr(f, "confidence", None) is not None else ""
+    if getattr(f, "failing_test", ""):
+        out += f" Test that fails until it is fixed: {f.failing_test[:600]}"
+    return out
+
+
+def base_note_for(state: RunState, check_id: str, st: CheckState) -> str:
+    """Whether a failing check also failed on the base revision, if that was measured for this
+    exact check definition and base. Advice for the reader: the check must pass all the same."""
+    from daedalus.verification.baseline import base_note
+
+    e = state.base_checks.get(check_id)
+    defn = state.policy.checks.get(check_id)
+    if st is not CheckState.FAIL or not e or defn is None:
+        return ""
+    if e.get("base_revision") != state.contract.base_revision or e.get("definition_hash") != defn.definition_hash:
+        return ""
+    return base_note(e)
+

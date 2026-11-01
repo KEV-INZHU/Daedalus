@@ -68,7 +68,8 @@ status`. Without a title, the objective's first sentence (cut to 72 characters a
 the contract's verification plan says each criterion must be demonstrated by a test those checks run.
 That keeps the line lights-out. In `review` mode a reviewer also judges whether the tests really prove
 the criteria. If a criterion genuinely needs a person, write it as a mapping with `checks: []`. The
-order will then wait for a human attestation.
+order will then wait for a human attestation. A criterion bound only to the mandatory checks is
+marked as not checked specifically, in the builder's prompt and in the run's report.
 
 **Orders are trusted input, like policy.** The line refuses a dirty working tree, so everything it
 builds was committed and could be reviewed. `factory plan` writes drafts and stops. A human reads them,
@@ -151,14 +152,23 @@ factory:
   rounds: 3                # default rounds per order
   andon: 3                 # consecutive failed orders that stop the line
   budget: 20.0             # spend cap for one `factory run` (also --budget)
+  ship:                    # optional ship step, off by default
+    push: origin           # after the line ships orders, push the integration branch here
+    pull_request: true     # and open a pull request (needs the `gh` CLI)
+    base: main             # the pull request's base branch
 ```
+
+The ship step runs once per `factory run`, after the line has shipped at least one order. A failed
+push or pull request is reported in the line's notes. It never undoes what shipped, because the
+orders are already committed on the integration branch. A successful push is logged as
+`line.pushed` in the factory ledger.
 
 ## Limits, on purpose
 
 - **One order at a time.** The core allows one open run per repository. Because of that,
   integration is a fast-forward and never a merge. Running in parallel would need isolated
   checkouts per order and real merge handling, and nothing measured yet shows that's worth the cost.
-- **Local only.** The factory commits to a local branch. Pushing and opening pull requests is left to
-  you (or to a `merge` action in policy).
+- **Local unless you ask.** The factory commits to a local branch. Pushing and opening a pull request
+  happen only with `factory: {ship: ...}`. Merging is still yours (or a `merge` action in policy).
 - **A human gate halts the line.** An order waiting on an approval keeps the repository's only open
   run, so the line can't continue past it. Keep human-gated work small, or park it and come back.

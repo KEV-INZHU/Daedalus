@@ -28,14 +28,21 @@ from pathlib import Path
 from typing import Any
 
 from daedalus.adapters.base import Adapter, AgentRequest, AgentResult, require
-from daedalus.core.acceptance import Decision
+from daedalus.coordination.launch import Coordinator
+from daedalus.core.acceptance import Decision, base_note_for, fix_aids
 from daedalus.core.errors import BudgetExhausted, ContractError, DaedalusError, IntegrationError
+from daedalus.core.names import review_name
 from daedalus.core.state_machine import Disposition, ExecutionState, Severity, WorkerState
 from daedalus.orchestration import prompts
 from daedalus.orchestration.ariadne import SEVERITY_SYNONYMS, SYSTEM, Ariadne
 from daedalus.repository import snapshot
 from daedalus.repository.candidate import diff_text
-from daedalus.verification.evidence_cache import EvidenceCache, adapter_identity, review_inputs, review_key_from
+from daedalus.verification.evidence_cache import (
+    EvidenceCache,
+    adapter_identity,
+    review_inputs,
+    review_key_from,
+)
 
 Notify = Callable[[str], None]
 
@@ -63,6 +70,8 @@ def check_commands(state: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
     granted, skipped = [], []
     for cid in state.contract.required_checks:
         d = state.policy.checks.get(cid)
+        if d is not None and d.holdout:
+            continue  # never granted, and never named to the Builder
         p = prompts.check_prefix(d.command) if (d is not None and state.policy.builder_runs_checks) else ""
         if p:
             granted.append(p)
@@ -121,7 +130,8 @@ def refuse_unaffordable(state: Any, adapter: Adapter, what: str) -> None:
         )
 
 
-def _review_key(ari: Ariadne, state: Any, perspective: str, adapter: Adapter) -> tuple[str, str, dict] | None:
+def _review_key(ari: Ariadne, state: Any, perspective: str, adapter: Adapter, track: str = "",
+                lite: bool = False) -> tuple[str, str, dict] | None:
     """(candidate id, cache key, key inputs) for a first-pass full review of the current tree, or None
     if it cannot be computed: an unreadable tree, or an adapter with no explicitly configured model
     (the key could not name what ran)."""
@@ -131,7 +141,7 @@ def _review_key(ari: Ariadne, state: Any, perspective: str, adapter: Adapter) ->
     if not cand.complete:
         return None  # an unreadable file means the hash does not describe the tree
     inputs = review_inputs(perspective, state.policy_hash, state.contract,
-                           prompts.review_template_hash(perspective), adapter, first_pass=True)
+                           prompts.review_template_hash(perspective, track, lite), adapter, first_pass=True)
     return cand.candidate_id, review_key_from(cand.candidate_id, inputs), inputs
 
 
@@ -158,14 +168,64 @@ def _reuse_review(ari: Ariadne, state: Any, perspective: str, keyed: tuple[str, 
         rid = ari.submit_review(
             run_id, reviewer=reviewer, perspective=perspective, summary=r.get("summary", ""),
             findings=findings, source="launched", exposed_to=(), candidate_id=cand.candidate_id,
-            extra={"cache_key": key, "cache_inputs": inputs, "duration_s": source.duration_s, "cost": source.cost,
+            residual_risk=r.get("residual_risk"),
+            extra={**({"model": r["model"]} if r.get("model") else {}), "cache_key": key, "cache_inputs": inputs, "duration_s": source.duration_s, "cost": source.cost,
                    "cost_basis": source.basis, "reused_from": source.to_dict(key)},
         )
     except (ContractError, DaedalusError):
         return None
-    notify(f"{perspective} review reused from run {source.run_id} (event {source.seq}): "
+    notify(f"{review_name(perspective)} reused from run {source.run_id} (event {source.seq}): "
            f"same candidate, contract, policy, prompt and model")
     return rid
+
+
+def is_lite(ari: Ariadne, state: Any, perspective: str) -> bool:
+    """A lite-mode review is short and cheap only where lite mode alone asked for it: a review the
+    risk tier requires (auth, migrations, weakened tests ...) is always the full one."""
+    if state.mode != "lite":
+        return False
+    tier = ari.evaluate(state.run_id).risk.effective_tier
+    return perspective not in state.policy.requirement(tier).reviews
+
+
+def lite_adapter(ari: Ariadne, adapter: Adapter) -> Adapter:
+    """The adapter with its review model swapped for `lite: {model}` if one is set and it has one;
+    Claude Code's lite reviews default to Haiku."""
+    try:
+        model = ari.config().lite_model
+    except (DaedalusError, ValueError, OSError):
+        return adapter
+    if model is None and getattr(adapter, "name", None) == "claude-code":
+        model = LITE_DEFAULT_MODEL
+    if not model or not hasattr(adapter, "review_model"):
+        return adapter
+    import copy
+
+    out = copy.copy(adapter)
+    out.review_model = model  # type: ignore[attr-defined]
+    return out
+
+
+LITE_DEFAULT_MODEL = "haiku"
+TRACK_RUNS = 200  # recent runs the track record reads
+
+
+def track_record_for(ari: Ariadne, perspective: str, run_id: str) -> str:
+    """The perspective's record in this repository (core/calibration.py), or "" when there is too
+    little to go on. Never fails a review."""
+    from daedalus.core.calibration import load_states, track_record
+
+    try:
+        key = (str(ari.state_dir), ari.store.head_seq())
+        if _TRACK_MEMO.get("key") != key:  # replay recent runs only when the log has grown
+            _TRACK_MEMO.clear()
+            _TRACK_MEMO.update(key=key, states=load_states(ari.store, TRACK_RUNS)[0])
+        return track_record(_TRACK_MEMO["states"], perspective, exclude_run=run_id)
+    except Exception:  # noqa: BLE001 — advice for the prompt only
+        return ""
+
+
+_TRACK_MEMO: dict[str, Any] = {}
 
 
 def _well_formed(findings: Any) -> bool:
@@ -182,7 +242,8 @@ def _well_formed(findings: Any) -> bool:
 
 
 def launch_review(
-    ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, notify: Notify = _quiet
+    ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, notify: Notify = _quiet,
+    coord: Coordinator | None = None,
 ) -> str | None:
     """Launch one independent, read-only review. Returns the review id, or None
     when the reviewer failed or returned nothing valid (recorded as a failed review)."""
@@ -193,35 +254,53 @@ def launch_review(
         state.policy.allowed_degradations,
     )
     prior = [
-        {"id": f.finding_id, "severity": f.severity.value, "title": f.title, "required_change": f.required_change}
+        {"id": f.finding_id, "severity": f.severity.value, "title": f.title, "required_change": f.required_change,
+         **({"builder_note": f.answers[-1]["note"]} if f.answers else {})}
         for f in state.open_findings
         if f.perspective == perspective
     ]
     again = any(r.perspective == perspective and r.contract_version == state.contract.contract_version
                 for r in state.reviews)
+    lite = is_lite(ari, state, perspective)
+    if lite:
+        adapter = lite_adapter(ari, adapter)
+    track = track_record_for(ari, perspective, run_id)
     # Only a first-pass review, shown no earlier findings, is keyed: a re-review answers a different prompt.
     cache = ari.evidence_cache("reviews") if not (again or prior) else None
-    keyed = _review_key(ari, state, perspective, adapter) if cache is not None else None
+    keyed = _review_key(ari, state, perspective, adapter, track, lite) if cache is not None else None
     if keyed is not None and (reused := _reuse_review(ari, state, perspective, keyed, cache, notify)):
         return reused
     refuse_unaffordable(state, adapter, f"a {perspective} review")
     cand = ari.record_candidate(run_id, actor=SYSTEM, authored=False, label=f"review {perspective}")
     decision = ari.evaluate(run_id)
-    checks = {k: (v[0].value, v[1]) for k, v in decision.check_states.items()}
+    checks = {k: (v[0].value, v[1] + base_note_for(state, k, v[0])) for k, v in decision.check_states.items()}
     integrity = decision.integrity.review_section() if decision.integrity else ""
     run_dir = ari.state_dir / "runs" / run_id
     delta = _delta_basis(ari, state, perspective, cand, run_dir) if delta_ok(state) else None
     if delta is not None:
         old_id, inter, touched = delta
         prompt = prompts.delta_review_prompt(perspective, state.contract, inter, touched, old_id, checks, prior,
-                                             integrity)
-        notify(f"launching {perspective} delta review of candidate {cand.short} "
+                                             integrity, track, lite)
+        notify(f"launching {review_name(perspective)} (delta) of candidate {cand.short} "
                f"({len(touched)} file(s) changed since {old_id[:12]})")
     else:
         prompt = prompts.review_prompt(perspective, state.contract, diff_text(ari.root, cand), checks, prior,
-                                       first_pass=not again, integrity=integrity)
-        notify(f"launching {perspective} review of candidate {cand.short}")
+                                       first_pass=not again, integrity=integrity, track=track, lite=lite)
+        notify(f"launching {'lite ' if lite else ''}{review_name(perspective)} of candidate {cand.short}")
     snapshot.save(ari.root, run_dir, cand.candidate_id, cand.manifest)  # best effort: else the next is full
+    # Registered before it works, so its review is attributed to its principal. No peer messages
+    # go into a review prompt (coordination/launch.py).
+    coord = coord or Coordinator(ari, run_id, notify)
+    name = coord.name(perspective, f"review-{perspective}", f"agent:reviewer:{perspective}")
+    try:
+        return _run_review(ari, run_id, perspective, adapter, notify, prompt, cand, prior, delta, keyed, coord, name)
+    finally:
+        coord.retire(name)
+
+
+def _run_review(ari: Ariadne, run_id: str, perspective: str, adapter: Adapter, notify: Notify, prompt: str,
+                cand: Any, prior: list[dict[str, Any]], delta: Any, keyed: Any, coord: Coordinator,
+                name: str | None) -> str | None:
     started = ari.clock()
     res = adapter.run_agent(
         AgentRequest(
@@ -234,7 +313,7 @@ def launch_review(
 
     def failed(why: str) -> None:
         ari.record_failed_review(run_id, perspective, why)
-        notify(f"{perspective} review failed: {why}")
+        notify(f"{review_name(perspective)} failed: {why}")
 
     if res.status != "COMPLETED":
         failed(res.error or res.status)
@@ -246,7 +325,7 @@ def launch_review(
     if not isinstance(body, dict) or not isinstance(body.get("findings", []), list):
         failed("reviewer returned no valid JSON result block")
         return None
-    reviewer = f"agent:reviewer:{perspective}:{(res.session_id or 'session')[:8]}"
+    reviewer = name or f"agent:reviewer:{perspective}:{(res.session_id or 'session')[:8]}"
     open_ids = {p["id"] for p in prior}
     try:
         rid = ari.submit_review(
@@ -261,17 +340,21 @@ def launch_review(
             candidate_id=cand.candidate_id,
             scope="delta" if delta is not None else "full",
             delta_from=delta[0] if delta is not None else None,
+            residual_risk=body.get("residual_risk"),
             # What a later run needs to reuse this verdict, and to say what reusing it saved.
             # The key binds to the candidate reviewed: if the tree moved since it was computed there is none.
             extra={**({"cache_key": keyed[1], "cache_inputs": keyed[2]}
                       if keyed is not None and delta is None and keyed[0] == cand.candidate_id else {}),
-                   "duration_s": round(ari.clock() - started, 3), "cost": res.cost, "cost_basis": res.cost_basis},
+                   "duration_s": round(ari.clock() - started, 3), "cost": res.cost, "cost_basis": res.cost_basis,
+                   "session_id": res.session_id,
+                   **({"model": model} if (model := adapter_identity(adapter)) else {})},
         )
     except (ContractError, DaedalusError) as exc:
         failed(f"invalid review result: {exc}")
         return None
     n = len(body.get("findings", []))
-    notify(f"{perspective} review {rid}: {n} finding(s)")
+    notify(f"{review_name(perspective)} {rid}: {n} finding(s)")
+    coord.post_findings(name, body.get("findings", []))
     return rid
 
 
@@ -345,7 +428,7 @@ def arbitrate(
 
 
 def launch_required_reviews(
-    ari: Ariadne, run_id: str, adapter: Adapter, notify: Notify = _quiet
+    ari: Ariadne, run_id: str, adapter: Adapter, notify: Notify = _quiet, coord: Coordinator | None = None
 ) -> list[str]:
     """Launch every review the decision still needs, plus a re-review by each
     perspective with an open blocking finding (only that perspective resolves it)."""
@@ -358,12 +441,83 @@ def launch_required_reviews(
         if f.severity.value in state.policy.blocking_severities and f.perspective not in pending
     ]
     pending = list(dict.fromkeys(pending))
-    return [rid for p in pending if (rid := launch_review(ari, run_id, p, adapter, notify))]
+    coord = coord or Coordinator(ari, run_id, notify)
+    return [rid for p in pending if (rid := launch_review(ari, run_id, p, adapter, notify, coord))]
+
+
+# --------------------------------------------------------------- plan review
+PLAN_SEVERITIES = ("MAJOR", "MINOR", "ADVISORY")
+
+
+def review_plan(
+    ari: Ariadne, run_id: str, plan: str, adapter: Adapter, notify: Notify = _quiet, *, tag: str = "1"
+) -> dict[str, Any] | None:
+    """Have an independent, read-only reviewer critique a plan before it is built. Returns
+    {summary, concerns: [{severity, title, detail}]}, or None when the reviewer gave nothing usable.
+    Advice only: nothing is recorded as a review or a finding, only the session's cost."""
+    state = ari._running(run_id)
+    plan = str(plan or "").strip()
+    if not plan:
+        raise ContractError("there is no plan to review")
+    refuse_unaffordable(state, adapter, "a plan review")
+    task = f"plan-review-{tag}"
+    notify("a reviewer is reading the plan before any code is written")
+    res = adapter.run_agent(AgentRequest(
+        run_id, task, "aristotle", prompts.plan_review_prompt(state.contract, plan), ari.root, REVIEW_TIMEOUT_S,
+        read_only=True, should_stop=ari.stop_check(run_id),
+    ))
+    ari.record_session(run_id, task, "aristotle", res)
+    body = res.structured if res.status == "COMPLETED" else None
+    if not isinstance(body, dict) or not isinstance(body.get("concerns", []), list):
+        notify("plan review returned nothing usable")
+        return None
+    concerns = []
+    for c in body.get("concerns", []):
+        if not isinstance(c, dict) or not str(c.get("title", "")).strip():
+            continue
+        sev = str(c.get("severity", "")).upper()
+        concerns.append({"severity": sev if sev in PLAN_SEVERITIES else "MINOR",
+                         "title": str(c["title"]).strip(), "detail": str(c.get("detail", "")).strip()})
+    return {"summary": str(body.get("summary", "")), "concerns": concerns}
+
+
+def plan_feedback(review: dict[str, Any] | None) -> list[str]:
+    if not review or not review["concerns"]:
+        return []
+    return ["Before you build: a reviewer read your plan and raised these. Change the plan where they are right:"] + [
+        f"[{c['severity']}] {c['title']}" + (f": {c['detail']}" if c["detail"] else "") for c in review["concerns"]
+    ]
+
+
+def plan_round(ari: Ariadne, run_id: str, adapter: Adapter, notify: Notify = _quiet) -> list[str]:
+    """The Builder plans (read-only), a reviewer critiques it; the critique becomes round 1's feedback.
+    A failure anywhere here only means building without a reviewed plan."""
+    state = ari._running(run_id)
+    try:
+        refuse_unaffordable(state, adapter, "a design plan")
+        res = adapter.run_agent(AgentRequest(
+            run_id, "design-plan-1", "brunel", prompts.design_plan_prompt(prompts.builder_view(state)), ari.root,
+            REVIEW_TIMEOUT_S, read_only=True, should_stop=ari.stop_check(run_id),
+        ))
+        ari.record_session(run_id, "design-plan-1", "brunel", res)
+        plan = (res.structured or {}).get("plan") if res.status == "COMPLETED" else None
+        if not isinstance(plan, str) or not plan.strip():
+            notify("the builder gave no plan; building without a plan review")
+            return []
+        review = review_plan(ari, run_id, plan, adapter, notify)
+    except (DaedalusError, OSError) as exc:
+        notify(f"plan review skipped: {exc}")
+        return []
+    lines = plan_feedback(review)
+    if lines:
+        notify(f"plan review: {len(lines) - 1} concern(s) for the builder")
+    return lines
 
 
 # --------------------------------------------------------------------- build
 def build_round(
-    ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, feedback: list[str], notify: Notify = _quiet
+    ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, feedback: list[str], notify: Notify = _quiet,
+    coord: Coordinator | None = None,
 ) -> dict[str, Any]:
     """Plan, dispatch and run one in-place Builder package. Returns the Builder's structured result."""
     state = ari._running(run_id)
@@ -383,22 +537,34 @@ def build_round(
         ],
         actor=SYSTEM,
     )
-    w = ari.dispatch(run_id, task_id, principal="agent:brunel")
+    coord = coord or Coordinator(ari, run_id, notify)
+    name = coord.name("brunel", task_id, "agent:brunel")  # every round's name stands for agent:brunel
+    try:
+        return _run_build(ari, run_id, adapter, round_no, feedback, notify, state, task_id, coord, name)
+    finally:
+        coord.retire(name)
+
+
+def _run_build(ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, feedback: list[str], notify: Notify,
+               state: Any, task_id: str, coord: Coordinator, name: str | None) -> dict[str, Any]:
+    w = ari.dispatch(run_id, task_id, principal=name or "agent:brunel")
     notify(f"round {round_no}: Brunel is building ({task_id})")
     runnable, skipped = check_commands(state)
     try:
-        res = adapter.run_agent(
+        request = coord.prepare(
             AgentRequest(
                 run_id,
                 task_id,
                 "brunel",
-                prompts.builder_prompt(state.contract, feedback, round_no, runnable, skipped),
+                prompts.builder_prompt(prompts.builder_view(state), feedback, round_no, runnable, skipped),
                 ari.root,
                 BUILD_TIMEOUT_S,
                 should_stop=ari.stop_check(run_id),
                 run_commands=runnable,
-            )
+            ),
+            name,
         )
+        res = adapter.run_agent(request)
     except Exception as exc:
         ari.worker_finished(run_id, task_id, status="FAILED", note=f"adapter error: {exc}")
         raise
@@ -482,7 +648,8 @@ def _plan_packages(body: Any, round_no: int, taken: set[str] | frozenset[str] = 
 
 
 def fan_out_round(
-    ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, notify: Notify = _quiet
+    ari: Ariadne, run_id: str, adapter: Adapter, round_no: int, notify: Notify = _quiet,
+    coord: Coordinator | None = None,
 ) -> dict[str, Any] | None:
     """Plan, validate, run and integrate parallel packages.
 
@@ -496,7 +663,7 @@ def fan_out_round(
     notify(f"round {round_no}: Brunel is planning up to {cap} parallel packages")
     before = ari.capture(state).candidate_id
     plan_req = AgentRequest(
-        run_id, f"plan-{round_no}", "brunel", prompts.plan_prompt(state.contract, cap), ari.root,
+        run_id, f"plan-{round_no}", "brunel", prompts.plan_prompt(prompts.builder_view(state), cap), ari.root,
         REVIEW_TIMEOUT_S, read_only=True, should_stop=ari.stop_check(run_id),
     )
     try:
@@ -528,6 +695,7 @@ def fan_out_round(
         failures.append(f"{tid}: {why}")
 
     def finish(tid: str, out: AgentResult, *, integrate: bool = True) -> None:
+        coord.retire(names.get(tid))  # its session is over, whatever the outcome
         ok = ("COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED")
         body = out.structured or {}
         status = out.status if out.status in ok else "FAILED"
@@ -556,6 +724,8 @@ def fan_out_round(
 
     stop = ari.stop_check(run_id)
     runnable, skipped = check_commands(state)
+    coord = coord or Coordinator(ari, run_id, notify)
+    names: dict[str, str | None] = {}
     pool = ThreadPoolExecutor(max_workers=cap, thread_name_prefix="daedalus-worker")
     aborted = False
     try:
@@ -573,8 +743,9 @@ def fan_out_round(
                 if len(running) >= cap or not deps[tid] <= integrated:
                     continue
                 pending.remove(tid)
+                names[tid] = coord.name("brunel", tid, f"agent:worker:{tid}")
                 try:
-                    w = ari.dispatch(run_id, tid, principal=f"agent:worker:{tid}")
+                    w = ari.dispatch(run_id, tid, principal=names[tid] or f"agent:worker:{tid}")
                 except DaedalusError as exc:  # this package cannot start; the others go on
                     ari._worker_transition(run_id, tid, WorkerState.CANCELLED, f"dispatch failed: {exc}")
                     fail(tid, f"dispatch failed: {exc}")
@@ -582,10 +753,10 @@ def fan_out_round(
                 if not w.workspace:  # never let a parallel worker loose in the authoritative tree
                     finish(tid, AgentResult("FAILED", error="no isolated workspace"), integrate=False)
                     continue
-                req = AgentRequest(
-                    run_id, tid, "brunel", prompts.worker_prompt(state.contract, w.package, runnable, skipped),
+                req = coord.prepare(AgentRequest(
+                    run_id, tid, "brunel", prompts.worker_prompt(prompts.builder_view(state), w.package, runnable, skipped),
                     Path(w.workspace), BUILD_TIMEOUT_S, should_stop=stop, run_commands=runnable,
-                )
+                ), names[tid])
                 running[pool.submit(adapter.run_agent, req)] = tid
                 notify(f"dispatched {tid} ({len(running)}/{cap} running)")
             if not running:
@@ -625,6 +796,8 @@ def fan_out_round(
                 ari._worker_transition(run_id, tid, WorkerState.CANCELLED, "fan-out round ended")
                 fail(tid, "never started")
         pool.shutdown(wait=not aborted, cancel_futures=aborted)
+        for name in names.values():
+            coord.retire(name)
     return {"integrated": sorted(integrated), "failures": failures}
 
 
@@ -667,6 +840,12 @@ def drive(
     rounds = 0
     accepted_before_followup: Any = None  # the acceptable candidate a follow-up round started from
     followup_round = 0
+    coord = Coordinator(ari, run_id, notify)  # coordination settings are fixed for the whole drive
+    if ari.config().plan_review:
+        if ari.state(run_id).contract.budget.max_workers <= 1:
+            feedback = plan_round(ari, run_id, adapter, notify)  # round 1 builds against a reviewed plan
+        else:  # parallel runs plan their packages instead; a design plan would describe no one builder
+            notify("plan review skipped: this run may fan out to parallel workers (max_workers > 1)")
     for round_no in range(1, max_rounds + 1):
         if ari.state(run_id).execution is not ExecutionState.RUNNING:
             break  # cancelled (or finished) elsewhere: no further rounds
@@ -676,14 +855,14 @@ def drive(
         try:
             fan = None
             if round_no == 1 and ari.state(run_id).contract.budget.max_workers > 1:
-                fan = fan_out_round(ari, run_id, adapter, round_no, notify)
+                fan = fan_out_round(ari, run_id, adapter, round_no, notify, coord)
             if fan is not None and fan["failures"]:
                 feedback = ["parallel packages did not all land; finish the work in place:", *fan["failures"]]
                 continue
             built = (
                 {"_state": WorkerState.COMPLETED}
                 if fan is not None
-                else build_round(ari, run_id, adapter, round_no, feedback, notify)
+                else build_round(ari, run_id, adapter, round_no, feedback, notify, coord)
             )
         except DaedalusError as exc:  # budget, concurrency, or capability refusal
             notes.append(str(exc))
@@ -709,7 +888,7 @@ def drive(
             feedback = [r.message for r in decision.agent_fixable]
             continue
 
-        launch_required_reviews(ari, run_id, adapter, notify)
+        launch_required_reviews(ari, run_id, adapter, notify, coord)
         decision = ari.evaluate(run_id)
         if decision.acceptable:
             # One fix round for non-blocking findings. It never costs an acceptance: the acceptable
@@ -796,8 +975,14 @@ def followup_feedback(findings: list[Any]) -> list[str]:
         "Anything left open does not block acceptance."
     )
     return [head] + [
-        f"{f.finding_id} [{f.severity.value}] {f.title}. {f.required_change}".strip() for f in findings
-    ]
+        f"{f.finding_id} [{f.severity.value}] {f.title}. {f.required_change}{fix_aids(f)}".strip() for f in findings
+    ] + [WORKLIST_HINT]
+
+
+WORKLIST_HINT = (
+    "`daedalus findings` lists these. Answer each one: `daedalus findings answer F1 --fixed \"what changed\"` "
+    "(the re-review checks the claim) or `--dispute \"evidence\"` (it goes to arbitration)."
+)
 
 
 def left_open_note(decision: Decision, rounds: int) -> str:

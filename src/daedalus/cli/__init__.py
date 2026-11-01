@@ -49,11 +49,11 @@ def _interactive() -> bool:
 # Where each command is listed in `--help`. A command that is not named here still works and is
 # listed under "Advanced / internal", so a new module cannot vanish from the help.
 GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Start here", ("init", "demo", "status", "doctor")),
-    ("Daily", ("start", "run", "verify", "finish", "review", "cancel", "runs", "log", "audit", "on", "off")),
-    ("Human decisions", ("approve", "deny", "attest", "amend", "risk-exception", "resolve", "abandon")),
+    ("Start here", ("init", "demo", "status", "next", "risk", "doctor")),
+    ("Daily", ("start", "propose", "plan-review", "run", "verify", "finish", "review", "findings", "cancel", "runs", "log", "audit", "on", "off")),
+    ("Human decisions", ("confirm", "approve", "deny", "attest", "amend", "risk-exception", "resolve", "abandon")),
     ("Factory", ("factory",)),
-    ("Integrations", ("install", "plugins", "ci", "metrics", "report", "policy", "bus")),
+    ("Integrations", ("install", "plugins", "ci", "metrics", "calibration", "bench", "report", "policy", "bus", "mutate")),
     ("Advanced / internal", ("dispute", "arbitrate", "blocker", "restore", "hook", "statusline", "reconcile", "act")),
 )
 FALLBACK_GROUP = "Advanced / internal"
@@ -125,7 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--version", action="version", version=f"daedalus {__version__}")
-    p.add_argument("-C", "--dir", default=".", help="repository directory (default: current)")
+    # Default None so a command can tell `-C .` from no `-C` at all; `main` turns None into ".".
+    p.add_argument("-C", "--dir", default=None, help="repository directory (default: current)")
     # The flat list argparse would print is replaced by the grouped one in the epilog.
     sub = p.add_subparsers(dest="cmd", required=True, metavar="command", help=argparse.SUPPRESS)
     for mod in _command_modules():
@@ -150,6 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         try:
             args = build_parser().parse_args(argv)
+            args.dir_given = args.dir is not None
+            if args.dir is None:
+                args.dir = "."
         except SystemExit as exc:
             # `--help` and `--version` exit with their output still buffered; a usage
             # error keeps its own status even when stdout has gone away.

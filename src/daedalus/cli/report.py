@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from daedalus.cli._common import _ari, _print, _run_id, add_command
+from daedalus.cli._common import _ari, _print, _run_id, add_command, hidden_checks
 from daedalus.core.errors import DaedalusError
 
 
@@ -16,7 +16,10 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     ari = _ari(args)
     try:
-        report = build_report(ari, _run_id(ari, args, any_run=True))
+        rid = _run_id(ari, args, any_run=True)
+        if hidden_checks(ari.state(rid)):
+            raise DaedalusError("this run has held-out checks; its report names them, so a person runs it")
+        report = build_report(ari, rid)
     finally:
         ari.close()
     if args.format == "json":

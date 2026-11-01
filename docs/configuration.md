@@ -5,6 +5,7 @@
 | Mode            | Adds                                    | When                                   |
 |-----------------|-----------------------------------------|----------------------------------------|
 | `gate` (default)| Builder + trusted checks + predicate    | Most tasks                             |
+| `lite`          | + one short, cheap review (three questions, Haiku on Claude Code) | Every change, at pennies a review |
 | `review`        | + one focused reviewer (Aristotle)      | When you want a second look            |
 | `council`       | + Socrates, Mozi, Aristotle, James      | High-stakes work                       |
 
@@ -16,6 +17,11 @@ and set `budget: {max_workers: 2}` in the run's contract file (`daedalus run --c
 Risk floors apply in every mode. Touching `**/auth/**`, migrations, CI or
 lockfiles raises the tier, and the tier sets the reviews and approvals that are
 mandatory. A mode can add requirements but can never remove them.
+
+Lite mode is the cheap way in: one review per change that answers three questions (does it meet the
+contract, what does it break, would the tests catch it), with a stated confidence on each finding. It runs on
+`lite: {model: ...}` if set, else Haiku with the `claude-code` adapter, else the adapter's review model.
+Risk floors still apply: a review the tier requires (auth, migrations, weakened tests ...) is always the full one.
 
 By default the `high` tier requires three independent reviews and no human approval; `critical` also
 requires a `merge` approval. To put a human on high-tier merges, add `approvals: [merge]` to the `high` entry of
@@ -34,12 +40,76 @@ adapter:                    # used by `daedalus run` / `daedalus review`
 checks:
   tests: python -m pytest -q
   typecheck: {command: [mypy, src]}
+coordination: true          # launched agents coordinate over a message bus (default on; docs/coordination.md)
+compare_base: true          # a failing required check is re-run once on the base: "was it already failing?"
+lite: {model: haiku}        # the model lite-mode reviews run on (optional)
 policy:                     # optional: override any key of the default policy
   path_floors:
     - {name: billing, patterns: ["src/billing/**"], tier: high}
 ```
 
 `daedalus policy --default` prints the full default policy.
+
+### Was it already failing?
+
+When a required check fails, Daedalus runs it once more on a clean checkout of the run's base revision (a
+temporary git worktree, with the checkout's `src/` first on `PYTHONPATH`). If it fails there too, the block
+message and every review prompt say so: the change probably did not cause it. The check must still pass before
+acceptance; this only stops reviewers and builders from blaming the change for an old failure. Results are kept
+per base revision and check definition, so runs that share a base pay once (delete `.daedalus/baseline/` to
+forget them). A failure counts only if a second run on the base fails too, so a flaky check labels nothing. A clean checkout has no untracked
+files (an `.env`, installed node modules), so a check that needs them may fail there for that reason alone.
+`compare_base: false` turns it off.
+
+### Test strength (mutation)
+
+The gate is only as good as the tests it runs. `daedalus mutate` checks them: it breaks the changed
+Python lines on purpose, one small break at a time (`==` to `!=`, `and` to `or`, `+` to `-`,
+`return x` to `return None`, and so on), and runs your tests against each break in a throwaway
+copy of the tree. A break the tests do not notice "survives", and is listed with its file and line:
+
+```yaml
+checks:
+  tests: python -m pytest -q
+  mutation: {command: [daedalus, mutate, --, python, -m, pytest, -q, -x], mandatory: false, cache: false}
+```
+
+Changed lines are those since the run's base: Daedalus gives every check `DAEDALUS_BASE_REVISION`.
+`cache: false` matters, because the result depends on the base, not only on the tree. The check
+fails below `--min-score` (default 0.8), and exits 2 if the tests fail before any break. Use
+`--max` (default 30 mutants) and `--timeout` (seconds per test run) to bound the cost. Test files
+are never mutated, and the working tree is never touched.
+
+### Holdout checks
+
+A check with `holdout: true` gates acceptance like any other, but the builder never sees it:
+
+```yaml
+checks:
+  tests: python -m pytest -q
+  acceptance: {command: [python, -m, pytest, -q, ../holdout-tests], holdout: true}
+```
+
+Builder, worker and planner prompts leave it out of the required checks, and say only that a
+criterion is "verified by a held-out check". It is never granted as a command the builder may
+run. When it fails, the builder is told that a holdout check failed, without its name, output or
+log path.
+
+Inside an agent session (`DAEDALUS_AGENT` or `CLAUDECODE` set):
+- `daedalus status` shows its row as `(held out)` (and `held-out` in `--json`);
+- `daedalus log` shows its events as "a held-out check";
+- `daedalus log --json` and `daedalus report` refuse, because they would show the pinned policy
+  and the check by name.
+
+You see everything outside an agent session. Its logs are written **outside the repository**,
+under `~/.daedalus/holdout/` (or `$DAEDALUS_HOLDOUT_DIR`), not next to the other check logs.
+
+This hides the holdout from what Daedalus shows the builder. It is not a sandbox. The builder
+runs as you, and can read anything you can: `.daedalus.yml` (which holds the check's command),
+the held-out tests if they sit in the repository, and the log directory above. Launched
+reviewers are confined to their working directory, but launched builders are not. So keep the
+held-out tests **outside the repository**, somewhere only the check's command points to (as
+above). Treat a holdout as a check the builder is not *told* about, not one it *cannot* find.
 
 Budgets keep two currencies apart. `max_cost` caps everything a run is charged, including
 API-equivalent estimates from subscription sessions; `max_cash` caps money actually billed and

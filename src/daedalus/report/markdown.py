@@ -7,6 +7,7 @@ cannot inject HTML, close a `<details>` block, break a table row or start a head
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from daedalus.report.model import FOOTER, ICONS, Report, headline_parts, money, risk_line, strip_controls, utc
 
@@ -100,7 +101,7 @@ def _render(r: Report, cap: int) -> str:
     out += _section("Verdict and risk", _verdict(r), open_=True)
     if r.criteria:
         out += _section(f"Acceptance criteria ({len(r.criteria)})", [
-            f"- {code(c.criterion_id)} {esc(c.description, 400)}" + (f" (proved by {esc(', '.join(c.checks))})" if c.checks else " (needs a human)")
+            f"- {code(c.criterion_id)} {esc(c.description, 400)}" + _proof(c, esc)
             for c in r.criteria[:cap]
         ] + (_more(len(r.criteria) - cap, "criteria") if len(r.criteria) > cap else []))
     out += _section(f"Checks ({len(r.checks)})", _checks(r, cap))
@@ -189,3 +190,9 @@ def _audit(r: Report) -> list[str]:
     state = "verified" if a.verified else "NOT verified: " + esc(a.error, 200)
     return [f"- Hash chain {state} ({a.events} events in the log, {a.run_events} in this run)",
             f"- Head hash: {code(a.head_hash or '-', 80)}"]
+
+
+def _proof(c: Any, esc: Any) -> str:
+    if c.general and c.checks:
+        return f" (not checked specifically; only the general checks ran: {esc(', '.join(c.checks))})"
+    return f" (proved by {esc(', '.join(c.checks))})" if c.checks else " (needs a human)"

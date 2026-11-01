@@ -3,6 +3,10 @@
 Not a human-authority command: agents use it. A session launched through
 `coordination.surface.attach` already has DAEDALUS_BUS_DIR, DAEDALUS_RUN_ID and
 DAEDALUS_AGENT_NAME set; elsewhere pass --bus-dir, --run and --as.
+
+Inside such a session (DAEDALUS_AGENT_NAME set), the command acts only as that agent, on its run's
+channel: --as, --run, -C and --bus-dir may not point anywhere else, and the maintenance commands
+(`reconcile`, `expire`, which touch every agent's delivery) are for the orchestrator or a person.
 """
 
 from __future__ import annotations
@@ -16,16 +20,40 @@ from typing import Any
 from daedalus.cli._common import _ari, _print, _run_id, add_command
 from daedalus.coordination.bus import FileBus
 from daedalus.coordination.channel import Channel, render
+from daedalus.coordination.launch import ENV_REPO, bus_root
 from daedalus.coordination.surface import ENV_AGENT, ENV_BUS_DIR, ENV_RUN
-from daedalus.core.config import STATE_DIR
 from daedalus.core.errors import DaedalusError
+
+
+MAINTENANCE = ("reconcile", "expire")
+
+
+def _confine(args: argparse.Namespace) -> None:
+    """Hold an agent session to its own name, run, repository and bus."""
+    me = os.environ.get(ENV_AGENT)
+    if not me:
+        return
+    if args.bus_cmd in MAINTENANCE:
+        raise DaedalusError(f"`daedalus bus {args.bus_cmd}` is not for agent sessions")
+
+    def same(flag: str, given: str | None, env: str, paths: bool = False) -> None:
+        mine = os.environ.get(env)
+        if given is None or mine is None:
+            return
+        if (Path(given).resolve() != Path(mine).resolve()) if paths else (given != mine):
+            raise DaedalusError(f"{flag} must be this session's own ({env}={mine})")
+
+    same("--as", args.as_, ENV_AGENT)
+    same("--run", args.run, ENV_RUN)
+    same("--bus-dir", args.bus_dir, ENV_BUS_DIR, paths=True)
+    same("-C", args.dir if getattr(args, "dir_given", False) else None, ENV_REPO, paths=True)
 
 
 def _channel(args: argparse.Namespace, ari: Any) -> Channel:
     if not getattr(args, "run", None) and os.environ.get(ENV_RUN):
         args.run = os.environ[ENV_RUN]
     run_id = _run_id(ari, args, any_run=True)
-    where = args.bus_dir or os.environ.get(ENV_BUS_DIR) or str(ari.root / STATE_DIR / "bus")
+    where = args.bus_dir or str(bus_root(ari))  # $DAEDALUS_BUS_DIR, then `coordination: bus_dir`
     return Channel(ari, run_id, FileBus(Path(where)))
 
 
@@ -41,6 +69,9 @@ def _out(args: argparse.Namespace, obj: Any, text: str) -> None:
 
 
 def cmd_bus(args: argparse.Namespace) -> int:
+    _confine(args)
+    if not getattr(args, "dir_given", True) and os.environ.get(ENV_REPO):
+        args.dir = os.environ[ENV_REPO]  # a worker in its worktree still talks to its run's repository
     ari = _ari(args)
     try:
         ch = _channel(args, ari)  # inside the try: a bad --run or bus dir still closes the store

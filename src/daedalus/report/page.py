@@ -7,6 +7,7 @@ the rule is simple enough to audit, and a finding's text is hostile until proven
 from __future__ import annotations
 
 import html
+from typing import Any
 
 from daedalus.report.model import FOOTER, Report, headline_parts, money, risk_line, strip_controls, utc
 
@@ -107,8 +108,14 @@ def _verdict(r: Report) -> str:
     return _sec("Verdict", dl + (f"<h3>Reasons</h3><ul>{why}</ul>" if why else ""))
 
 
+def _proof(c: Any) -> str:
+    if c.general and c.checks:
+        return ", ".join(c.checks) + " (general only: nothing checks it specifically)"
+    return ", ".join(c.checks) or "needs a human"
+
+
 def _criteria(r: Report) -> str:
-    rows = [[_code(c.criterion_id), h(c.description), h(", ".join(c.checks) or "needs a human")] for c in r.criteria]
+    rows = [[_code(c.criterion_id), h(c.description), h(_proof(c))] for c in r.criteria]
     return _sec("Acceptance criteria", _table(["id", "criterion", "proved by"], rows, "None.")) if rows else ""
 
 

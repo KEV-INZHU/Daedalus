@@ -1,5 +1,7 @@
 # Daedalus build plan
 
+> Open items from this plan now live in [../roadmap.md](../roadmap.md), with what has shipped since.
+
 Tracks implementation of the v6 specification (engineering control plane) with the
 "togglable gate" packaging: a strong deterministic core behind a small surface
 (`daedalus on/off`, a short contract, `daedalus status`). Tick items as they land.

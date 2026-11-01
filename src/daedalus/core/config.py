@@ -11,11 +11,14 @@ The user-facing file is deliberately small:
     cache: {checks: true, reviews: true, max_age_s: 86400}  # reuse verified evidence across runs (default on)
     harness:
       auto_finish: true    # `daedalus verify` records acceptance when every condition holds
+    plan_review: false     # `daedalus run`: a reviewer critiques the Builder's plan before it codes
+    coordination: true     # launched agents coordinate over a message bus (default on); or
+                           # {enabled: true, bus_dir: path} to share a bus with other tools
     preset: solo           # solo | standard | strict: a named overlay on the default policy
     policy: {...}          # optional overrides of any default-policy key (they win over the preset)
     policy_file: path.yaml # or: a complete policy file instead of the default
 
-Everything that is not UX (enabled/mode/adapter/harness) becomes the policy
+Everything that is not UX (enabled/mode/adapter/harness/coordination) becomes the policy
 whose hash every run pins. With no `.daedalus.yml`, Daedalus uses the default
 policy and detects a test command, so `daedalus run "..."` works zero-config.
 """
@@ -33,8 +36,8 @@ from typing import Any
 import yaml
 
 from daedalus.core.contracts import MODES
-from daedalus.core.paths import MAKEFILE_NAMES
 from daedalus.core.errors import PolicyError
+from daedalus.core.paths import MAKEFILE_NAMES
 from daedalus.core.policy import (
     DEFAULT_MAX_AGE_S,
     Policy,
@@ -62,6 +65,18 @@ class RepoConfig:
     cache_reviews: bool = True  # reuse approving review verdicts likewise
     cache_max_age_s: int = DEFAULT_MAX_AGE_S  # a source older than this is not reused
     preset: str = ""  # the named policy preset in effect, if any
+    # Agents launched by `daedalus run` coordinate over a message bus (docs/coordination.md). Not policy:
+    # the bus never decides acceptance, so turning it off changes no run's outcome rules.
+    coordination: bool = True
+    bus_dir: str | None = None  # bus root, relative to the repository; default .daedalus/bus
+    # `daedalus run` has the Builder plan first and a reviewer critique the plan before any code is
+    # written (two extra read-only sessions). Advice only: it never decides acceptance.
+    plan_review: bool = False
+    # Model for lite-mode reviews (`lite: {model: ...}`), overriding the adapter's review model; None keeps it.
+    lite_model: str | None = None
+    # When a required check fails, run it once on a clean checkout of the base revision and say if it
+    # was already failing (verification/baseline.py). Advice only; `compare_base: false` turns it off.
+    compare_base: bool = True
 
     @property
     def policy(self) -> Policy:
@@ -309,6 +324,23 @@ def load_config(root: str | Path, *, preset: str | None = None) -> RepoConfig:
     harness = {**(layer.get("harness") or {}), **dict(cfg.get("harness") or {})}
     if "auto_finish" in harness and not isinstance(harness["auto_finish"], bool):
         raise PolicyError("`harness: auto_finish` must be true or false")
+    coordination, bus_dir = _coordination(cfg.get("coordination", True))
+    plan_review = cfg.get("plan_review", False)
+    if not isinstance(plan_review, bool):
+        raise PolicyError("`plan_review:` must be true or false")
+    compare_base = cfg.get("compare_base", True)
+    if not isinstance(compare_base, bool):
+        raise PolicyError("`compare_base:` must be true or false")
+    lite = cfg.get("lite") or {}
+    if not isinstance(lite, dict) or set(lite) - {"model"} or (
+            "model" in lite and (not isinstance(lite["model"], str) or not lite["model"].strip())):
+        raise PolicyError("`lite:` must be a mapping with only `model` (a model name)")
+    if bus_dir is not None:
+        where, top = (root / bus_dir).resolve(), root.resolve()
+        state = top / STATE_DIR
+        if (where == top or top in where.parents) and where != state and state not in where.parents:
+            # Its files would be part of every candidate: each message would change the tree under review.
+            raise PolicyError(f"`coordination: bus_dir` must be under {STATE_DIR}/ or outside the repository")
     return RepoConfig(
         root=root,
         enabled=bool(cfg.get("enabled", True)),
@@ -322,7 +354,27 @@ def load_config(root: str | Path, *, preset: str | None = None) -> RepoConfig:
         cache_reviews=cache_flag(cache.get("reviews"), "`cache: reviews`"),
         cache_max_age_s=cache_max_age(cache.get("max_age_s"), "`cache: max_age_s`", DEFAULT_MAX_AGE_S),
         preset=preset,
+        coordination=coordination,
+        bus_dir=bus_dir,
+        plan_review=plan_review,
+        lite_model=lite["model"].strip() if lite.get("model") else None,
+        compare_base=compare_base,
     )
+
+
+def _coordination(v: Any) -> tuple[bool, str | None]:
+    """`coordination: true|false`, or `{enabled: bool, bus_dir: path}`."""
+    if isinstance(v, bool):
+        return v, None
+    if not isinstance(v, dict) or set(v) - {"enabled", "bus_dir"}:
+        raise PolicyError("`coordination:` must be true, false, or a mapping with `enabled` and `bus_dir`")
+    enabled = v.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise PolicyError("`coordination: enabled` must be true or false")
+    bus_dir = v.get("bus_dir")
+    if bus_dir is not None and (not isinstance(bus_dir, str) or not bus_dir.strip()):
+        raise PolicyError("`coordination: bus_dir` must be a path")
+    return enabled, bus_dir
 
 
 TOGGLE_FILE = "enabled"

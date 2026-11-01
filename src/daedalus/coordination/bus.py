@@ -27,31 +27,13 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+from daedalus.coordination import buslock
 from daedalus.core.errors import DaedalusError
 
 TOPIC = "daedalus"
 DEFAULT_TOPICS = (TOPIC,)
 PRIORITIES = ("low", "normal", "high", "urgent")
 
-if os.name == "nt":
-    import msvcrt
-
-    def _try_lock(fh: Any) -> None:
-        fh.seek(0)
-        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-
-    def _unlock(fh: Any) -> None:
-        fh.seek(0)
-        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-
-else:
-    import fcntl
-
-    def _try_lock(fh: Any) -> None:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-    def _unlock(fh: Any) -> None:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 class BusError(DaedalusError):
@@ -188,26 +170,14 @@ class FileBus:
                 finally:
                     self._depth -= 1
                 return
-            fh = (self.root / ".lock").open("a+b")
-            deadline = time.monotonic() + timeout_s
-            while True:
-                try:
-                    _try_lock(fh)
-                    break
-                except OSError:
-                    if time.monotonic() > deadline:
-                        fh.close()
-                        raise BusError(f"bus at {self.root} stayed locked for {timeout_s:g}s") from None
-                    time.sleep(0.01)
             self._depth = 1
             try:
-                yield
+                with buslock.locked(self.root, timeout_s):  # the same lock `bus.py` can take
+                    yield
+            except buslock.LockTimeout as exc:
+                raise BusError(str(exc)) from None
             finally:
                 self._depth = 0
-                try:
-                    _unlock(fh)
-                finally:
-                    fh.close()
 
     # ----------------------------------------------------------- subscribers
     def subscribers(self) -> dict[str, dict[str, Any]]:

@@ -28,6 +28,7 @@ class CriterionRow:
     criterion_id: str
     description: str
     checks: list[str] = field(default_factory=list)
+    general: bool = False  # only the general checks cover it: nothing checks this criterion in particular
 
 
 @dataclass
@@ -230,7 +231,7 @@ def build_report(ari: Any, run_id: str) -> Report:
         objective=state.contract.objective,
         mode=state.mode,
         scope=list(state.contract.scope),
-        criteria=[CriterionRow(c.criterion_id, c.description, list(c.checks))
+        criteria=[CriterionRow(c.criterion_id, c.description, list(c.checks), c.general)
                   for c in state.contract.acceptance_criteria],
         contract_version=state.contract.contract_version,
         base_revision=state.contract.base_revision or "",
@@ -305,7 +306,10 @@ def _reviews(state: Any, events: list[Any]) -> list[ReviewRow]:
         src = raw.get("reused_from") if isinstance(raw.get("reused_from"), dict) else None
         model = ""
         if src is None and r.source == "launched":
-            model = models.get((r.perspective, r.reviewer.rsplit(":", 1)[-1]), "")
+            # The session id recorded with the review, when there is one: a reviewer's name need not
+            # end with it (a registered coordination name ends with its own uuid).
+            sid = raw.get("session_id") if isinstance(raw.get("session_id"), str) else None
+            model = models.get((r.perspective, sid[:8] if sid else r.reviewer.rsplit(":", 1)[-1]), "")
         counts: dict[str, int] = {}
         for f in raw.get("findings", ()):
             counts[f["severity"]] = counts.get(f["severity"], 0) + 1

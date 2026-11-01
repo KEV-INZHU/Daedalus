@@ -6,22 +6,106 @@ and versions follow [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Upgrading
-- A run that registers coordination agents records `agent.registered` and `agent.retired` events. Earlier
+- Runs record new event types (`agent.registered`, `agent.retired`, `contract.proposed`,
+  `contract.proposal_rejected`, `finding.answered`). Earlier
   versions do not know these events and refuse to replay such a run, so read it with this version or later.
+- Runs may record `finding.judged` and `baseline.checked`. Earlier versions refuse to replay such a run.
+- The review prompt changed (forecast fields, and the track record when there is one), so reviews cached by
+  earlier versions are not reused.
+- Contracts may record `general: true` on a criterion. Earlier versions read such a contract but drop the
+  marker, so they show the criterion as proved by its checks; read these runs with this version or later.
 
 ### Added
-- Agent coordination over the shared filesystem bus, as a library API that orchestrators opt into
+- Calibrated reviews ([docs/calibration.md](docs/calibration.md)): each finding carries the reviewer's
+  `confidence` that it is real, `against` (the strongest reason it could be wrong) and optionally `failing_test`;
+  each review carries `residual_risk`, its probability that a MAJOR-or-worse defect it did not report remains.
+  The builder sees the confidence and the failing test in its feedback. A bad or missing probability never
+  fails a review.
+- `daedalus calibration`: Brier score, skill against the base rate, reliability and resolution, a calibration
+  table and the most confident false alarms, by perspective, model or severity. Findings are scored by confirmed
+  fixes, arbiter rulings and `daedalus findings judge F# valid|invalid` (a person's verdict, after the run if need
+  be; agents cannot record one); residual risk by escaped defects (`Fixes-Run:`).
+- Track record in the prompt: once a perspective has five findings with a known outcome, its next review starts
+  from how many held up, whether its confidence ran high, and its recent false alarms.
+- `mode: lite`: one short review per change (three questions: contract, breakage, proof), on `lite: {model}` or
+  Haiku with Claude Code. Reviews the risk tier requires are always full.
+- Was it already failing? A required check that fails is run once on a clean checkout of the base revision; if it
+  fails there too, the block message and review prompts say so. Advice only; `compare_base: false` turns it off.
+- `daedalus bench`: a planted-bug benchmark (ten bugs, four clean controls) reporting recall, unfounded findings,
+  calibration and cost per review, for the configured adapter, the lite setup, or any `--reviewer-cmd`.
+- `daedalus risk [PATH ...]`: preview the tier your uncommitted changes (or the paths you name) reach, which risk
+  floors and files set it, any weakened tests, and the reviews and approvals it requires. It records nothing.
+- `daedalus/coordination/buslock.py`: the bus's writer lock as one standard-library-only file, so the shared
+  `bus.py` can copy it and take the same lock as Daedalus (docs/coordination.md shows the two-line change).
+- Factory ship step: `factory: {ship: {push: origin, pull_request: true, base: main}}` pushes the integration
+  branch after a line ships orders and opens a pull request with `gh` (logged as `line.pushed`). Off by default; a
+  failure is reported and never undoes what shipped.
+- `daedalus metrics`: review spend by perspective (cost, findings, cost per finding), and, for fan-out runs, time
+  saved by running packages in parallel against integration time and failures (`review_spend`,
+  `parallel_saved_s`, `integration_s`, `integration_failures` in `--json`).
+- `daedalus next`: one line saying what the open run needs now and from whom: the agent's own fixes first, then
+  what Daedalus runs itself, then decisions only a person can make (`--json` too).
+- Plan review before coding: `plan_review: true` makes `daedalus run` have the Builder plan first (read-only) and an
+  independent reviewer critique the plan; its concerns become round 1's "Before you build" feedback.
+  `daedalus plan-review "plan"` (or `--file`) does the same in an interactive session. Advice only: no review or
+  finding is recorded, only the sessions' cost.
+- Test strength: `daedalus mutate -- <test command>` mutates the changed Python lines (comparisons, boolean and
+  arithmetic operators, `not`, returns) in a throwaway copy and reports the mutants the tests let through. Fit to
+  run as a non-mandatory check. Every check now gets `DAEDALUS_BASE_REVISION` (the run's base).
+- Escaped-defect tracking: a commit with a `Fixes-Run: <run id>` trailer marks that accepted run as having let a
+  defect through; `daedalus metrics` reports escaped defects and the escape rate (`escaped_by` per run in `--json`).
+- Live coordination delivery: a launched `claude-code` builder that coordinates gets a `PostToolUse` hook
+  (`daedalus hook bus`, passed with `--settings`) that adds its new bus messages to the session's context after
+  each tool call, fenced as peer data.
+- Holdout checks: `holdout: true` on a check keeps it out of every builder, worker and planner prompt and
+  out of the builder's command grants, and its failures reach the builder without name, output or log path. It
+  still gates acceptance like any required check ([docs/configuration.md](docs/configuration.md)).
+- Findings as a worklist: `daedalus findings` lists a run's findings (`--all`, `--json`), and
+  `daedalus findings answer F1 --fixed "note"` or `--dispute "evidence"` answers one. A fix note
+  (`finding.answered`) resolves nothing: the next review of that perspective sees it, quoted, and resolves the
+  finding only if the change bears it out. Gate feedback now points at the worklist.
+- Proposed contracts: `daedalus propose "objective" -c criterion` (agents may run it) records a suggested
+  objective and criteria (`contract.proposed`), and `daedalus confirm` (human only) applies it as an amendment, or
+  rejects it with `--reject`. A run the harness opens asks the agent to propose one; a pending proposal shows in
+  `daedalus status` and the stop hook's "Needs you" list.
+- Agent coordination over the shared filesystem bus, **on by default for `daedalus run`**
   (`daedalus.coordination`, `daedalus bus`, [docs/coordination.md](docs/coordination.md)). `Channel.spawn` mints
   an `agent:<role>:<uuid>` name and has Ariadne register it against the run, task, role and principal.
   `surface.attach` puts the run's context and unread messages into a launch request, fenced as peer data. The
   per-run channel has threaded messages, a context bootstrap for late joiners, restart recovery with message-id
   deduplication, and published/delivered/seen/acted receipts. Reviewers do not see each other's findings on a
-  candidate before submitting their own review of it. Daedalus's own launch paths do not call these yet.
-- `AgentRequest.env`: extra environment for a launched session (the command adapter passes it through).
+  candidate before submitting their own review of it. Launched builders and parallel workers get a registered
+  name, the run's context in their prompt, and a separate grant to run `daedalus bus`. Launched reviewers get a
+  registered name but no peer messages, and their findings are posted after they are recorded. Turn it off with
+  `coordination: false`, or share a bus with `coordination: {bus_dir: path}`. A coordination failure never
+  fails a run.
+- `AgentRequest.env` and `AgentRequest.bus_commands`: extra environment and coordination-command grants for a
+  launched session (the command adapter passes both through; read-only sessions never get the grant).
 
 ### Changed
+- A reviewer's diff over the size limit no longer loses its end: every file keeps a fair share, cut at a hunk
+  boundary, and the files cut short or left out are named so the reviewer reads them from the repository.
+- Criteria nothing checks in particular are no longer shown as proved. A `-c` criterion bound only to the mandatory
+  checks is marked `general`: `start`, `verify` and the report say no check tests it specifically, and the
+  builder's prompt asks for a test that fails unless it holds. Naming a dedicated check with `--check` makes it
+  specific. Acceptance is unchanged.
+- Block output is shorter: the reviews a candidate still needs are one line, and what happens to them (launched
+  automatically, or no adapter can launch them) is said once. The test-integrity reason is shorter too.
+  `daedalus next` hands reviews no adapter can launch to a person, with the fix.
+- `daedalus init` says why it set no reviewer: `claude` is missing, or its sessions would be billed and runs allow
+  no billed spend by default (with the `max_cash` setting that allows it).
+- A check that fails because a Python module is not installed says it looks like a missing tool (never for a
+  module the repository itself provides), with the bootstrap fix for fresh containers.
+- Messages people read name roles by what they do: "a quality review (Aristotle)", "the arbiter (Plato)", in gate
+  reasons, the stop hook and `daedalus run` progress. Commands, reason codes and the audit log keep the ids
+  (`daedalus review aristotle`, `review:aristotle`).
 - Every authorship check (review, arbitration, acceptance, review reuse) follows a name's registered
-  principal, so a new alias does not let a builder review its own candidate.
+  principal, so a new alias does not let a builder review its own candidate. So does resolving a finding or a
+  blocker: any alias of the principal that raised it counts as the raiser.
+- `-C` defaults to unset rather than `.`, so a command can tell an explicit `-C .` from none (the
+  effective directory is unchanged).
+- Launched builders, workers and reviewers are recorded under their generated names (for example
+  `agent:brunel:<uuid>` rather than `agent:brunel`) while coordination is on.
 
 ## 0.2.0
 

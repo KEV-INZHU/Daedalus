@@ -11,9 +11,15 @@ declare the task done, waive a check, or approve anything on a human's behalf.
 
 ## Loop
 
-1. Read the contract: `daedalus status` (objective, scope, acceptance criteria, required checks). If no
+1. Read the contract: `daedalus status` (`daedalus next` says in one line what is needed now) (objective, scope, acceptance criteria, required checks). If no
    run is open yet, your first file edit opens one for the user's request.
-2. Make changes **inside the contract scope only**. Changes outside it are recorded as violations.
+   A run opened that way starts from the raw request and one generic criterion. Propose a contract worth
+   holding the work to, early: `daedalus propose "<one or two sentence objective>" -c "<testable
+   criterion>" ...` (use `--attest` for one only a person can judge). Nothing changes until the user
+   confirms it with `daedalus confirm`; tell them it is waiting.
+2. For a change with real design choices, write a short plan first and run
+   `daedalus plan-review "<plan>"`: an independent reviewer flags the choices that would be expensive to undo
+   (advice only; it never counts as a review). Then make changes **inside the contract scope only**. Changes outside it are recorded as violations.
 3. Prove each acceptance criterion with a test the required checks run. Evidence binds to the exact
    working tree, so any later edit makes it STALE.
 4. Stop when you believe the work is done. The gate then runs the checks and launches the required
